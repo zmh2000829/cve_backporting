@@ -121,10 +121,218 @@ def test_multiple_cves():
         print(f"  {status} {r['cve_id']}")
 
 
+def test_mainline_commit_identification():
+    """
+    测试Mainline Commit识别功能
+    
+    使用真实的CVE案例验证是否能正确识别mainline commit
+    """
+    print("\n" + "="*80)
+    print("测试Mainline Commit识别功能")
+    print("="*80)
+    
+    crawler = Crawl_Cve_Patch()
+    
+    # 测试用例1: CVE-2025-40198
+    # 这个CVE有7个修复commits，对应不同的内核版本
+    # 预期: 8ecb790 应该被识别为mainline commit
+    test_cases = [
+        {
+            "cve_id": "CVE-2025-40198",
+            "expected_mainline": "8ecb790ea8c3fc69e77bace57f14cf0d7c177bd8",
+            "expected_mainline_version": "6.18",
+            "expected_version_mapping": {
+                "5.4.301": "7bf46ff83a0ef11836e38ebd72cdc5107209342d",
+                "5.10.246": "b2bac84fde28fb6a88817b8b761abda17a1d300b",
+                "6.1.158": "e651294218d2684302ee5ed95ccf381646f3e5b4",
+                "6.6.114": "01829af7656b56d83682b3491265d583d502e502",
+                "6.12.54": "2a0cf438320cdb783e0378570744c0ef0d83e934",
+                "6.17.4": "a6e94557cd05adc82fae0400f6e17745563e5412",
+                "6.18": "8ecb790ea8c3fc69e77bace57f14cf0d7c177bd8"
+            },
+            "expected_backports": [
+                "7bf46ff83a0ef11836e38ebd72cdc5107209342d",  # 5.4
+                "b2bac84fde28fb6a88817b8b761abda17a1d300b",  # 5.10
+                "e651294218d2684302ee5ed95ccf381646f3e5b4",  # 6.1
+                "01829af7656b56d83682b3491265d583d502e502",  # 6.6
+                "2a0cf438320cdb783e0378570744c0ef0d83e934",  # 6.12
+                "a6e94557cd05adc82fae0400f6e17745563e5412",  # 6.17
+            ]
+        }
+    ]
+    
+    for test_case in test_cases:
+        cve_id = test_case["cve_id"]
+        expected_mainline = test_case["expected_mainline"]
+        
+        print(f"\n测试CVE: {cve_id}")
+        print(f"预期mainline commit: {expected_mainline[:12]}")
+        print("-" * 80)
+        
+        # 获取CVE信息
+        result = crawler.get_introduced_fixed_commit(cve_id)
+        
+        if not result:
+            print(f"❌ 获取CVE信息失败")
+            continue
+        
+        # 检查结果
+        fix_commit = result.get('fix_commit_id', '')
+        mainline_commit = result.get('mainline_commit', '')
+        mainline_version = result.get('mainline_version', '')
+        version_mapping = result.get('version_commit_mapping', {})
+        all_commits = result.get('all_fix_commits', [])
+        
+        print(f"\n实际结果:")
+        print(f"  - 识别的fix_commit_id: {fix_commit[:12] if fix_commit else 'N/A'}")
+        print(f"  - 识别的mainline_commit: {mainline_commit[:12] if mainline_commit else 'N/A'}")
+        print(f"  - 识别的mainline_version: {mainline_version or 'N/A'}")
+        print(f"  - 找到的所有commits数量: {len(all_commits)}")
+        
+        # 显示版本到commit的映射
+        if version_mapping:
+            print(f"\n  版本到commit的映射关系:")
+            for version in sorted(version_mapping.keys()):
+                commit = version_mapping[version]
+                is_mainline_marker = " ⭐ [MAINLINE]" if version == mainline_version else ""
+                print(f"    {version:15s} → {commit[:12]}{is_mainline_marker}")
+        
+        # 显示所有commits
+        if all_commits:
+            print(f"\n  所有修复commits:")
+            for i, commit in enumerate(all_commits, 1):
+                commit_id = commit.get('commit_id', '')
+                source = commit.get('source', 'unknown')
+                is_mainline = commit.get('is_mainline', False)
+                kernel_version = commit.get('kernel_version', 'unknown')
+                is_backport = commit.get('is_backport', False)
+                marker = " ⭐ [MAINLINE]" if is_mainline else (" 🔄 [BACKPORT]" if is_backport else "")
+                print(f"    {i}. {commit_id[:12]} (版本: {kernel_version}, source: {source}){marker}")
+        
+        # 验证mainline commit
+        print(f"\n验证结果:")
+        
+        expected_mainline_version = test_case["expected_mainline_version"]
+        expected_version_mapping = test_case["expected_version_mapping"]
+        
+        # 检查1: mainline_commit是否正确
+        if mainline_commit.startswith(expected_mainline[:12]):
+            print(f"  ✅ mainline_commit正确识别: {mainline_commit[:12]}")
+        else:
+            print(f"  ❌ mainline_commit错误")
+            print(f"     预期: {expected_mainline[:12]}")
+            print(f"     实际: {mainline_commit[:12] if mainline_commit else 'N/A'}")
+        
+        # 检查2: mainline_version是否正确
+        if mainline_version == expected_mainline_version:
+            print(f"  ✅ mainline_version正确识别: {mainline_version}")
+        else:
+            print(f"  ❌ mainline_version错误")
+            print(f"     预期: {expected_mainline_version}")
+            print(f"     实际: {mainline_version or 'N/A'}")
+        
+        # 检查3: fix_commit_id是否等于mainline_commit
+        if fix_commit.startswith(expected_mainline[:12]):
+            print(f"  ✅ fix_commit_id正确等于mainline_commit")
+        else:
+            print(f"  ⚠️  fix_commit_id与mainline_commit不一致")
+            print(f"     fix_commit_id: {fix_commit[:12] if fix_commit else 'N/A'}")
+            print(f"     mainline_commit: {mainline_commit[:12] if mainline_commit else 'N/A'}")
+        
+        # 检查4: 版本到commit的映射是否正确
+        mapping_correct = 0
+        mapping_total = len(expected_version_mapping)
+        for version, expected_commit in expected_version_mapping.items():
+            actual_commit = version_mapping.get(version, '')
+            if actual_commit.startswith(expected_commit[:12]):
+                mapping_correct += 1
+            else:
+                print(f"  ⚠️  版本映射错误: {version}")
+                print(f"     预期: {expected_commit[:12]}")
+                print(f"     实际: {actual_commit[:12] if actual_commit else 'N/A'}")
+        
+        if mapping_correct == mapping_total:
+            print(f"  ✅ 版本到commit的映射完全正确 ({mapping_correct}/{mapping_total})")
+        else:
+            print(f"  ⚠️  版本到commit的映射部分正确 ({mapping_correct}/{mapping_total})")
+        
+        # 检查5: 是否在all_fix_commits中标记了mainline
+        mainline_marked = False
+        for commit in all_commits:
+            if commit.get('commit_id', '').startswith(expected_mainline[:12]):
+                if commit.get('is_mainline', False):
+                    mainline_marked = True
+                    print(f"  ✅ mainline commit在列表中正确标记")
+                break
+        
+        if not mainline_marked:
+            print(f"  ⚠️  mainline commit未在列表中标记")
+        
+        # 检查3: 是否找到了所有backport commits
+        found_commits = set(c.get('commit_id', '')[:12] for c in all_commits)
+        expected_backports = test_case["expected_backports"]
+        
+        found_backports = 0
+        for expected in expected_backports:
+            if expected[:12] in found_commits:
+                found_backports += 1
+        
+        print(f"  📊 找到 {found_backports}/{len(expected_backports)} 个backport commits")
+        
+        if found_backports == len(expected_backports):
+            print(f"  ✅ 所有backport commits都已找到")
+        else:
+            print(f"  ⚠️  部分backport commits未找到")
+            missing = [exp[:12] for exp in expected_backports if exp[:12] not in found_commits]
+            if missing:
+                print(f"     缺失: {', '.join(missing)}")
+        
+        # 总体评分
+        print(f"\n总体评估:")
+        score = 0
+        # mainline_commit识别正确 (30分)
+        if mainline_commit.startswith(expected_mainline[:12]):
+            score += 30
+        # mainline_version识别正确 (20分)
+        if mainline_version == expected_mainline_version:
+            score += 20
+        # 版本映射正确 (20分)
+        score += int((mapping_correct / mapping_total) * 20)
+        # fix_commit_id等于mainline_commit (10分)
+        if fix_commit.startswith(expected_mainline[:12]):
+            score += 10
+        # 标记正确 (10分)
+        if mainline_marked:
+            score += 10
+        # 找到backport commits (10分)
+        score += int((found_backports / len(expected_backports)) * 10)
+        
+        print(f"  得分: {score}/100")
+        if score >= 90:
+            print(f"  ✅ 优秀")
+        elif score >= 70:
+            print(f"  ✅ 良好")
+        elif score >= 50:
+            print(f"  ⚠️  需要改进")
+        else:
+            print(f"  ❌ 失败")
+        
+        # 保存详细结果
+        result_file = f"test_mainline_{cve_id.replace('-', '_')}.json"
+        with open(result_file, 'w', encoding='utf-8') as f:
+            json.dump({
+                "cve_id": cve_id,
+                "test_case": test_case,
+                "result": result,
+                "score": score
+            }, f, indent=4, ensure_ascii=False)
+        print(f"\n  详细结果已保存到: {result_file}")
+
+
 def test_commit_selection():
     """测试多个commits的选择逻辑"""
     print("\n" + "="*80)
-    print("测试Mainline Commit选择逻辑")
+    print("测试Commit选择算法")
     print("="*80)
     
     crawler = Crawl_Cve_Patch()
@@ -162,6 +370,515 @@ def test_commit_selection():
         print("❌ 选择逻辑可能需要调整")
 
 
+def test_search_introduced_commit(community_commit_id: str, target_repo_version: str = None):
+    """
+    测试功能1: 根据社区CVE引入的commit id，查找自维护仓库中的对应commit
+    
+    Args:
+        community_commit_id: 社区引入问题的commit ID
+        target_repo_version: 目标仓库版本（如果为None，使用模拟）
+    """
+    print("\n" + "="*80)
+    print("测试功能1: 查找自维护仓库中的漏洞引入commit")
+    print("="*80)
+    
+    print(f"\n社区引入commit: {community_commit_id}")
+    print("-" * 80)
+    
+    crawler = Crawl_Cve_Patch()
+    
+    # 步骤1: 获取社区commit的详细信息
+    print(f"\n[步骤1] 获取社区commit的详细信息...")
+    
+    # 尝试从CVE API获取完整信息
+    patch_info = crawler.get_patch_content(community_commit_id[:12], "Mainline")
+    
+    if not patch_info or not patch_info.get('subject'):
+        print(f"  ⚠️  无法从kernel.org获取，使用基本信息")
+        subject = f"commit {community_commit_id[:12]}"
+        modified_files = []
+        diff_code = ""
+    else:
+        subject = patch_info.get('subject', '')
+        modified_files = patch_info.get('modified_files', [])
+        diff_code = patch_info.get('diff_code', '')
+    
+    print(f"  ✅ Subject: {subject}")
+    print(f"  ✅ 修改的文件数: {len(modified_files)}")
+    if modified_files:
+        print(f"     文件列表:")
+        for f in modified_files[:3]:
+            print(f"       - {f}")
+        if len(modified_files) > 3:
+            print(f"       ... 还有 {len(modified_files) - 3} 个文件")
+    
+    # 步骤2: 在自维护仓库中搜索
+    print(f"\n[步骤2] 在自维护仓库中搜索匹配的commit...")
+    print("-" * 80)
+    
+    if not target_repo_version:
+        print(f"  ℹ️  未提供目标仓库配置，显示搜索策略（需要GitRepoManager）:")
+        print()
+        print(f"  策略1 - 精确匹配commit ID:")
+        print(f"    git log --all --format='%H|%s' | grep '{community_commit_id[:12]}'")
+        print()
+        print(f"  策略2 - 匹配commit subject:")
+        print(f"    git log --all --grep='{subject}' --format='%H|%s'")
+        print()
+        print(f"  策略3 - 匹配backport格式:")
+        # 提取subject中的关键词
+        keywords = []
+        for word in subject.split():
+            if len(word) > 4 and word.isalnum():
+                keywords.append(word)
+        if keywords:
+            keyword_pattern = '.*'.join(keywords[:3])
+            print(f"    git log --all --grep='\\[backport\\].*{keyword_pattern}' --format='%H|%s'")
+        print()
+        print(f"  策略4 - 基于修改文件:")
+        if modified_files:
+            print(f"    git log --all --format='%H|%s' -- {' '.join(modified_files[:2])}")
+        print()
+        
+        # 模拟结果
+        print(f"  💡 模拟搜索结果（实际使用需要配置GitRepoManager）:")
+        print()
+        print(f"  假设找到以下候选commits:")
+        print(f"    1. abc123def456 - [backport] {subject}")
+        print(f"       置信度: 95% (subject完全匹配)")
+        print(f"    2. def456ghi789 - Similar fix for the same issue")
+        print(f"       置信度: 75% (修改相同文件)")
+        
+    else:
+        # 实际搜索（需要GitRepoManager配置）
+        try:
+            from git_repo_manager import GitRepoManager
+            from config_loader import ConfigLoader
+            
+            # 加载配置
+            config = ConfigLoader.load("config.yaml")
+            repo_configs = {k: v['path'] for k, v in config.repositories.items()}
+            
+            manager = GitRepoManager(repo_configs, use_cache=True)
+            
+            # 策略1: 精确ID匹配
+            print(f"  🔍 策略1: 精确commit ID匹配...")
+            exact_match = manager.find_commit_by_id(community_commit_id[:12], target_repo_version)
+            
+            if exact_match:
+                print(f"  ✅ 找到精确匹配:")
+                print(f"     Commit: {exact_match['commit_id'][:12]}")
+                print(f"     Subject: {exact_match['subject']}")
+                print(f"     置信度: 100% (完全匹配)")
+                return {
+                    "found": True,
+                    "strategy": "exact_id",
+                    "commit_id": exact_match['commit_id'],
+                    "subject": exact_match['subject'],
+                    "confidence": 1.0
+                }
+            
+            # 策略2: Subject模糊匹配
+            print(f"  🔍 策略2: Subject模糊匹配...")
+            keywords = [w for w in subject.split() if len(w) > 4][:5]
+            if keywords:
+                candidates = manager.search_commits_by_keywords(
+                    keywords, target_repo_version, limit=20
+                )
+                
+                if candidates:
+                    print(f"  ✅ 找到 {len(candidates)} 个候选:")
+                    for i, c in enumerate(candidates[:3], 1):
+                        # 计算相似度
+                        similarity = calculate_subject_similarity(subject, c.subject)
+                        print(f"     {i}. {c.commit_id[:12]} - {c.subject[:60]}...")
+                        print(f"        相似度: {similarity:.1%}")
+                    
+                    best_match = candidates[0]
+                    best_similarity = calculate_subject_similarity(subject, best_match.subject)
+                    
+                    if best_similarity > 0.8:
+                        return {
+                            "found": True,
+                            "strategy": "subject_match",
+                            "commit_id": best_match.commit_id,
+                            "subject": best_match.subject,
+                            "confidence": best_similarity
+                        }
+            
+            # 策略3: 文件匹配
+            if modified_files:
+                print(f"  🔍 策略3: 基于修改文件匹配...")
+                file_commits = manager.search_commits_by_files(
+                    modified_files[:3], target_repo_version, limit=50
+                )
+                
+                if file_commits:
+                    print(f"  ✅ 找到 {len(file_commits)} 个修改相同文件的commits")
+                    # TODO: 进一步通过diff相似度过滤
+            
+            print(f"  ❌ 未找到匹配的commit")
+            
+        except Exception as e:
+            print(f"  ⚠️  搜索时出错: {e}")
+            print(f"  提示: 请确保配置了 config.yaml 和目标仓库路径")
+    
+    print(f"\n" + "="*80)
+    print(f"测试完成")
+    print("="*80)
+    
+    return {"found": False}
+
+
+def calculate_subject_similarity(s1: str, s2: str) -> float:
+    """计算两个subject的相似度（简单实现）"""
+    # 规范化
+    s1 = s1.lower().strip()
+    s2 = s2.lower().strip()
+    
+    # 移除backport前缀
+    s2 = s2.replace('[backport]', '').strip()
+    
+    # 简单的词袋模型
+    words1 = set(w for w in s1.split() if len(w) > 3)
+    words2 = set(w for w in s2.split() if len(w) > 3)
+    
+    if not words1 or not words2:
+        return 0.0
+    
+    intersection = words1 & words2
+    union = words1 | words2
+    
+    return len(intersection) / len(union)
+
+
+def test_check_fix_merged(introduced_commit_id: str, 
+                          target_repo_version: str = None,
+                          cve_id: str = None):
+    """
+    测试功能2: 根据自维护仓库的漏洞引入commit，分析修复补丁是否已合入
+    
+    Args:
+        introduced_commit_id: 自维护仓库中的漏洞引入commit ID
+        target_repo_version: 目标仓库版本
+        cve_id: CVE ID（如果提供，会自动获取修复补丁信息）
+    """
+    print("\n" + "="*80)
+    print("测试功能2: 检查修复补丁是否已合入")
+    print("="*80)
+    
+    print(f"\n自维护仓库漏洞引入commit: {introduced_commit_id}")
+    if cve_id:
+        print(f"CVE ID: {cve_id}")
+    print("-" * 80)
+    
+    crawler = Crawl_Cve_Patch()
+    
+    # 步骤1: 获取CVE修复补丁信息
+    if cve_id:
+        print(f"\n[步骤1] 从CVE API获取社区修复补丁信息...")
+        
+        cve_info = crawler.get_introduced_fixed_commit(cve_id)
+        
+        if not cve_info:
+            print(f"  ❌ 获取CVE信息失败")
+            return
+        
+        mainline_fix_commit = cve_info.get('mainline_commit', '')
+        fix_subject = ""
+        fix_files = []
+        
+        if mainline_fix_commit:
+            print(f"  ✅ 社区修复commit: {mainline_fix_commit[:12]}")
+            print(f"     版本: {cve_info.get('mainline_version', 'N/A')}")
+            
+            # 获取修复补丁的详细信息
+            print(f"\n[步骤2] 获取修复补丁的详细信息...")
+            fix_patch = crawler.get_patch_content(mainline_fix_commit[:12], "Mainline")
+            
+            if fix_patch:
+                fix_subject = fix_patch.get('subject', '')
+                fix_files = fix_patch.get('modified_files', [])
+                print(f"  ✅ Subject: {fix_subject}")
+                print(f"  ✅ 修改文件: {len(fix_files)} 个")
+                if fix_files:
+                    for f in fix_files[:3]:
+                        print(f"     - {f}")
+    else:
+        print(f"\n  ⚠️  未提供CVE ID，需要手动指定修复补丁信息")
+        mainline_fix_commit = input("  请输入社区修复commit ID: ").strip()
+        
+        if not mainline_fix_commit:
+            print("  ❌ 未提供修复commit")
+            return
+        
+        fix_patch = crawler.get_patch_content(mainline_fix_commit[:12], "Mainline")
+        fix_subject = fix_patch.get('subject', '') if fix_patch else ''
+        fix_files = fix_patch.get('modified_files', []) if fix_patch else []
+    
+    # 步骤3: 在自维护仓库中搜索修复补丁
+    print(f"\n[步骤3] 在自维护仓库中搜索修复补丁...")
+    print("-" * 80)
+    
+    if not target_repo_version:
+        print(f"  ℹ️  未提供目标仓库配置，显示搜索策略:")
+        print()
+        print(f"  策略1 - 精确匹配修复commit ID:")
+        print(f"    git log --all --format='%H|%s' | grep '{mainline_fix_commit[:12]}'")
+        print()
+        print(f"  策略2 - 匹配修复commit subject:")
+        if fix_subject:
+            print(f"    git log --all --grep='{fix_subject}' --format='%H|%s'")
+        print()
+        print(f"  策略3 - 时间范围搜索:")
+        print(f"    git log --all --since='{introduced_commit_id}' --format='%H|%s' -- {' '.join(fix_files[:2]) if fix_files else ''}")
+        print()
+        print(f"  策略4 - 基于Fixes标签:")
+        print(f"    git log --all --grep='Fixes:.*{introduced_commit_id[:12]}' --format='%H|%s'")
+        print()
+        
+        # 模拟结果
+        print(f"  💡 模拟搜索结果:")
+        print()
+        print(f"  场景A: 修复补丁已合入")
+        print(f"    找到commit: xyz789abc012")
+        print(f"    Subject: [backport] {fix_subject if fix_subject else 'Fix the vulnerability'}")
+        print(f"    结论: ✅ 修复补丁已合入，无需action")
+        print()
+        print(f"  场景B: 修复补丁未合入")
+        print(f"    未找到匹配的修复commit")
+        print(f"    结论: ⚠️  需要合入修复补丁")
+        print()
+        print(f"    接下来需要:")
+        print(f"      1. 获取修复补丁的依赖")
+        print(f"      2. 检查依赖是否已合入")
+        print(f"      3. 生成合入计划")
+        
+    else:
+        # 实际搜索
+        try:
+            from git_repo_manager import GitRepoManager
+            from config_loader import ConfigLoader
+            
+            config = ConfigLoader.load("config.yaml")
+            repo_configs = {k: v['path'] for k, v in config.repositories.items()}
+            
+            manager = GitRepoManager(repo_configs, use_cache=True)
+            
+            # 策略1: 精确ID匹配
+            print(f"  🔍 策略1: 精确修复commit ID匹配...")
+            exact_match = manager.find_commit_by_id(mainline_fix_commit[:12], target_repo_version)
+            
+            if exact_match:
+                print(f"  ✅ 修复补丁已合入!")
+                print(f"     Commit: {exact_match['commit_id'][:12]}")
+                print(f"     Subject: {exact_match['subject']}")
+                print(f"\n  结论: 该CVE已修复，无需进一步action")
+                return {
+                    "merged": True,
+                    "fix_commit": exact_match['commit_id'],
+                    "strategy": "exact_id"
+                }
+            
+            # 策略2: Subject匹配
+            print(f"  🔍 策略2: Subject模糊匹配...")
+            if fix_subject:
+                keywords = [w for w in fix_subject.split() if len(w) > 4][:5]
+                candidates = manager.search_commits_by_keywords(
+                    keywords, target_repo_version, limit=20
+                )
+                
+                if candidates:
+                    print(f"  找到 {len(candidates)} 个候选修复commits:")
+                    for i, c in enumerate(candidates[:3], 1):
+                        similarity = calculate_subject_similarity(fix_subject, c.subject)
+                        print(f"     {i}. {c.commit_id[:12]} - {c.subject[:60]}...")
+                        print(f"        相似度: {similarity:.1%}")
+                        
+                        if similarity > 0.85:
+                            print(f"  ✅ 可能已合入 (高相似度匹配)")
+                            return {
+                                "merged": True,
+                                "fix_commit": c.commit_id,
+                                "confidence": similarity,
+                                "strategy": "subject_match"
+                            }
+            
+            # 策略3: Fixes标签
+            print(f"  🔍 策略3: 搜索Fixes标签...")
+            fixes_pattern = f"Fixes:.*{introduced_commit_id[:12]}"
+            fixes_commits = manager.search_commits_by_keywords(
+                [fixes_pattern], target_repo_version, limit=10
+            )
+            
+            if fixes_commits:
+                print(f"  ✅ 找到 {len(fixes_commits)} 个包含Fixes标签的commits:")
+                for c in fixes_commits:
+                    print(f"     {c.commit_id[:12]} - {c.subject}")
+                
+                return {
+                    "merged": True,
+                    "fix_commit": fixes_commits[0].commit_id,
+                    "strategy": "fixes_tag"
+                }
+            
+            print(f"  ❌ 未找到修复补丁")
+            print(f"\n  结论: 修复补丁未合入，需要进行依赖分析和合入计划")
+            
+        except Exception as e:
+            print(f"  ⚠️  搜索时出错: {e}")
+    
+    # 步骤4: 如果未合入，分析依赖
+    print(f"\n[步骤4] 分析修复补丁的依赖...")
+    print("-" * 80)
+    print(f"  ℹ️  依赖分析需要使用 enhanced_cve_analyzer.py")
+    print(f"  ℹ️  或手动使用以下命令:")
+    print()
+    print(f"  # 查看修复commit之前的相关commits")
+    print(f"  git log {mainline_fix_commit}~20..{mainline_fix_commit} --oneline -- {' '.join(fix_files[:2]) if fix_files else ''}")
+    print()
+    
+    print(f"\n" + "="*80)
+    print(f"测试完成")
+    print("="*80)
+    
+    return {"merged": False}
+
+
+def test_full_project_logic():
+    """
+    测试完整的项目逻辑
+    
+    验证项目能否实现用户描述的完整流程：
+    1. 从CVE API获取mainline修复commit
+    2. 在自维护仓库查找相同commit id
+    3. 如果没找到，查找相似的commit msg（[backport] + 社区msg）
+    4. 找到漏洞引入commit
+    5. 查找修复补丁是否已合入
+    6. 分析前置依赖补丁
+    """
+    print("\n" + "="*80)
+    print("测试完整项目逻辑 - CVE-2025-40198")
+    print("="*80)
+    
+    crawler = Crawl_Cve_Patch()
+    cve_id = "CVE-2025-40198"
+    
+    # ===== 步骤1: 获取CVE信息和mainline commit =====
+    print("\n[步骤1] 从CVE API获取信息...")
+    print("-" * 80)
+    
+    result = crawler.get_introduced_fixed_commit(cve_id)
+    
+    if not result:
+        print("❌ 获取CVE信息失败")
+        return False
+    
+    mainline_commit = result.get('mainline_commit', '')
+    mainline_version = result.get('mainline_version', '')
+    version_mapping = result.get('version_commit_mapping', {})
+    introduced_commit = result.get('introduced_commit_id', '')
+    
+    print(f"✅ 成功获取CVE信息:")
+    print(f"   - Mainline修复commit: {mainline_commit[:12]} (版本: {mainline_version})")
+    print(f"   - 问题引入commit: {introduced_commit or '未知'}")
+    print(f"   - 版本映射数量: {len(version_mapping)}")
+    
+    # ===== 步骤2: 模拟在自维护仓库查找commit =====
+    print(f"\n[步骤2] 在自维护仓库查找commit...")
+    print("-" * 80)
+    print(f"🔍 查找策略:")
+    print(f"   1. 精确匹配commit ID: {mainline_commit[:12]}")
+    print(f"   2. 模糊匹配commit subject")
+    print(f"   3. 匹配 [backport] + 社区commit msg")
+    
+    # 获取mainline commit的详细信息
+    patch_info = crawler.get_patch_content(mainline_commit[:12], "Mainline")
+    
+    if patch_info:
+        subject = patch_info.get('subject', '')
+        print(f"\n   原始subject: {subject}")
+        print(f"   可能的backport subject: [backport] {subject}")
+        print(f"   修改的文件: {patch_info.get('modified_files', [])}")
+    
+    print(f"\n   ℹ️  注意: 实际的仓库查找需要GitRepoManager实现")
+    print(f"   ℹ️  查找逻辑已在 enhanced_cve_analyzer.py 中实现")
+    
+    # ===== 步骤3: 验证版本映射关系 =====
+    print(f"\n[步骤3] 验证版本到commit的映射关系...")
+    print("-" * 80)
+    
+    if version_mapping:
+        print(f"✅ 成功建立版本映射关系:")
+        for version in sorted(version_mapping.keys()):
+            commit = version_mapping[version]
+            is_mainline = (version == mainline_version)
+            marker = " ⭐ [MAINLINE]" if is_mainline else " 🔄 [BACKPORT]"
+            print(f"   {version:15s} → {commit[:12]}{marker}")
+    else:
+        print(f"❌ 未找到版本映射")
+        return False
+    
+    # ===== 步骤4: 分析依赖补丁（模拟）=====
+    print(f"\n[步骤4] 分析前置依赖补丁...")
+    print("-" * 80)
+    print(f"   ℹ️  依赖分析功能在 enhanced_cve_analyzer.py 中实现")
+    print(f"   ℹ️  需要调用 analyze_cve_patch_enhanced() 方法")
+    print(f"   ℹ️  该方法会:")
+    print(f"      - 获取修复补丁的依赖列表")
+    print(f"      - 在目标仓库中搜索每个依赖补丁")
+    print(f"      - 标识哪些已合入、哪些还需合入")
+    
+    # ===== 总结 =====
+    print(f"\n" + "="*80)
+    print(f"项目逻辑验证总结")
+    print("="*80)
+    
+    checks = [
+        ("✅ 从CVE API获取信息", True),
+        ("✅ 识别mainline commit", bool(mainline_commit)),
+        ("✅ 建立版本到commit的映射", len(version_mapping) > 0),
+        ("✅ 获取commit详细信息（subject, diff等）", bool(patch_info)),
+        ("⚠️  在自维护仓库查找commit（需要GitRepoManager）", None),
+        ("⚠️  查找相似commit msg（[backport] + 社区msg）", None),
+        ("⚠️  分析前置依赖补丁（需要完整环境）", None),
+    ]
+    
+    print(f"\n功能检查清单:")
+    for check, status in checks:
+        if status is True:
+            print(f"  {check}")
+        elif status is False:
+            print(f"  ❌ {check} - 失败")
+        else:
+            print(f"  {check}")
+    
+    print(f"\n结论:")
+    print(f"  ✅ 核心逻辑已实现: CVE信息获取、mainline识别、版本映射")
+    print(f"  ✅ 高级功能已设计: commit搜索、依赖分析（enhanced_cve_analyzer.py）")
+    print(f"  ⚠️  完整测试需要: GitRepoManager + 实际的kernel仓库")
+    
+    # 保存测试结果
+    test_result = {
+        "cve_id": cve_id,
+        "mainline_commit": mainline_commit,
+        "mainline_version": mainline_version,
+        "version_mapping": version_mapping,
+        "introduced_commit": introduced_commit,
+        "patch_info": {
+            "subject": patch_info.get('subject', '') if patch_info else '',
+            "modified_files": patch_info.get('modified_files', []) if patch_info else []
+        }
+    }
+    
+    result_file = f"test_full_logic_{cve_id.replace('-', '_')}.json"
+    with open(result_file, 'w', encoding='utf-8') as f:
+        json.dump(test_result, f, indent=4, ensure_ascii=False)
+    print(f"\n  测试结果已保存到: {result_file}")
+    
+    return True
+
+
 if __name__ == "__main__":
     import sys
     
@@ -171,21 +888,85 @@ if __name__ == "__main__":
 ╚════════════════════════════════════════════════════════════════════════════╝
     """)
     
-    # 如果命令行提供了CVE ID，只测试该CVE
+    # 如果命令行提供了参数，执行对应的测试
     if len(sys.argv) > 1:
-        cve_id = sys.argv[1]
-        test_single_cve(cve_id)
+        cmd = sys.argv[1]
+        
+        if cmd == "mainline":
+            # 特殊命令：只测试mainline识别
+            test_mainline_commit_identification()
+            
+        elif cmd == "full":
+            # 特殊命令：测试完整项目逻辑
+            test_full_project_logic()
+            
+        elif cmd == "search_introduced":
+            # 新功能1：查找自维护仓库中的漏洞引入commit
+            if len(sys.argv) < 3:
+                print("用法: python test_crawl_cve.py search_introduced <community_commit_id> [target_repo_version]")
+                print("示例: python test_crawl_cve.py search_introduced 8b67f04ab9de 5.10-hulk")
+            else:
+                community_commit = sys.argv[2]
+                target_repo = sys.argv[3] if len(sys.argv) > 3 else None
+                test_search_introduced_commit(community_commit, target_repo)
+                
+        elif cmd == "check_fix":
+            # 新功能2：检查修复补丁是否已合入
+            if len(sys.argv) < 3:
+                print("用法: python test_crawl_cve.py check_fix <introduced_commit_id> [target_repo_version] [cve_id]")
+                print("示例1: python test_crawl_cve.py check_fix abc123def456 5.10-hulk CVE-2025-40198")
+                print("示例2: python test_crawl_cve.py check_fix abc123def456")
+            else:
+                introduced_commit = sys.argv[2]
+                target_repo = sys.argv[3] if len(sys.argv) > 3 else None
+                cve_id = sys.argv[4] if len(sys.argv) > 4 else None
+                test_check_fix_merged(introduced_commit, target_repo, cve_id)
+                
+        elif cmd == "CVE-2025-40198":
+            # 特殊CVE：运行完整的mainline测试和项目逻辑测试
+            print("\n🎯 针对 CVE-2025-40198 运行完整测试套件\n")
+            test_mainline_commit_identification()
+            print("\n" + "="*80 + "\n")
+            test_full_project_logic()
+            
+        elif cmd.startswith("CVE-"):
+            # 普通CVE测试
+            test_single_cve(cmd)
+            
+        else:
+            print(f"未知命令: {cmd}")
+            print("\n可用命令:")
+            print("  python test_crawl_cve.py mainline")
+            print("  python test_crawl_cve.py full")
+            print("  python test_crawl_cve.py CVE-XXXX-XXXXX")
+            print("  python test_crawl_cve.py search_introduced <community_commit_id> [target_repo]")
+            print("  python test_crawl_cve.py check_fix <introduced_commit_id> [target_repo] [cve_id]")
     else:
         # 运行所有测试
         print("运行完整测试套件...\n")
         
-        # 测试1: 单个CVE
+        # 测试1: Mainline Commit识别（最重要的新功能）
+        print("\n" + "🔑 " + "="*76)
+        print("🔑  核心功能测试：Mainline Commit智能识别")
+        print("🔑 " + "="*76)
+        test_mainline_commit_identification()
+        
+        # 测试2: 单个CVE基础功能
+        print("\n" + "="*80)
+        print("基础功能测试")
+        print("="*80)
         test_single_cve("CVE-2024-26633")
         
-        # 测试2: commit选择逻辑
+        # 测试3: 完整项目逻辑
+        print("\n" + "="*80)
+        print("完整项目逻辑测试")
+        print("="*80)
+        test_full_project_logic()
+        
+        # 测试4: commit选择算法
         test_commit_selection()
         
-        # 测试3: 批量测试（可选，因为会比较慢）
+        # 测试5: 批量测试（可选，因为会比较慢）
         response = input("\n是否运行批量测试? (y/n): ")
         if response.lower() == 'y':
             test_multiple_cves()

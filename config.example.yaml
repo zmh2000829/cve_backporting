@@ -58,7 +58,7 @@ cve_sources:
   # kernel.org git
   kernel_git:
     enabled: true
-    mainline_url: "https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git"
+    mainline_url: "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git"
     stable_url: "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git"
 
 # AI分析配置

@@ -13,6 +13,14 @@ from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 import time
 
+# 添加 BeautifulSoup 用于解析 HTML
+try:
+    from bs4 import BeautifulSoup
+except ImportError:
+    print("警告: 未安装 beautifulsoup4，部分功能可能不可用")
+    print("请运行: pip install beautifulsoup4 lxml")
+    BeautifulSoup = None
+
 
 class Crawl_Cve_Patch:
     """
@@ -36,10 +44,10 @@ class Crawl_Cve_Patch:
         )
         self.api_timeout = self.config.get('api_timeout', 30)
         
-        # kernel.org git配置
-        self.kernel_git_web = "https://git.kernel.org/pub/scm/linux/kernel/git"
-        self.mainline_repo = f"{self.kernel_git_web}/torvalds/linux.git"
-        self.stable_repo = f"{self.kernel_git_web}/stable/linux.git"
+        # 使用 Google 镜像源（更稳定、更快）
+        self.kernel_git_web = "https://kernel.googlesource.com/pub/scm/linux/kernel/git"
+        self.mainline_repo = f"{self.kernel_git_web}/stable/linux"
+        self.stable_repo = f"{self.kernel_git_web}/stable/linux"
         
         # 请求headers
         self.headers = {
@@ -49,7 +57,7 @@ class Crawl_Cve_Patch:
         
         # mainline关键词（用于识别mainline commit）
         self.mainline_keywords = [
-            'mainline', 'upstream', 'torvalds', 'linus', 
+            'mainline', 'upstream', 'stable', 'linus', 
             'master', 'main branch'
         ]
     
@@ -161,8 +169,11 @@ class Crawl_Cve_Patch:
         result = {
             "introduced_commit_id": None,
             "fix_commit_id": None,
+            "mainline_commit": None,  # 新增：明确的mainline commit
+            "mainline_version": None,  # 新增：mainline对应的版本号
             "all_fix_commits": [],
             "all_introduced_commits": [],
+            "version_commit_mapping": {},  # 新增：版本到commit的映射 {version: commit_id}
             "cve_description": "",
             "severity": "unknown",
             "references": []
@@ -223,12 +234,151 @@ class Crawl_Cve_Patch:
                             "tags": tags
                         })
             
-            # 4. 如果没有明确标记，尝试从URL模式识别
+            # 🔑 4. 解析affected字段，智能识别mainline commit
+            # 这是关键！从affected字段中找到版本到commit的映射关系
+            affected = cna.get("affected", [])
+            mainline_commit = None
+            version_commit_mapping = {}  # {version: commit_id}
+            
+            # 第一步：收集git commit和对应的索引
+            # affected数组中通常有两个product条目：
+            # 1. 第一个包含git commit映射（versionType: "git"）
+            # 2. 第二个包含semver版本映射（versionType: "semver"）
+            git_commits = []  # 按顺序存储所有修复commits
+            git_affected_index = -1
+            
+            for idx, product in enumerate(affected):
+                product_name = product.get('product', '')
+                if 'linux' in product_name.lower() or 'kernel' in product_name.lower():
+                    versions = product.get('versions', [])
+                    
+                    # 检查这个product是否包含git类型的版本信息
+                    has_git_versions = any(v.get('versionType') == 'git' for v in versions)
+                    
+                    if has_git_versions and git_affected_index == -1:
+                        git_affected_index = idx
+                        for version in versions:
+                            version_type = version.get('versionType', '')
+                            less_than = version.get('lessThan', '')
+                            
+                            # 收集所有git commit (lessThan就是修复commit)
+                            if version_type == 'git' and less_than:
+                                if less_than not in git_commits:
+                                    git_commits.append(less_than)
+            
+            # 第二步：收集semver版本和mainline标记
+            mainline_version = None
+            semver_versions = []  # 按顺序存储版本号
+            semver_affected_index = -1
+            
+            for idx, product in enumerate(affected):
+                product_name = product.get('product', '')
+                if 'linux' in product_name.lower() or 'kernel' in product_name.lower():
+                    versions = product.get('versions', [])
+                    
+                    # 检查这个product是否包含semver类型的版本信息
+                    has_semver_versions = any(v.get('versionType') in ['semver', 'original_commit_for_fix'] for v in versions)
+                    
+                    if has_semver_versions and semver_affected_index == -1:
+                        semver_affected_index = idx
+                        for version in versions:
+                            version_value = version.get('version', '')
+                            version_type = version.get('versionType', '')
+                            status = version.get('status', '')
+                            
+                            # 🔑 识别mainline版本（有original_commit_for_fix标记）
+                            if version_type == 'original_commit_for_fix':
+                                mainline_version = version_value
+                                semver_versions.append(version_value)
+                                print(f"[CVE解析] 🎯 发现mainline版本标记: {mainline_version}")
+                            # 收集semver版本号（status=unaffected表示已修复）
+                            elif version_type == 'semver' and status == 'unaffected':
+                                # 只收集实际的版本号，不收集范围标记
+                                if version_value and not version_value.startswith('0'):
+                                    semver_versions.append(version_value)
+            
+            # 第三步：建立映射关系
+            # 确保git_commits和semver_versions数量一致
+            if git_commits and semver_versions:
+                print(f"[CVE解析] 找到 {len(git_commits)} 个git commits 和 {len(semver_versions)} 个版本")
+                
+                # 如果数量一致，直接按顺序配对
+                if len(git_commits) == len(semver_versions):
+                    print(f"[CVE解析] 建立版本到commit的映射关系:")
+                    for commit, version in zip(git_commits, semver_versions):
+                        version_commit_mapping[version] = commit
+                        is_mainline_marker = " ⭐" if version == mainline_version else ""
+                        print(f"[CVE解析]   {version:15s} → {commit[:12]}{is_mainline_marker}")
+                        
+                        # 如果这个版本是mainline版本，记录对应的commit
+                        if mainline_version and version == mainline_version:
+                            mainline_commit = commit
+                else:
+                    print(f"[CVE解析] ⚠️  数量不匹配，尝试智能匹配...")
+                    # 如果有mainline版本标记，至少要找到它对应的commit
+                    # 通常mainline commit是最后一个
+                    if mainline_version and git_commits:
+                        mainline_commit = git_commits[-1]
+                        version_commit_mapping[mainline_version] = mainline_commit
+            
+            # 如果通过版本标记找到了mainline commit
+            if mainline_commit:
+                print(f"[CVE解析] ✅ 成功识别mainline commit: {mainline_commit[:12]} (版本: {mainline_version})")
+            else:
+                # 兜底：如果没有明确标记，最后一个通常是mainline
+                if git_commits:
+                    mainline_commit = git_commits[-1]
+                    print(f"[CVE解析] ⚠️  未找到explicit标记，使用最后一个commit作为mainline: {mainline_commit[:12]}")
+            
+            # 🔑 5. 保存版本到commit的映射和mainline信息
+            result["version_commit_mapping"] = version_commit_mapping
+            result["mainline_version"] = mainline_version
+            
+            # 如果找到了mainline commit，重新排序all_fix_commits
+            if mainline_commit:
+                result["mainline_commit"] = mainline_commit
+                print(f"[CVE解析] 识别到mainline commit: {mainline_commit[:12]}")
+                
+                # 在all_fix_commits中找到mainline commit并标记
+                mainline_found = False
+                for commit_info in result["all_fix_commits"]:
+                    if commit_info["commit_id"].startswith(mainline_commit[:12]):
+                        commit_info["source"] = "mainline"
+                        commit_info["is_mainline"] = True
+                        # 添加版本信息
+                        if mainline_version:
+                            commit_info["kernel_version"] = mainline_version
+                        mainline_found = True
+                        print(f"[CVE解析]   在现有commits中找到并标记为mainline")
+                
+                # 如果在references中没找到，从affected字段添加
+                if not mainline_found:
+                    result["all_fix_commits"].append({
+                        "commit_id": mainline_commit,
+                        "url": f"https://git.kernel.org/stable/c/{mainline_commit}",
+                        "tags": ["patch"],
+                        "source": "mainline",
+                        "is_mainline": True,
+                        "kernel_version": mainline_version
+                    })
+                    print(f"[CVE解析]   从affected字段添加mainline commit")
+                
+                # 为其他commits也添加版本信息
+                for commit_info in result["all_fix_commits"]:
+                    cid = commit_info["commit_id"]
+                    # 查找这个commit对应的版本
+                    for version, commit in version_commit_mapping.items():
+                        if commit.startswith(cid[:12]) or cid.startswith(commit[:12]):
+                            commit_info["kernel_version"] = version
+                            commit_info["is_backport"] = (version != mainline_version)
+                            break
+            
+            # 6. 如果没有明确标记，尝试从URL模式识别
             if not result["all_fix_commits"]:
                 print("[CVE解析] 未找到明确标记的fix commits，尝试智能识别...")
                 result["all_fix_commits"] = self._smart_identify_commits(references)
             
-            # 5. 去重
+            # 7. 去重
             result["all_fix_commits"] = self._deduplicate_commits(result["all_fix_commits"])
             result["all_introduced_commits"] = self._deduplicate_commits(result["all_introduced_commits"])
             
@@ -236,12 +386,19 @@ class Crawl_Cve_Patch:
             print(f"[CVE解析]   - 修复commits: {len(result['all_fix_commits'])}")
             print(f"[CVE解析]   - 引入commits: {len(result['all_introduced_commits'])}")
             
-            # 6. 设置单个commit字段（向后兼容）
+            # 8. 设置单个commit字段（向后兼容）
             if result["all_introduced_commits"]:
                 result["introduced_commit_id"] = result["all_introduced_commits"][0]["commit_id"]
             
+            # 🔑 优先选择标记为mainline的commit
             if result["all_fix_commits"]:
-                result["fix_commit_id"] = result["all_fix_commits"][0]["commit_id"]
+                # 查找标记为mainline的commit
+                mainline_commits = [c for c in result["all_fix_commits"] if c.get("is_mainline")]
+                if mainline_commits:
+                    result["fix_commit_id"] = mainline_commits[0]["commit_id"]
+                    print(f"[CVE解析] 选择mainline commit作为主修复: {result['fix_commit_id'][:12]}")
+                else:
+                    result["fix_commit_id"] = result["all_fix_commits"][0]["commit_id"]
             
         except Exception as e:
             print(f"[CVE解析] 解析CVE数据时出错: {e}")
@@ -257,28 +414,34 @@ class Crawl_Cve_Patch:
         支持的URL格式:
         - https://git.kernel.org/.../commit/?id=abc123
         - https://git.kernel.org/.../commit/abc123
-        - https://github.com/torvalds/linux/commit/abc123
+        - https://kernel.googlesource.com/.../+/abc123  (Google 镜像)
+        - https://github.com/stable/linux/commit/abc123
         - https://lore.kernel.org/...@.../ (从邮件线索提取)
         """
         if not url:
             return None
         
-        # 模式1: /commit/?id=<commit_id>
+        # 模式1: Google 镜像格式 /+/commit_id
+        match = re.search(r'/\+/([0-9a-f]{12,40})', url)
+        if match:
+            return match.group(1)
+        
+        # 模式2: /commit/?id=<commit_id>
         match = re.search(r'/commit/\?id=([0-9a-f]{7,40})', url)
         if match:
             return match.group(1)
         
-        # 模式2: /commit/<commit_id>
+        # 模式3: /commit/<commit_id>
         match = re.search(r'/commit/([0-9a-f]{7,40})', url)
         if match:
             return match.group(1)
         
-        # 模式3: cgit URL
+        # 模式4: cgit URL
         match = re.search(r'[?&]id=([0-9a-f]{7,40})', url)
         if match:
             return match.group(1)
         
-        # 模式4: 从URL路径提取
+        # 模式5: 从URL路径提取
         match = re.search(r'([0-9a-f]{12,40})', url)
         if match:
             potential_commit = match.group(1)
@@ -292,12 +455,21 @@ class Crawl_Cve_Patch:
         """
         识别commit来源（mainline, stable, 等）
         """
-        if "torvalds/linux" in url or "/torvalds/" in url:
+        url_lower = url.lower()
+        
+        if "stable/linux" in url_lower or "/stable/" in url_lower:
             return "mainline"
-        elif "stable/linux" in url or "/stable/" in url:
+        elif "stable/linux" in url_lower or "/stable/" in url_lower:
             return "stable"
-        elif "github.com" in url:
+        elif "github.com" in url_lower:
             return "github"
+        elif "kernel.googlesource.com" in url_lower:
+            # Google 镜像也要判断是 mainline 还是 stable
+            if "/stable/" in url_lower:
+                return "mainline"
+            elif "/stable/" in url_lower:
+                return "stable"
+            return "googlesource"
         else:
             return "unknown"
     
@@ -310,8 +482,8 @@ class Crawl_Cve_Patch:
         for ref in references:
             url = ref.get("url", "")
             
-            # 包含git.kernel.org或github.com/torvalds/linux的链接
-            if "git.kernel.org" in url or "github.com/torvalds/linux" in url:
+            # 包含git.kernel.org或github.com/stable/linux的链接
+            if "git.kernel.org" in url or "github.com/stable/linux" in url:
                 commit_id = self._extract_commit_from_url(url)
                 if commit_id:
                     commits.append({
@@ -346,7 +518,7 @@ class Crawl_Cve_Patch:
         从多个commits中选择mainline的commit
         
         优先级:
-        1. source == "mainline" (来自torvalds仓库)
+        1. source == "mainline" (来自stable仓库)
         2. URL包含mainline关键词
         3. 描述中提到mainline
         4. 最早的commit（通常是最初的修复）
@@ -374,10 +546,10 @@ class Crawl_Cve_Patch:
                 score += 10
                 print(f"[Mainline选择]   {commit_id[:12]}: +10 (mainline仓库)")
             
-            # 2. URL包含torvalds (+8分)
-            if "torvalds" in url.lower():
+            # 2. URL包含stable (+8分)
+            if "stable" in url.lower():
                 score += 8
-                print(f"[Mainline选择]   {commit_id[:12]}: +8 (torvalds)")
+                print(f"[Mainline选择]   {commit_id[:12]}: +8 (stable)")
             
             # 3. 来自stable仓库 (-5分，我们倾向于mainline)
             if source == "stable":
@@ -463,11 +635,12 @@ class Crawl_Cve_Patch:
     
     def _fetch_patch_from_kernel_org(self, commit_id: str, repo_url: str) -> Dict:
         """
-        从kernel.org获取patch内容
+        从 Google kernel 镜像获取patch内容
+        
+        URL格式: https://kernel.googlesource.com/.../+/commit_id^!
         """
-        # kernel.org cgit URL格式
-        # https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/patch/?id=<commit>
-        patch_url = f"{repo_url}/patch/?id={commit_id}"
+        # Google 镜像的patch URL格式
+        patch_url = f"{repo_url}/+/{commit_id}^!"
         
         print(f"[Patch获取] URL: {patch_url}")
         
@@ -475,20 +648,106 @@ class Crawl_Cve_Patch:
             response = requests.get(patch_url, timeout=self.api_timeout)
             response.raise_for_status()
             
-            patch_text = response.text
+            # Google 镜像返回的是HTML页面，需要解析
+            from bs4 import BeautifulSoup
             
-            # 解析patch
-            result = self._parse_patch_text(patch_text, commit_id)
-            result["patch"] = patch_text
+            soup = BeautifulSoup(response.text, 'lxml')
             
-            print(f"[Patch获取] 成功获取patch")
-            print(f"[Patch获取]   Subject: {result.get('subject', 'N/A')}")
-            print(f"[Patch获取]   修改文件数: {len(result.get('modified_files', []))}")
+            # 提取commit信息
+            result = {
+                "commit_id": commit_id,
+                "subject": "",
+                "commit_msg": "",
+                "author": "",
+                "date": "",
+                "diff_code": "",
+                "modified_files": []
+            }
             
-            return result
+            # 1. 提取 commit message
+            # Google 镜像格式: 在 <div class="MetadataMessage"> 或类似标签中
+            commit_msg_elem = soup.find('div', class_='MetadataMessage')
+            if not commit_msg_elem:
+                # 尝试其他可能的格式
+                commit_msg_elem = soup.find('pre', class_='u-pre-wrap')
+            
+            if commit_msg_elem:
+                full_msg = commit_msg_elem.get_text(strip=False)
+                # 第一行是subject
+                lines = full_msg.split('\n')
+                if lines:
+                    result["subject"] = lines[0].strip()
+                    result["commit_msg"] = full_msg.strip()
+            
+            # 2. 提取作者和日期
+            # 查找包含 "author" 的元素
+            metadata_section = soup.find('div', class_='Metadata') or soup.find('table', class_='Metadata')
+            if metadata_section:
+                # 解析 author 行
+                author_row = metadata_section.find(string=re.compile(r'author', re.IGNORECASE))
+                if author_row:
+                    author_elem = author_row.find_next('td') or author_row.parent.find_next('td')
+                    if author_elem:
+                        result["author"] = author_elem.get_text(strip=True)
+                
+                # 解析 date 行
+                date_row = metadata_section.find(string=re.compile(r'date', re.IGNORECASE))
+                if date_row:
+                    date_elem = date_row.find_next('td') or date_row.parent.find_next('td')
+                    if date_elem:
+                        result["date"] = date_elem.get_text(strip=True)
+            
+            # 3. 提取 diff（代码变更）
+            # Google 镜像格式: diff 在 <pre> 或 特定的 diff class 中
+            diff_blocks = []
+            
+            # 方法1: 查找所有包含diff的pre标签
+            for pre in soup.find_all('pre'):
+                text = pre.get_text()
+                if 'diff --git' in text or '@@' in text:
+                    diff_blocks.append(text)
+            
+            # 方法2: 查找特定的diff容器
+            if not diff_blocks:
+                diff_container = soup.find('div', class_='Diff') or soup.find('div', id='diff')
+                if diff_container:
+                    diff_blocks.append(diff_container.get_text())
+            
+            # 合并所有diff块
+            if diff_blocks:
+                result["diff_code"] = '\n'.join(diff_blocks)
+            
+            # 4. 提取修改的文件列表
+            result["modified_files"] = self._extract_modified_files_from_diff(result["diff_code"])
+            
+            # 5. 如果没有提取到diff，尝试使用原始文本格式
+            if not result["diff_code"]:
+                # 尝试获取原始格式的patch
+                raw_url = f"{repo_url}/+/{commit_id}^!?format=TEXT"
+                try:
+                    import base64
+                    raw_response = requests.get(raw_url, timeout=self.api_timeout)
+                    if raw_response.status_code == 200:
+                        # Google 镜像的 TEXT 格式是 base64 编码的
+                        decoded = base64.b64decode(raw_response.text)
+                        result["diff_code"] = decoded.decode('utf-8', errors='ignore')
+                        result["modified_files"] = self._extract_modified_files_from_diff(result["diff_code"])
+                except Exception as e:
+                    print(f"[Patch获取] 获取原始格式失败: {e}")
+            
+            if result["diff_code"] or result["subject"]:
+                print(f"[Patch获取] 成功获取patch")
+                print(f"[Patch获取]   Subject: {result.get('subject', 'N/A')}")
+                print(f"[Patch获取]   修改文件数: {len(result.get('modified_files', []))}")
+                return result
+            else:
+                print(f"[Patch获取] 未能提取到有效内容")
+                return {}
         
         except Exception as e:
             print(f"[Patch获取] 请求失败: {e}")
+            import traceback
+            traceback.print_exc()
             return {}
     
     def _parse_patch_text(self, patch_text: str, commit_id: str) -> Dict:

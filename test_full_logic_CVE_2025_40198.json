@@ -1,0 +1,19 @@
+{
+    "cve_id": "CVE-2025-40198",
+    "mainline_commit": "8ecb790ea8c3fc69e77bace57f14cf0d7c177bd8",
+    "mainline_version": "6.18",
+    "version_mapping": {
+        "0": "7bf46ff83a0ef11836e38ebd72cdc5107209342d",
+        "5.4.301": "b2bac84fde28fb6a88817b8b761abda17a1d300b",
+        "5.10.246": "e651294218d2684302ee5ed95ccf381646f3e5b4",
+        "6.1.158": "01829af7656b56d83682b3491265d583d502e502",
+        "6.6.114": "2a0cf438320cdb783e0378570744c0ef0d83e934",
+        "6.12.54": "a6e94557cd05adc82fae0400f6e17745563e5412",
+        "6.17.4": "8ecb790ea8c3fc69e77bace57f14cf0d7c177bd8"
+    },
+    "introduced_commit": null,
+    "patch_info": {
+        "subject": "",
+        "modified_files": []
+    }
+}

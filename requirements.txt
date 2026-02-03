@@ -5,6 +5,10 @@ requests>=2.31.0          # HTTP请求，用于CVE API
 pyyaml>=6.0.1            # YAML配置文件解析
 gitpython>=3.1.40        # Git操作（可选，也可以用subprocess）
 
+# HTML解析（用于从Google镜像获取补丁）
+beautifulsoup4>=4.12.2   # HTML解析
+lxml>=4.9.3             # BeautifulSoup的解析器
+
 # 数据库
 sqlite3                  # Python内置，用于缓存
 

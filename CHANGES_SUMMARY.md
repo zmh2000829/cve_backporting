@@ -21,7 +21,7 @@ def _select_mainline_commit(commits):
     """
     打分系统:
     - mainline仓库: +10分
-    - torvalds URL: +8分
+    - stable URL: +8分
     - stable仓库: -5分
     - patch标签: +5分
     - 自动选择得分最高的
@@ -249,7 +249,7 @@ _select_mainline_commit()  ← 智能选择最佳commit
 支持的URL格式:
 1. https://git.kernel.org/.../commit/?id=abc123
 2. https://git.kernel.org/.../commit/abc123
-3. https://github.com/torvalds/linux/commit/abc123
+3. https://github.com/stable/linux/commit/abc123
 4. https://git.kernel.org/cgit/...?id=abc123
 5. 任何包含12-40个十六进制字符的URL
 ```
@@ -259,7 +259,7 @@ _select_mainline_commit()  ← 智能选择最佳commit
 ```python
 评分标准:
 - source == "mainline"        → +10分
-- URL包含 "torvalds"          → +8分
+- URL包含 "stable"          → +8分
 - source == "stable"          → -5分
 - tags包含 "patch"            → +5分
 - URL包含mainline关键词       → +3分
