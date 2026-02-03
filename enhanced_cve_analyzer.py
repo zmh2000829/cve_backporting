@@ -472,8 +472,9 @@ def main():
     crawl_cve_patch = Crawl_Cve_Patch()
     ai_analyze = Ai_Analyze()
     
-    # 初始化GitRepoManager
-    repo_configs = {k: v['path'] for k, v in config.repositories.items()}
+    # 初始化GitRepoManager（传递完整的配置信息，包括path和branch）
+    repo_configs = {k: {'path': v['path'], 'branch': v.get('branch')} 
+                   for k, v in config.repositories.items()}
     git_repo_manager = GitRepoManager(repo_configs, use_cache=config.cache.enabled)
     
     analyzer = EnhancedCVEAnalyzer(crawl_cve_patch, ai_analyze, git_repo_manager)

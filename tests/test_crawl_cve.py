@@ -91,7 +91,9 @@ def build_cache_for_repo(repo_version: str, max_commits: int = 10000):
         from git_repo_manager import GitRepoManager
         
         config = load_config()
-        repo_configs = {k: v['path'] for k, v in config.repositories.items()}
+        # 传递完整的配置信息（包括path和branch）
+        repo_configs = {k: {'path': v['path'], 'branch': v.get('branch')} 
+                       for k, v in config.repositories.items()}
         
         manager = GitRepoManager(repo_configs, use_cache=True)
         manager.build_commit_cache(repo_version, max_commits=max_commits)
@@ -588,12 +590,14 @@ def test_search_introduced_commit(community_commit_id: str, target_repo_version:
             
             # 加载配置
             config = load_config()
-            repo_configs = {k: v['path'] for k, v in config.repositories.items()}
+            # 传递完整的配置信息（包括path和branch）
+            repo_configs = {k: {'path': v['path'], 'branch': v.get('branch')} 
+                           for k, v in config.repositories.items()}
             
             # 检查仓库路径是否存在
-            repo_path = repo_configs.get(target_repo_version)
-            if not repo_path or not os.path.exists(repo_path):
-                print(f"  ❌ 错误: 仓库路径不存在: {repo_path}")
+            repo_config = config.repositories.get(target_repo_version)
+            if not repo_config or not os.path.exists(repo_config.get('path', '')):
+                print(f"  ❌ 错误: 仓库路径不存在: {repo_config.get('path', '') if repo_config else 'N/A'}")
                 print(f"  请检查 config.yaml 中的配置")
                 return {"found": False}
             
@@ -844,12 +848,14 @@ def test_check_fix_merged(introduced_commit_id: str,
             from git_repo_manager import GitRepoManager
             
             config = load_config()
-            repo_configs = {k: v['path'] for k, v in config.repositories.items()}
+            # 传递完整的配置信息（包括path和branch）
+            repo_configs = {k: {'path': v['path'], 'branch': v.get('branch')} 
+                           for k, v in config.repositories.items()}
             
             # 检查仓库路径是否存在
-            repo_path = repo_configs.get(target_repo_version)
-            if not repo_path or not os.path.exists(repo_path):
-                print(f"  ❌ 错误: 仓库路径不存在: {repo_path}")
+            repo_config = config.repositories.get(target_repo_version)
+            if not repo_config or not os.path.exists(repo_config.get('path', '')):
+                print(f"  ❌ 错误: 仓库路径不存在: {repo_config.get('path', '') if repo_config else 'N/A'}")
                 print(f"  请检查 config.yaml 中的配置")
                 return {"merged": False}
             

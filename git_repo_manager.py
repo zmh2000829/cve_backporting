@@ -32,10 +32,11 @@ class GitRepoManager:
     提供高效的commit搜索和匹配功能
     """
     
-    def __init__(self, repo_configs: Dict[str, str], use_cache: bool = True):
+    def __init__(self, repo_configs: Dict[str, Dict[str, str]], use_cache: bool = True):
         """
         Args:
-            repo_configs: {version_name: repo_path} 例如 {"5.10-hulk": "/path/to/repo"}
+            repo_configs: {version_name: {"path": repo_path, "branch": branch_name}} 
+                         例如 {"5.10-hulk": {"path": "/path/to/repo", "branch": "master"}}
             use_cache: 是否使用本地缓存数据库加速搜索
         """
         self.repo_configs = repo_configs
@@ -44,6 +45,22 @@ class GitRepoManager:
         
         if use_cache:
             self._init_cache_db()
+    
+    def _get_repo_path(self, repo_version: str) -> Optional[str]:
+        """获取仓库路径"""
+        config = self.repo_configs.get(repo_version)
+        if isinstance(config, dict):
+            return config.get('path')
+        # 向后兼容：如果是字符串，直接返回
+        return config if isinstance(config, str) else None
+    
+    def _get_repo_branch(self, repo_version: str) -> Optional[str]:
+        """获取仓库分支名称"""
+        config = self.repo_configs.get(repo_version)
+        if isinstance(config, dict):
+            return config.get('branch')
+        # 如果没有配置分支，返回None（使用当前分支）
+        return None
     
     def _init_cache_db(self):
         """
@@ -113,7 +130,7 @@ class GitRepoManager:
         """
         在指定仓库中执行git命令
         """
-        repo_path = self.repo_configs.get(repo_version)
+        repo_path = self._get_repo_path(repo_version)
         if not repo_path:
             raise ValueError(f"未配置版本 {repo_version} 的仓库路径")
         
@@ -145,7 +162,7 @@ class GitRepoManager:
     
     def find_commit_by_id(self, commit_id: str, repo_version: str) -> Optional[Dict]:
         """
-        通过commit ID精确查找
+        通过commit ID精确查找（只在配置的分支上查找）
         """
         # 先查缓存
         if self.use_cache:
@@ -171,7 +188,19 @@ class GitRepoManager:
                     "timestamp": row[4]
                 }
         
-        # 缓存中没有，从git仓库查
+        # 缓存中没有，从git仓库查（只在指定分支上查找）
+        branch = self._get_repo_branch(repo_version)
+        
+        if branch:
+            # 先检查commit是否在指定分支上
+            check_cmd = ["git", "branch", "--contains", commit_id]
+            branch_output = self.execute_git_command(check_cmd, repo_version)
+            
+            if not branch_output or branch not in branch_output:
+                # commit不在指定分支上
+                return None
+        
+        # 获取commit详细信息
         cmd = ["git", "log", "-1", "--format=%H|%s|%b|%an|%at", commit_id]
         output = self.execute_git_command(cmd, repo_version)
         
@@ -244,16 +273,23 @@ class GitRepoManager:
             finally:
                 conn.close()
         
-        # 方法2: 使用git log --grep
+        # 方法2: 使用git log --grep（只在指定分支上搜索）
+        branch = self._get_repo_branch(repo_version)
+        
         grep_pattern = '|'.join(keywords)  # 匹配任一关键词
-        cmd = [
-            "git", "log",
+        cmd = ["git", "log"]
+        
+        # 如果配置了分支，只搜索该分支
+        if branch:
+            cmd.append(branch)
+        
+        cmd.extend([
             f"--grep={grep_pattern}",
             "--extended-regexp",
             "-i",  # 忽略大小写
             f"--max-count={limit}",
             "--format=%H|%s|%b|%an|%at"
-        ]
+        ])
         
         output = self.execute_git_command(cmd, repo_version)
         if not output:
@@ -291,17 +327,24 @@ class GitRepoManager:
                                repo_version: str,
                                limit: int = 200) -> List[GitCommit]:
         """
-        搜索修改了指定文件的commits
+        搜索修改了指定文件的commits（只在指定分支上搜索）
         """
         results = []
         
-        # 使用git log -- <files>
-        cmd = [
-            "git", "log",
+        branch = self._get_repo_branch(repo_version)
+        
+        # 使用git log -- <files>（只搜索指定分支）
+        cmd = ["git", "log"]
+        
+        # 如果配置了分支，只搜索该分支
+        if branch:
+            cmd.append(branch)
+        
+        cmd.extend([
             f"--max-count={limit}",
             "--format=%H|%s|%b|%an|%at",
             "--"
-        ]
+        ])
         cmd.extend(file_paths)
         
         output = self.execute_git_command(cmd, repo_version)
@@ -375,17 +418,29 @@ class GitRepoManager:
     
     def build_commit_cache(self, repo_version: str, max_commits: int = 10000):
         """
-        预先构建commit缓存
+        预先构建commit缓存（只缓存配置的分支）
         适合在第一次使用前运行，加速后续搜索
         """
-        print(f"开始构建 {repo_version} 的commit缓存...")
+        branch = self._get_repo_branch(repo_version)
         
-        # 获取最近的commits
-        cmd = [
-            "git", "log",
+        if branch:
+            print(f"开始构建 {repo_version} 的commit缓存（分支: {branch}）...")
+        else:
+            print(f"开始构建 {repo_version} 的commit缓存（当前分支）...")
+        
+        # 构建git log命令，只查询指定分支
+        cmd = ["git", "log"]
+        
+        # 如果配置了分支，只查询该分支
+        if branch:
+            cmd.append(branch)
+        
+        cmd.extend([
             f"--max-count={max_commits}",
-            "--format=%H|%s|%b|%an|%at|%H"  # 最后的%H用于后续获取文件列表
-        ]
+            "--format=%H|%s|%b|%an|%at"
+        ])
+        
+        print(f"  执行命令: {' '.join(cmd)}")
         
         output = self.execute_git_command(cmd, repo_version)
         if not output:
@@ -395,11 +450,13 @@ class GitRepoManager:
         commits_data = []
         lines = output.strip().split('\n')
         
+        print(f"  正在处理 {len(lines)} 个commits...")
+        
         for i, line in enumerate(lines):
             if not line.strip():
                 continue
             
-            parts = line.split('|', 5)
+            parts = line.split('|', 4)
             if len(parts) >= 5:
                 commits_data.append({
                     "commit_id": parts[0],
@@ -409,12 +466,14 @@ class GitRepoManager:
                     "timestamp": int(parts[4]) if parts[4].isdigit() else 0
                 })
             
-            if (i + 1) % 100 == 0:
+            if (i + 1) % 1000 == 0:
                 print(f"  已处理 {i + 1}/{len(lines)} commits")
         
         # 批量插入数据库
         conn = sqlite3.connect(self.cache_db_path)
         cursor = conn.cursor()
+        
+        print(f"  正在保存到数据库...")
         
         for commit in commits_data:
             cursor.execute('''
@@ -434,26 +493,32 @@ class GitRepoManager:
         conn.commit()
         conn.close()
         
-        print(f"缓存构建完成，共 {len(commits_data)} 条记录")
+        print(f"✅ 缓存构建完成，共 {len(commits_data)} 条记录（分支: {branch if branch else '当前分支'}）")
 
 
 # 使用示例
 if __name__ == "__main__":
-    # 配置仓库
+    # 配置仓库（包括path和branch）
     repo_configs = {
-        "5.10-hulk": "/data/zhangmh/Associated_Patch_Analysis/5.10/kernel",
-        # "6.6-hulk": "/path/to/your/kernel-6.6"
+        "5.10-hulk": {
+            "path": "/data/zhangmh/Associated_Patch_Analysis/5.10/kernel",
+            "branch": "5.10.0-60.18.0.50.oe2203"
+        },
+        # "6.6-hulk": {
+        #     "path": "/path/to/your/kernel-6.6",
+        #     "branch": "master"
+        # }
     }
     
     manager = GitRepoManager(repo_configs, use_cache=True)
     
-    # 构建缓存（首次使用时）
-    # manager.build_commit_cache("5.10.0-60.18.0.50.oe2203", max_commits=10000)
+    # 构建缓存（首次使用时，只缓存指定分支）
+    # manager.build_commit_cache("5.10-hulk", max_commits=10000)
     
-    # 搜索示例
+    # 搜索示例（只在配置的分支上搜索）
     commits = manager.search_commits_by_keywords(
         keywords=["memory", "leak", "tcp"],
-        repo_version="5.10.0-60.18.0.50.oe2203",
+        repo_version="5.10-hulk",
         limit=10
     )
     

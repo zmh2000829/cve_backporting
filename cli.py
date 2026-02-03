@@ -68,8 +68,8 @@ def analyze_single_cve(args, config, logger):
             ai_analyze = Ai_Analyze(ai_config)
         
         # 初始化GitRepoManager
-        repo_path = config.repositories.get(args.target_version, {}).get('path')
-        if not repo_path:
+        repo_config = config.repositories.get(args.target_version, {})
+        if not repo_config.get('path'):
             logger.error(f"配置中未找到版本 {args.target_version} 的仓库路径")
             return {
                 "code": 1,
@@ -77,7 +77,10 @@ def analyze_single_cve(args, config, logger):
             }
         
         git_manager = GitRepoManager(
-            {args.target_version: repo_path},
+            {args.target_version: {
+                'path': repo_config['path'],
+                'branch': repo_config.get('branch')
+            }},
             use_cache=config.cache.enabled
         )
         
@@ -207,16 +210,19 @@ def build_cache_command(args, config, logger):
     logger.info(f"为版本 {args.target_version} 构建缓存...")
     
     try:
-        # 获取仓库路径
-        repo_path = config.repositories.get(args.target_version, {}).get('path')
-        if not repo_path:
+        # 获取仓库配置
+        repo_config = config.repositories.get(args.target_version, {})
+        if not repo_config.get('path'):
             logger.error(f"配置中未找到版本 {args.target_version} 的仓库路径")
             print(f"错误: 未配置版本 {args.target_version}")
             return
         
         # 实例化GitRepoManager并构建缓存
         git_manager = GitRepoManager(
-            {args.target_version: repo_path},
+            {args.target_version: {
+                'path': repo_config['path'],
+                'branch': repo_config.get('branch')
+            }},
             use_cache=True
         )
         
@@ -239,15 +245,18 @@ def search_commit_command(args, config, logger):
     
     try:
         # 获取仓库路径
-        repo_path = config.repositories.get(args.target_version, {}).get('path')
-        if not repo_path:
+        repo_config = config.repositories.get(args.target_version, {})
+        if not repo_config.get('path'):
             logger.error(f"配置中未找到版本 {args.target_version} 的仓库路径")
             print(f"错误: 未配置版本 {args.target_version}")
             return
         
         # 实例化GitRepoManager
         git_manager = GitRepoManager(
-            {args.target_version: repo_path},
+            {args.target_version: {
+                'path': repo_config['path'],
+                'branch': repo_config.get('branch')
+            }},
             use_cache=config.cache.enabled
         )
         
