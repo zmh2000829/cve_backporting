@@ -459,12 +459,22 @@ def main():
     """
     使用示例
     """
-    # 你需要提供这些类的实例
-    from your_module import Crawl_Cve_Patch, Ai_Analyze, GitRepoManager
+    # 导入实际的模块
+    from crawl_cve_patch import Crawl_Cve_Patch
+    from git_repo_manager import GitRepoManager
+    from ai_analyze import Ai_Analyze
+    from config_loader import ConfigLoader
     
+    # 加载配置
+    config = ConfigLoader.load("config.yaml")
+    
+    # 初始化组件
     crawl_cve_patch = Crawl_Cve_Patch()
     ai_analyze = Ai_Analyze()
-    git_repo_manager = GitRepoManager()
+    
+    # 初始化GitRepoManager
+    repo_configs = {k: v['path'] for k, v in config.repositories.items()}
+    git_repo_manager = GitRepoManager(repo_configs, use_cache=config.cache.enabled)
     
     analyzer = EnhancedCVEAnalyzer(crawl_cve_patch, ai_analyze, git_repo_manager)
     

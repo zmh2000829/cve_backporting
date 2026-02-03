@@ -10,11 +10,10 @@ import sys
 import os
 from datetime import datetime
 from config_loader import ConfigLoader
-
-# 注意: 这些import需要你实现对应的模块
-# from enhanced_cve_analyzer import EnhancedCVEAnalyzer
-# from git_repo_manager import GitRepoManager
-# from your_module import Crawl_Cve_Patch, Ai_Analyze
+from enhanced_cve_analyzer import EnhancedCVEAnalyzer
+from git_repo_manager import GitRepoManager
+from crawl_cve_patch import Crawl_Cve_Patch
+from ai_analyze import Ai_Analyze
 
 
 def setup_logging(config):
@@ -55,24 +54,48 @@ def analyze_single_cve(args, config, logger):
     logger.info(f"开始分析 CVE: {args.cve_id}")
     logger.info(f"目标版本: {args.target_version}")
     
-    # TODO: 实例化你的分析器
-    # git_manager = GitRepoManager(
-    #     {args.target_version: config.repositories[args.target_version]['path']},
-    #     use_cache=config.cache.enabled
-    # )
-    # analyzer = EnhancedCVEAnalyzer(crawl_cve, ai_analyze, git_manager)
-    
-    # 执行分析
-    # result = analyzer.analyze_cve_patch_enhanced(args.cve_id, args.target_version)
-    
-    # 临时模拟结果
-    result = {
-        "code": 0,
-        "vuln_id": args.cve_id,
-        "kernel_version": args.target_version,
-        "duration": 12.5,
-        "message": "这是一个示例结果"
-    }
+    try:
+        # 实例化组件
+        crawl_cve = Crawl_Cve_Patch()
+        
+        # 根据是否禁用AI来决定使用哪个AI分析器
+        if hasattr(args, 'no_ai') and args.no_ai:
+            logger.info("AI分析已禁用")
+            ai_analyze = Ai_Analyze()  # 会自动使用模拟模式
+        else:
+            # 从配置加载AI设置
+            ai_config = config.ai_analysis if hasattr(config, 'ai_analysis') else {}
+            ai_analyze = Ai_Analyze(ai_config)
+        
+        # 初始化GitRepoManager
+        repo_path = config.repositories.get(args.target_version, {}).get('path')
+        if not repo_path:
+            logger.error(f"配置中未找到版本 {args.target_version} 的仓库路径")
+            return {
+                "code": 1,
+                "message": f"未配置版本 {args.target_version}"
+            }
+        
+        git_manager = GitRepoManager(
+            {args.target_version: repo_path},
+            use_cache=config.cache.enabled
+        )
+        
+        # 创建分析器
+        analyzer = EnhancedCVEAnalyzer(crawl_cve, ai_analyze, git_manager)
+        
+        # 执行分析
+        logger.info("开始执行CVE分析...")
+        result = analyzer.analyze_cve_patch_enhanced(args.cve_id, args.target_version)
+        
+    except Exception as e:
+        logger.error(f"分析过程中出错: {e}", exc_info=True)
+        result = {
+            "code": 1,
+            "vuln_id": args.cve_id,
+            "kernel_version": args.target_version,
+            "error": str(e)
+        }
     
     # 保存结果
     output_dir = config.output.output_dir
@@ -183,14 +206,29 @@ def build_cache_command(args, config, logger):
     """
     logger.info(f"为版本 {args.target_version} 构建缓存...")
     
-    # TODO: 实例化GitRepoManager并构建缓存
-    # git_manager = GitRepoManager(
-    #     {args.target_version: config.repositories[args.target_version]['path']},
-    #     use_cache=True
-    # )
-    # git_manager.build_commit_cache(args.target_version, max_commits=config.cache.max_cached_commits)
+    try:
+        # 获取仓库路径
+        repo_path = config.repositories.get(args.target_version, {}).get('path')
+        if not repo_path:
+            logger.error(f"配置中未找到版本 {args.target_version} 的仓库路径")
+            print(f"错误: 未配置版本 {args.target_version}")
+            return
+        
+        # 实例化GitRepoManager并构建缓存
+        git_manager = GitRepoManager(
+            {args.target_version: repo_path},
+            use_cache=True
+        )
+        
+        max_commits = config.cache.max_cached_commits if hasattr(config.cache, 'max_cached_commits') else 10000
+        git_manager.build_commit_cache(args.target_version, max_commits=max_commits)
+        
+        logger.info("缓存构建完成")
+        print(f"✅ 缓存构建成功，已缓存最近 {max_commits} 个commits")
     
-    logger.info("缓存构建完成")
+    except Exception as e:
+        logger.error(f"构建缓存时出错: {e}", exc_info=True)
+        print(f"❌ 缓存构建失败: {e}")
 
 
 def search_commit_command(args, config, logger):
@@ -199,12 +237,35 @@ def search_commit_command(args, config, logger):
     """
     logger.info(f"在 {args.target_version} 中搜索commit: {args.commit_id}")
     
-    # TODO: 实现搜索逻辑
-    # git_manager = GitRepoManager(...)
-    # result = git_manager.find_commit_by_id(args.commit_id, args.target_version)
+    try:
+        # 获取仓库路径
+        repo_path = config.repositories.get(args.target_version, {}).get('path')
+        if not repo_path:
+            logger.error(f"配置中未找到版本 {args.target_version} 的仓库路径")
+            print(f"错误: 未配置版本 {args.target_version}")
+            return
+        
+        # 实例化GitRepoManager
+        git_manager = GitRepoManager(
+            {args.target_version: repo_path},
+            use_cache=config.cache.enabled
+        )
+        
+        # 搜索commit
+        result = git_manager.find_commit_by_id(args.commit_id, args.target_version)
+        
+        print("\n搜索结果:")
+        if result:
+            print(json.dumps(result, indent=4, ensure_ascii=False))
+            print(f"\n✅ 找到commit: {result['commit_id'][:12]}")
+            print(f"   Subject: {result.get('subject', 'N/A')}")
+            print(f"   Author: {result.get('author', 'N/A')}")
+        else:
+            print(f"❌ 未找到commit: {args.commit_id}")
     
-    print("\n搜索结果:")
-    # print(json.dumps(result, indent=4, ensure_ascii=False))
+    except Exception as e:
+        logger.error(f"搜索commit时出错: {e}", exc_info=True)
+        print(f"❌ 搜索失败: {e}")
 
 
 def main():
