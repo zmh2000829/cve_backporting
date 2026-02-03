@@ -441,19 +441,19 @@ class GitRepoManager:
 if __name__ == "__main__":
     # 配置仓库
     repo_configs = {
-        "5.10-hulk": "/path/to/your/kernel-5.10",
-        "6.6-hulk": "/path/to/your/kernel-6.6"
+        "5.10-hulk": "/data/zhangmh/Associated_Patch_Analysis/5.10/kernel",
+        # "6.6-hulk": "/path/to/your/kernel-6.6"
     }
     
     manager = GitRepoManager(repo_configs, use_cache=True)
     
     # 构建缓存（首次使用时）
-    # manager.build_commit_cache("5.10-hulk", max_commits=10000)
+    # manager.build_commit_cache("5.10.0-60.18.0.50.oe2203", max_commits=10000)
     
     # 搜索示例
     commits = manager.search_commits_by_keywords(
         keywords=["memory", "leak", "tcp"],
-        repo_version="5.10-hulk",
+        repo_version="5.10.0-60.18.0.50.oe2203",
         limit=10
     )
     
