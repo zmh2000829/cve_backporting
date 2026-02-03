@@ -32,21 +32,44 @@ python3 tests/test_crawl_cve.py search_introduced 8b67f04ab9de
 python3 tests/test_crawl_cve.py check_fix abc123 "" CVE-2025-40198
 ```
 
-### 配置仓库（可选）
+### 配置仓库（重要）
+
+⚠️ **重要变更**: 现在必须为每个仓库配置 `branch` 字段
 
 复制配置模板并编辑：
 
 ```bash
 cp config.example.yaml config.yaml
-# 编辑config.yaml，配置您的kernel仓库路径
+# 编辑config.yaml
+```
+
+**配置示例**（必须包含 branch）:
+```yaml
+repositories:
+  "5.10-hulk":
+    path: "/data/kernel/5.10"
+    branch: "5.10.0-60.18.0.50.oe2203"  # 必须配置
+    description: "华为5.10内核"
+```
+
+**验证配置**:
+```bash
+python verify_branch_config.py
+```
+
+**构建缓存**（首次使用必须执行）:
+```bash
+python tests/test_crawl_cve.py build-cache 5.10-hulk 10000
 ```
 
 配置后可以进行实际的仓库搜索：
 
 ```bash
-python3 tests/test_crawl_cve.py search_introduced 8b67f04ab9de 5.10-hulk
-python3 tests/test_crawl_cve.py check_fix abc123 5.10-hulk CVE-2025-40198
+python tests/test_crawl_cve.py search_introduced 8b67f04ab9de 5.10-hulk
+python tests/test_crawl_cve.py check_fix abc123 5.10-hulk CVE-2025-40198
 ```
+
+📖 详细说明: [基于分支的搜索指南](./docs/BRANCH_SEARCH_GUIDE.md)
 
 ## 📁 项目结构
 
@@ -235,8 +258,20 @@ A: 所有输出统一保存在 `output/` 目录。
 
 ---
 
-**快速链接**：
-- [测试指南](./docs/TESTING_GUIDE.md)
-- [项目结构](./PROJECT_STRUCTURE.md)
-- [示例代码](./examples/)
-- [完整文档](./docs/)
+## 📚 文档链接
+
+### 必读文档
+- ⚠️ **[基于分支的搜索指南](./docs/BRANCH_SEARCH_GUIDE.md)** - 最新的分支配置要求
+- [配置使用说明](./docs/CONFIG_USAGE.md) - 配置文件详解
+- [测试和缓存指南](./docs/TESTING_CACHE_GUIDE.md) - 测试流程和缓存管理
+
+### 技术文档
+- [CVE Mainline分析](./docs/CVE_MAINLINE_ANALYSIS.md) - Mainline识别原理
+- [测试重构总结](./docs/TEST_REFACTOR_SUMMARY.md) - 测试代码说明
+- [项目结构](./PROJECT_STRUCTURE.md) - 项目架构
+- [变更日志](./CHANGELOG.md) - 版本历史
+
+### 示例和工具
+- [示例代码](./examples/) - 使用示例
+- [验证工具](./verify_branch_config.py) - 配置验证脚本
+- [完整文档目录](./docs/README.md) - 所有文档索引
