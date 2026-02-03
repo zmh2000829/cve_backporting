@@ -1,0 +1,39 @@
+# CVE补丁回合系统依赖包
+
+# 核心依赖
+requests>=2.31.0          # HTTP请求，用于CVE API
+pyyaml>=6.0.1            # YAML配置文件解析
+gitpython>=3.1.40        # Git操作（可选，也可以用subprocess）
+
+# 数据库
+sqlite3                  # Python内置，用于缓存
+
+# 文本处理
+difflib                  # Python内置，用于相似度计算
+
+# 可选：机器学习增强（如果启用ML匹配）
+# transformers>=4.35.0     # Hugging Face transformers
+# torch>=2.1.0            # PyTorch
+# sentence-transformers>=2.2.2  # 句子嵌入
+
+# 可选：性能优化
+# pybloom-live>=4.0.0     # Bloom Filter
+# msgpack>=1.0.7          # 更快的序列化
+
+# 可选：报告生成
+markdown>=3.5.1          # Markdown报告生成
+jinja2>=3.1.2           # HTML模板
+beautifulsoup4>=4.12.2  # HTML处理
+
+# 开发工具
+pytest>=7.4.3           # 单元测试
+black>=23.12.0          # 代码格式化
+flake8>=6.1.0          # 代码检查
+mypy>=1.7.1            # 类型检查
+
+# 日志和监控
+colorlog>=6.8.0        # 彩色日志输出
+tqdm>=4.66.1           # 进度条
+
+# 实用工具
+python-dateutil>=2.8.2  # 日期处理
