@@ -4,6 +4,11 @@
 测试 Crawl_Cve_Patch 类的功能
 """
 
+import sys
+import os
+# 添加项目根目录到 Python 路径
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import json
 from crawl_cve_patch import Crawl_Cve_Patch
 
@@ -63,7 +68,10 @@ def test_single_cve(cve_id: str):
                     print(f"      ... 还有 {len(patch['modified_files']) - 5} 个文件")
             
             # 保存完整patch到文件
-            patch_filename = f"patch_{fix_commit[:12]}.txt"
+            import os
+            output_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'output')
+            os.makedirs(output_dir, exist_ok=True)
+            patch_filename = os.path.join(output_dir, f"patch_{fix_commit[:12]}.txt")
             with open(patch_filename, 'w', encoding='utf-8') as f:
                 f.write(patch.get('patch', ''))
             print(f"\n   完整patch已保存到: {patch_filename}")
@@ -71,7 +79,10 @@ def test_single_cve(cve_id: str):
             print(f"❌ 获取patch内容失败")
     
     # 保存完整结果到JSON
-    result_filename = f"cve_{cve_id.replace('-', '_')}_result.json"
+    import os
+    output_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'output')
+    os.makedirs(output_dir, exist_ok=True)
+    result_filename = os.path.join(output_dir, f"cve_{cve_id.replace('-', '_')}_result.json")
     with open(result_filename, 'w', encoding='utf-8') as f:
         json.dump(result, f, indent=4, ensure_ascii=False)
     print(f"\n   完整结果已保存到: {result_filename}")
@@ -318,7 +329,10 @@ def test_mainline_commit_identification():
             print(f"  ❌ 失败")
         
         # 保存详细结果
-        result_file = f"test_mainline_{cve_id.replace('-', '_')}.json"
+        import os
+        output_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'output')
+        os.makedirs(output_dir, exist_ok=True)
+        result_file = os.path.join(output_dir, f"test_mainline_{cve_id.replace('-', '_')}.json")
         with open(result_file, 'w', encoding='utf-8') as f:
             json.dump({
                 "cve_id": cve_id,
@@ -871,7 +885,10 @@ def test_full_project_logic():
         }
     }
     
-    result_file = f"test_full_logic_{cve_id.replace('-', '_')}.json"
+    import os
+    output_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'output')
+    os.makedirs(output_dir, exist_ok=True)
+    result_file = os.path.join(output_dir, f"test_full_logic_{cve_id.replace('-', '_')}.json")
     with open(result_file, 'w', encoding='utf-8') as f:
         json.dump(test_result, f, indent=4, ensure_ascii=False)
     print(f"\n  测试结果已保存到: {result_file}")

@@ -60,7 +60,10 @@ def example_2_patch_content():
             print(f"   修改文件: {patch['modified_files']}")
             
             # 保存patch
-            with open(f"example_patch_{fix_commit[:12]}.txt", 'w', encoding='utf-8') as f:
+            import os
+            output_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'output')
+            os.makedirs(output_dir, exist_ok=True)
+            with open(os.path.join(output_dir, f"example_patch_{fix_commit[:12]}.txt"), 'w', encoding='utf-8') as f:
                 f.write(patch['patch'])
             print(f"   已保存到: example_patch_{fix_commit[:12]}.txt")
 
@@ -222,7 +225,10 @@ def example_5_complete_workflow():
         "analysis_time": "now"
     }
     
-    report_file = f"example_report_{cve_id.replace('-', '_')}.json"
+    import os
+    output_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'output')
+    os.makedirs(output_dir, exist_ok=True)
+    report_file = os.path.join(output_dir, f"example_report_{cve_id.replace('-', '_')}.json")
     with open(report_file, 'w', encoding='utf-8') as f:
         json.dump(report, f, indent=4, ensure_ascii=False)
     

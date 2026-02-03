@@ -121,7 +121,8 @@ class Crawl_Cve_Patch:
             response = requests.get(
                 url, 
                 headers=self.headers, 
-                timeout=self.api_timeout
+                timeout=self.api_timeout,
+                verify=False
             )
             
             # 检查HTTP状态
@@ -645,7 +646,7 @@ class Crawl_Cve_Patch:
         print(f"[Patch获取] URL: {patch_url}")
         
         try:
-            response = requests.get(patch_url, timeout=self.api_timeout)
+            response = requests.get(patch_url, timeout=self.api_timeout, verify=False)
             response.raise_for_status()
             
             # Google 镜像返回的是HTML页面，需要解析
@@ -726,7 +727,7 @@ class Crawl_Cve_Patch:
                 raw_url = f"{repo_url}/+/{commit_id}^!?format=TEXT"
                 try:
                     import base64
-                    raw_response = requests.get(raw_url, timeout=self.api_timeout)
+                    raw_response = requests.get(raw_url, timeout=self.api_timeout, verify=False)
                     if raw_response.status_code == 200:
                         # Google 镜像的 TEXT 格式是 base64 编码的
                         decoded = base64.b64decode(raw_response.text)
