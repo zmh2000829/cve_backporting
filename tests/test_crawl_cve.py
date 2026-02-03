@@ -11,6 +11,42 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import json
 from crawl_cve_patch import Crawl_Cve_Patch
+from config_loader import ConfigLoader
+
+
+# 全局变量：存储加载的配置
+_config = None
+
+
+def load_config():
+    """加载配置文件"""
+    global _config
+    if _config is None:
+        config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.yaml")
+        _config = ConfigLoader.load(config_path)
+    return _config
+
+
+def get_repository_list():
+    """获取配置的仓库列表"""
+    config = load_config()
+    if not config.repositories:
+        return []
+    return list(config.repositories.keys())
+
+
+def get_repository_info(repo_name: str):
+    """
+    获取指定仓库的配置信息
+    
+    Args:
+        repo_name: 仓库名称
+        
+    Returns:
+        包含path, branch, description的字典，如果不存在返回None
+    """
+    config = load_config()
+    return config.repositories.get(repo_name)
 
 
 def test_single_cve(cve_id: str):
@@ -390,13 +426,28 @@ def test_search_introduced_commit(community_commit_id: str, target_repo_version:
     
     Args:
         community_commit_id: 社区引入问题的commit ID
-        target_repo_version: 目标仓库版本（如果为None，使用模拟）
+        target_repo_version: 目标仓库版本（如果为None，从配置文件读取第一个仓库）
     """
     print("\n" + "="*80)
     print("测试功能1: 查找自维护仓库中的漏洞引入commit")
     print("="*80)
     
+    # 如果未指定仓库，尝试从配置文件读取
+    if not target_repo_version:
+        repos = get_repository_list()
+        if repos:
+            target_repo_version = repos[0]
+            print(f"使用配置文件中的仓库: {target_repo_version}")
+        else:
+            print(f"警告: 配置文件中未找到仓库配置，将使用模拟模式")
+    
     print(f"\n社区引入commit: {community_commit_id}")
+    if target_repo_version:
+        repo_info = get_repository_info(target_repo_version)
+        if repo_info:
+            print(f"目标仓库: {target_repo_version}")
+            print(f"  - 路径: {repo_info.get('path', 'N/A')}")
+            print(f"  - 分支: {repo_info.get('branch', 'N/A')}")
     print("-" * 80)
     
     crawler = Crawl_Cve_Patch()
@@ -467,10 +518,9 @@ def test_search_introduced_commit(community_commit_id: str, target_repo_version:
         # 实际搜索（需要GitRepoManager配置）
         try:
             from git_repo_manager import GitRepoManager
-            from config_loader import ConfigLoader
             
             # 加载配置
-            config = ConfigLoader.load("config.yaml")
+            config = load_config()
             repo_configs = {k: v['path'] for k, v in config.repositories.items()}
             
             manager = GitRepoManager(repo_configs, use_cache=True)
@@ -574,16 +624,31 @@ def test_check_fix_merged(introduced_commit_id: str,
     
     Args:
         introduced_commit_id: 自维护仓库中的漏洞引入commit ID
-        target_repo_version: 目标仓库版本
+        target_repo_version: 目标仓库版本（如果为None，从配置文件读取第一个仓库）
         cve_id: CVE ID（如果提供，会自动获取修复补丁信息）
     """
     print("\n" + "="*80)
     print("测试功能2: 检查修复补丁是否已合入")
     print("="*80)
     
+    # 如果未指定仓库，尝试从配置文件读取
+    if not target_repo_version:
+        repos = get_repository_list()
+        if repos:
+            target_repo_version = repos[0]
+            print(f"使用配置文件中的仓库: {target_repo_version}")
+        else:
+            print(f"警告: 配置文件中未找到仓库配置，将使用模拟模式")
+    
     print(f"\n自维护仓库漏洞引入commit: {introduced_commit_id}")
     if cve_id:
         print(f"CVE ID: {cve_id}")
+    if target_repo_version:
+        repo_info = get_repository_info(target_repo_version)
+        if repo_info:
+            print(f"目标仓库: {target_repo_version}")
+            print(f"  - 路径: {repo_info.get('path', 'N/A')}")
+            print(f"  - 分支: {repo_info.get('branch', 'N/A')}")
     print("-" * 80)
     
     crawler = Crawl_Cve_Patch()
@@ -672,9 +737,8 @@ def test_check_fix_merged(introduced_commit_id: str,
         # 实际搜索
         try:
             from git_repo_manager import GitRepoManager
-            from config_loader import ConfigLoader
             
-            config = ConfigLoader.load("config.yaml")
+            config = load_config()
             repo_configs = {k: v['path'] for k, v in config.repositories.items()}
             
             manager = GitRepoManager(repo_configs, use_cache=True)
@@ -905,6 +969,22 @@ if __name__ == "__main__":
 ╚════════════════════════════════════════════════════════════════════════════╝
     """)
     
+    # 显示配置的仓库信息
+    repos = get_repository_list()
+    if repos:
+        print("配置的仓库:")
+        for repo_name in repos:
+            repo_info = get_repository_info(repo_name)
+            print(f"  - {repo_name}")
+            if repo_info:
+                print(f"      路径: {repo_info.get('path', 'N/A')}")
+                print(f"      分支: {repo_info.get('branch', 'N/A')}")
+                if 'description' in repo_info:
+                    print(f"      说明: {repo_info['description']}")
+        print()
+    else:
+        print("⚠️  未找到配置的仓库，部分功能将使用模拟模式\n")
+    
     # 如果命令行提供了参数，执行对应的测试
     if len(sys.argv) > 1:
         cmd = sys.argv[1]
@@ -922,6 +1002,14 @@ if __name__ == "__main__":
             if len(sys.argv) < 3:
                 print("用法: python test_crawl_cve.py search_introduced <community_commit_id> [target_repo_version]")
                 print("示例: python test_crawl_cve.py search_introduced 8b67f04ab9de 5.10-hulk")
+                print()
+                repos = get_repository_list()
+                if repos:
+                    print("可用的仓库版本:")
+                    for r in repos:
+                        print(f"  - {r}")
+                else:
+                    print("提示: 请先配置 config.yaml 中的仓库信息")
             else:
                 community_commit = sys.argv[2]
                 target_repo = sys.argv[3] if len(sys.argv) > 3 else None
@@ -933,12 +1021,43 @@ if __name__ == "__main__":
                 print("用法: python test_crawl_cve.py check_fix <introduced_commit_id> [target_repo_version] [cve_id]")
                 print("示例1: python test_crawl_cve.py check_fix abc123def456 5.10-hulk CVE-2025-40198")
                 print("示例2: python test_crawl_cve.py check_fix abc123def456")
+                print()
+                repos = get_repository_list()
+                if repos:
+                    print("可用的仓库版本:")
+                    for r in repos:
+                        print(f"  - {r}")
+                else:
+                    print("提示: 请先配置 config.yaml 中的仓库信息")
             else:
                 introduced_commit = sys.argv[2]
                 target_repo = sys.argv[3] if len(sys.argv) > 3 else None
                 cve_id = sys.argv[4] if len(sys.argv) > 4 else None
                 test_check_fix_merged(introduced_commit, target_repo, cve_id)
                 
+        elif cmd == "repos" or cmd == "list-repos":
+            # 列出配置的仓库
+            repos = get_repository_list()
+            if repos:
+                print("\n配置的仓库列表:")
+                print("=" * 80)
+                for repo_name in repos:
+                    repo_info = get_repository_info(repo_name)
+                    print(f"\n仓库: {repo_name}")
+                    if repo_info:
+                        print(f"  路径: {repo_info.get('path', 'N/A')}")
+                        print(f"  分支: {repo_info.get('branch', 'N/A')}")
+                        if 'description' in repo_info:
+                            print(f"  说明: {repo_info['description']}")
+                        # 检查路径是否存在
+                        if os.path.exists(repo_info.get('path', '')):
+                            print(f"  状态: ✅ 路径存在")
+                        else:
+                            print(f"  状态: ❌ 路径不存在")
+            else:
+                print("\n⚠️  未找到配置的仓库")
+                print("提示: 请复制 config.example.yaml 为 config.yaml 并填写仓库配置")
+            
         elif cmd == "CVE-2025-40198":
             # 特殊CVE：运行完整的mainline测试和项目逻辑测试
             print("\n🎯 针对 CVE-2025-40198 运行完整测试套件\n")
@@ -953,11 +1072,12 @@ if __name__ == "__main__":
         else:
             print(f"未知命令: {cmd}")
             print("\n可用命令:")
-            print("  python test_crawl_cve.py mainline")
-            print("  python test_crawl_cve.py full")
-            print("  python test_crawl_cve.py CVE-XXXX-XXXXX")
-            print("  python test_crawl_cve.py search_introduced <community_commit_id> [target_repo]")
-            print("  python test_crawl_cve.py check_fix <introduced_commit_id> [target_repo] [cve_id]")
+            print("  python test_crawl_cve.py repos                   # 列出配置的仓库")
+            print("  python test_crawl_cve.py mainline                # 测试mainline识别")
+            print("  python test_crawl_cve.py full                    # 测试完整项目逻辑")
+            print("  python test_crawl_cve.py CVE-XXXX-XXXXX          # 测试单个CVE")
+            print("  python test_crawl_cve.py search_introduced <commit> [repo]")
+            print("  python test_crawl_cve.py check_fix <commit> [repo] [cve_id]")
     else:
         # 运行所有测试
         print("运行完整测试套件...\n")
