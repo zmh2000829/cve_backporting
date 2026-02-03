@@ -10,6 +10,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import json
+import sqlite3
 from crawl_cve_patch import Crawl_Cve_Patch
 from config_loader import ConfigLoader
 
@@ -47,6 +48,60 @@ def get_repository_info(repo_name: str):
     """
     config = load_config()
     return config.repositories.get(repo_name)
+
+
+def check_cache_exists(repo_version: str = None) -> tuple:
+    """
+    检查缓存数据库是否存在以及是否有数据
+    
+    Returns:
+        (cache_exists, has_data, commit_count)
+    """
+    cache_db_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "commit_cache.db")
+    
+    if not os.path.exists(cache_db_path):
+        return (False, False, 0)
+    
+    try:
+        conn = sqlite3.connect(cache_db_path)
+        cursor = conn.cursor()
+        
+        if repo_version:
+            cursor.execute('SELECT COUNT(*) FROM commits WHERE repo_version = ?', (repo_version,))
+        else:
+            cursor.execute('SELECT COUNT(*) FROM commits')
+        
+        count = cursor.fetchone()[0]
+        conn.close()
+        
+        return (True, count > 0, count)
+    except Exception as e:
+        return (False, False, 0)
+
+
+def build_cache_for_repo(repo_version: str, max_commits: int = 10000):
+    """
+    为指定仓库构建缓存
+    
+    Args:
+        repo_version: 仓库版本名称
+        max_commits: 最大缓存的commit数量
+    """
+    try:
+        from git_repo_manager import GitRepoManager
+        
+        config = load_config()
+        repo_configs = {k: v['path'] for k, v in config.repositories.items()}
+        
+        manager = GitRepoManager(repo_configs, use_cache=True)
+        manager.build_commit_cache(repo_version, max_commits=max_commits)
+        
+        return True
+    except Exception as e:
+        print(f"构建缓存失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
 
 
 def test_single_cve(cve_id: str):
@@ -482,46 +537,65 @@ def test_search_introduced_commit(community_commit_id: str, target_repo_version:
     print("-" * 80)
     
     if not target_repo_version:
-        print(f"  ℹ️  未提供目标仓库配置，显示搜索策略（需要GitRepoManager）:")
+        print(f"  ❌ 错误: 未配置目标仓库")
+        print(f"  请执行以下步骤:")
+        print(f"    1. 复制 config.example.yaml 为 config.yaml")
+        print(f"    2. 在 config.yaml 中配置仓库路径和分支")
+        print(f"    3. 运行测试时指定仓库版本，或在配置文件中添加仓库")
         print()
-        print(f"  策略1 - 精确匹配commit ID:")
-        print(f"    git log --all --format='%H|%s' | grep '{community_commit_id[:12]}'")
+        print(f"  可用的Git搜索策略:")
+        print(f"    策略1 - 精确匹配commit ID:")
+        print(f"      git log --all --format='%H|%s' | grep '{community_commit_id[:12]}'")
         print()
-        print(f"  策略2 - 匹配commit subject:")
-        print(f"    git log --all --grep='{subject}' --format='%H|%s'")
+        print(f"    策略2 - 匹配commit subject:")
+        print(f"      git log --all --grep='{subject}' --format='%H|%s'")
         print()
-        print(f"  策略3 - 匹配backport格式:")
-        # 提取subject中的关键词
-        keywords = []
-        for word in subject.split():
-            if len(word) > 4 and word.isalnum():
-                keywords.append(word)
+        print(f"    策略3 - 匹配backport格式:")
+        keywords = [w for w in subject.split() if len(w) > 4 and w.isalnum()]
         if keywords:
             keyword_pattern = '.*'.join(keywords[:3])
-            print(f"    git log --all --grep='\\[backport\\].*{keyword_pattern}' --format='%H|%s'")
+            print(f"      git log --all --grep='\\[backport\\].*{keyword_pattern}' --format='%H|%s'")
         print()
-        print(f"  策略4 - 基于修改文件:")
+        print(f"    策略4 - 基于修改文件:")
         if modified_files:
-            print(f"    git log --all --format='%H|%s' -- {' '.join(modified_files[:2])}")
-        print()
-        
-        # 模拟结果
-        print(f"  💡 模拟搜索结果（实际使用需要配置GitRepoManager）:")
-        print()
-        print(f"  假设找到以下候选commits:")
-        print(f"    1. abc123def456 - [backport] {subject}")
-        print(f"       置信度: 95% (subject完全匹配)")
-        print(f"    2. def456ghi789 - Similar fix for the same issue")
-        print(f"       置信度: 75% (修改相同文件)")
+            print(f"      git log --all --format='%H|%s' -- {' '.join(modified_files[:2])}")
         
     else:
-        # 实际搜索（需要GitRepoManager配置）
+        # 检查缓存是否存在
+        cache_exists, has_data, commit_count = check_cache_exists(target_repo_version)
+        
+        if not cache_exists or not has_data:
+            print(f"  ⚠️  警告: 缓存数据库不存在或无数据")
+            print(f"  建议先构建缓存以提高搜索效率")
+            print()
+            
+            response = input(f"  是否现在为 {target_repo_version} 构建缓存? (y/n): ").strip().lower()
+            if response == 'y':
+                max_commits = input(f"  缓存多少个commits? (默认10000): ").strip()
+                max_commits = int(max_commits) if max_commits.isdigit() else 10000
+                
+                print(f"\n  正在构建缓存...")
+                if build_cache_for_repo(target_repo_version, max_commits):
+                    print(f"  ✅ 缓存构建成功")
+                else:
+                    print(f"  ❌ 缓存构建失败，将直接查询Git仓库（较慢）")
+            else:
+                print(f"  跳过缓存构建，将直接查询Git仓库（较慢）")
+            print()
+        # 实际搜索
         try:
             from git_repo_manager import GitRepoManager
             
             # 加载配置
             config = load_config()
             repo_configs = {k: v['path'] for k, v in config.repositories.items()}
+            
+            # 检查仓库路径是否存在
+            repo_path = repo_configs.get(target_repo_version)
+            if not repo_path or not os.path.exists(repo_path):
+                print(f"  ❌ 错误: 仓库路径不存在: {repo_path}")
+                print(f"  请检查 config.yaml 中的配置")
+                return {"found": False}
             
             manager = GitRepoManager(repo_configs, use_cache=True)
             
@@ -541,27 +615,35 @@ def test_search_introduced_commit(community_commit_id: str, target_repo_version:
                     "subject": exact_match['subject'],
                     "confidence": 1.0
                 }
+            else:
+                print(f"  未找到精确匹配的commit ID")
             
             # 策略2: Subject模糊匹配
-            print(f"  🔍 策略2: Subject模糊匹配...")
+            print(f"\n  🔍 策略2: Subject模糊匹配...")
             keywords = [w for w in subject.split() if len(w) > 4][:5]
             if keywords:
+                print(f"     搜索关键词: {', '.join(keywords)}")
                 candidates = manager.search_commits_by_keywords(
                     keywords, target_repo_version, limit=20
                 )
                 
                 if candidates:
-                    print(f"  ✅ 找到 {len(candidates)} 个候选:")
-                    for i, c in enumerate(candidates[:3], 1):
+                    print(f"  找到 {len(candidates)} 个候选:")
+                    best_match = None
+                    best_similarity = 0.0
+                    
+                    for i, c in enumerate(candidates[:5], 1):
                         # 计算相似度
                         similarity = calculate_subject_similarity(subject, c.subject)
                         print(f"     {i}. {c.commit_id[:12]} - {c.subject[:60]}...")
                         print(f"        相似度: {similarity:.1%}")
+                        
+                        if similarity > best_similarity:
+                            best_similarity = similarity
+                            best_match = c
                     
-                    best_match = candidates[0]
-                    best_similarity = calculate_subject_similarity(subject, best_match.subject)
-                    
-                    if best_similarity > 0.8:
+                    if best_match and best_similarity > 0.8:
+                        print(f"\n  ✅ 找到高相似度匹配 (相似度: {best_similarity:.1%})")
                         return {
                             "found": True,
                             "strategy": "subject_match",
@@ -569,23 +651,38 @@ def test_search_introduced_commit(community_commit_id: str, target_repo_version:
                             "subject": best_match.subject,
                             "confidence": best_similarity
                         }
+                    else:
+                        print(f"  未找到高相似度匹配 (最高相似度: {best_similarity:.1%})")
+                else:
+                    print(f"  未找到包含关键词的commits")
             
             # 策略3: 文件匹配
             if modified_files:
-                print(f"  🔍 策略3: 基于修改文件匹配...")
+                print(f"\n  🔍 策略3: 基于修改文件匹配...")
+                print(f"     搜索文件: {', '.join(modified_files[:3])}")
                 file_commits = manager.search_commits_by_files(
                     modified_files[:3], target_repo_version, limit=50
                 )
                 
                 if file_commits:
-                    print(f"  ✅ 找到 {len(file_commits)} 个修改相同文件的commits")
-                    # TODO: 进一步通过diff相似度过滤
+                    print(f"  找到 {len(file_commits)} 个修改相同文件的commits")
+                    print(f"  提示: 需要进一步通过diff相似度分析确认")
+                else:
+                    print(f"  未找到修改相同文件的commits")
             
-            print(f"  ❌ 未找到匹配的commit")
+            print(f"\n  ❌ 未找到匹配的commit")
+            print(f"  建议:")
+            print(f"    1. 检查该commit是否真的存在于目标仓库")
+            print(f"    2. 尝试手动使用git命令搜索")
+            print(f"    3. 检查是否使用了不同的commit message格式")
             
+        except ImportError:
+            print(f"  ❌ 错误: 无法导入 git_repo_manager 模块")
+            print(f"  请确保 git_repo_manager.py 文件存在")
         except Exception as e:
             print(f"  ⚠️  搜索时出错: {e}")
-            print(f"  提示: 请确保配置了 config.yaml 和目标仓库路径")
+            import traceback
+            traceback.print_exc()
     
     print(f"\n" + "="*80)
     print(f"测试完成")
@@ -700,46 +797,61 @@ def test_check_fix_merged(introduced_commit_id: str,
     print("-" * 80)
     
     if not target_repo_version:
-        print(f"  ℹ️  未提供目标仓库配置，显示搜索策略:")
+        print(f"  ❌ 错误: 未配置目标仓库")
+        print(f"  请执行以下步骤:")
+        print(f"    1. 复制 config.example.yaml 为 config.yaml")
+        print(f"    2. 在 config.yaml 中配置仓库路径和分支")
+        print(f"    3. 运行测试时指定仓库版本")
         print()
-        print(f"  策略1 - 精确匹配修复commit ID:")
-        print(f"    git log --all --format='%H|%s' | grep '{mainline_fix_commit[:12]}'")
+        print(f"  可用的Git搜索策略:")
+        print(f"    策略1 - 精确匹配修复commit ID:")
+        print(f"      git log --all --format='%H|%s' | grep '{mainline_fix_commit[:12]}'")
         print()
-        print(f"  策略2 - 匹配修复commit subject:")
+        print(f"    策略2 - 匹配修复commit subject:")
         if fix_subject:
-            print(f"    git log --all --grep='{fix_subject}' --format='%H|%s'")
+            print(f"      git log --all --grep='{fix_subject}' --format='%H|%s'")
         print()
-        print(f"  策略3 - 时间范围搜索:")
-        print(f"    git log --all --since='{introduced_commit_id}' --format='%H|%s' -- {' '.join(fix_files[:2]) if fix_files else ''}")
+        print(f"    策略3 - 时间范围搜索:")
+        print(f"      git log --all --since='{introduced_commit_id}' --format='%H|%s' -- {' '.join(fix_files[:2]) if fix_files else ''}")
         print()
-        print(f"  策略4 - 基于Fixes标签:")
-        print(f"    git log --all --grep='Fixes:.*{introduced_commit_id[:12]}' --format='%H|%s'")
-        print()
-        
-        # 模拟结果
-        print(f"  💡 模拟搜索结果:")
-        print()
-        print(f"  场景A: 修复补丁已合入")
-        print(f"    找到commit: xyz789abc012")
-        print(f"    Subject: [backport] {fix_subject if fix_subject else 'Fix the vulnerability'}")
-        print(f"    结论: ✅ 修复补丁已合入，无需action")
-        print()
-        print(f"  场景B: 修复补丁未合入")
-        print(f"    未找到匹配的修复commit")
-        print(f"    结论: ⚠️  需要合入修复补丁")
-        print()
-        print(f"    接下来需要:")
-        print(f"      1. 获取修复补丁的依赖")
-        print(f"      2. 检查依赖是否已合入")
-        print(f"      3. 生成合入计划")
+        print(f"    策略4 - 基于Fixes标签:")
+        print(f"      git log --all --grep='Fixes:.*{introduced_commit_id[:12]}' --format='%H|%s'")
         
     else:
+        # 检查缓存是否存在
+        cache_exists, has_data, commit_count = check_cache_exists(target_repo_version)
+        
+        if not cache_exists or not has_data:
+            print(f"  ⚠️  警告: 缓存数据库不存在或无数据")
+            print(f"  建议先构建缓存以提高搜索效率")
+            print()
+            
+            response = input(f"  是否现在为 {target_repo_version} 构建缓存? (y/n): ").strip().lower()
+            if response == 'y':
+                max_commits = input(f"  缓存多少个commits? (默认10000): ").strip()
+                max_commits = int(max_commits) if max_commits.isdigit() else 10000
+                
+                print(f"\n  正在构建缓存...")
+                if build_cache_for_repo(target_repo_version, max_commits):
+                    print(f"  ✅ 缓存构建成功")
+                else:
+                    print(f"  ❌ 缓存构建失败，将直接查询Git仓库（较慢）")
+            else:
+                print(f"  跳过缓存构建，将直接查询Git仓库（较慢）")
+            print()
         # 实际搜索
         try:
             from git_repo_manager import GitRepoManager
             
             config = load_config()
             repo_configs = {k: v['path'] for k, v in config.repositories.items()}
+            
+            # 检查仓库路径是否存在
+            repo_path = repo_configs.get(target_repo_version)
+            if not repo_path or not os.path.exists(repo_path):
+                print(f"  ❌ 错误: 仓库路径不存在: {repo_path}")
+                print(f"  请检查 config.yaml 中的配置")
+                return {"merged": False}
             
             manager = GitRepoManager(repo_configs, use_cache=True)
             
@@ -757,33 +869,48 @@ def test_check_fix_merged(introduced_commit_id: str,
                     "fix_commit": exact_match['commit_id'],
                     "strategy": "exact_id"
                 }
+            else:
+                print(f"  未找到精确匹配的commit ID")
             
             # 策略2: Subject匹配
-            print(f"  🔍 策略2: Subject模糊匹配...")
+            print(f"\n  🔍 策略2: Subject模糊匹配...")
             if fix_subject:
                 keywords = [w for w in fix_subject.split() if len(w) > 4][:5]
+                print(f"     搜索关键词: {', '.join(keywords)}")
                 candidates = manager.search_commits_by_keywords(
                     keywords, target_repo_version, limit=20
                 )
                 
                 if candidates:
                     print(f"  找到 {len(candidates)} 个候选修复commits:")
-                    for i, c in enumerate(candidates[:3], 1):
+                    best_match = None
+                    best_similarity = 0.0
+                    
+                    for i, c in enumerate(candidates[:5], 1):
                         similarity = calculate_subject_similarity(fix_subject, c.subject)
                         print(f"     {i}. {c.commit_id[:12]} - {c.subject[:60]}...")
                         print(f"        相似度: {similarity:.1%}")
                         
-                        if similarity > 0.85:
-                            print(f"  ✅ 可能已合入 (高相似度匹配)")
-                            return {
-                                "merged": True,
-                                "fix_commit": c.commit_id,
-                                "confidence": similarity,
-                                "strategy": "subject_match"
-                            }
+                        if similarity > best_similarity:
+                            best_similarity = similarity
+                            best_match = c
+                    
+                    if best_match and best_similarity > 0.85:
+                        print(f"\n  ✅ 可能已合入 (高相似度匹配: {best_similarity:.1%})")
+                        return {
+                            "merged": True,
+                            "fix_commit": best_match.commit_id,
+                            "confidence": best_similarity,
+                            "strategy": "subject_match"
+                        }
+                    else:
+                        print(f"  未找到高相似度匹配 (最高相似度: {best_similarity:.1%})")
+                else:
+                    print(f"  未找到包含关键词的commits")
             
             # 策略3: Fixes标签
-            print(f"  🔍 策略3: 搜索Fixes标签...")
+            print(f"\n  🔍 策略3: 搜索Fixes标签...")
+            print(f"     搜索模式: Fixes:.*{introduced_commit_id[:12]}")
             fixes_pattern = f"Fixes:.*{introduced_commit_id[:12]}"
             fixes_commits = manager.search_commits_by_keywords(
                 [fixes_pattern], target_repo_version, limit=10
@@ -791,7 +918,7 @@ def test_check_fix_merged(introduced_commit_id: str,
             
             if fixes_commits:
                 print(f"  ✅ 找到 {len(fixes_commits)} 个包含Fixes标签的commits:")
-                for c in fixes_commits:
+                for c in fixes_commits[:3]:
                     print(f"     {c.commit_id[:12]} - {c.subject}")
                 
                 return {
@@ -799,12 +926,23 @@ def test_check_fix_merged(introduced_commit_id: str,
                     "fix_commit": fixes_commits[0].commit_id,
                     "strategy": "fixes_tag"
                 }
+            else:
+                print(f"  未找到包含Fixes标签的commits")
             
-            print(f"  ❌ 未找到修复补丁")
+            print(f"\n  ❌ 未找到修复补丁")
             print(f"\n  结论: 修复补丁未合入，需要进行依赖分析和合入计划")
+            print(f"  建议:")
+            print(f"    1. 检查修复补丁是否真的需要合入")
+            print(f"    2. 使用 enhanced_cve_analyzer.py 分析依赖")
+            print(f"    3. 手动使用git命令验证")
             
+        except ImportError:
+            print(f"  ❌ 错误: 无法导入 git_repo_manager 模块")
+            print(f"  请确保 git_repo_manager.py 文件存在")
         except Exception as e:
             print(f"  ⚠️  搜索时出错: {e}")
+            import traceback
+            traceback.print_exc()
     
     # 步骤4: 如果未合入，分析依赖
     print(f"\n[步骤4] 分析修复补丁的依赖...")
@@ -969,10 +1107,11 @@ if __name__ == "__main__":
 ╚════════════════════════════════════════════════════════════════════════════╝
     """)
     
-    # 显示配置的仓库信息
+    # 显示配置的仓库信息和缓存状态
     repos = get_repository_list()
     if repos:
         print("配置的仓库:")
+        has_uncached = False
         for repo_name in repos:
             repo_info = get_repository_info(repo_name)
             print(f"  - {repo_name}")
@@ -981,9 +1120,23 @@ if __name__ == "__main__":
                 print(f"      分支: {repo_info.get('branch', 'N/A')}")
                 if 'description' in repo_info:
                     print(f"      说明: {repo_info['description']}")
+                
+                # 检查缓存状态
+                cache_exists, has_data, commit_count = check_cache_exists(repo_name)
+                if has_data:
+                    print(f"      缓存: ✅ 已缓存 {commit_count} 个commits")
+                else:
+                    print(f"      缓存: ⚠️  未构建 (建议执行: python test_crawl_cve.py build-cache {repo_name})")
+                    has_uncached = True
         print()
+        
+        if has_uncached:
+            print("💡 提示: 首次使用建议先构建缓存，可大幅提高搜索效率")
+            print("   命令: python test_crawl_cve.py build-cache <repo_name> [max_commits]")
+            print()
     else:
-        print("⚠️  未找到配置的仓库，部分功能将使用模拟模式\n")
+        print("⚠️  未找到配置的仓库")
+        print("   请复制 config.example.yaml 为 config.yaml 并配置仓库信息\n")
     
     # 如果命令行提供了参数，执行对应的测试
     if len(sys.argv) > 1:
@@ -1050,13 +1203,48 @@ if __name__ == "__main__":
                         if 'description' in repo_info:
                             print(f"  说明: {repo_info['description']}")
                         # 检查路径是否存在
-                        if os.path.exists(repo_info.get('path', '')):
+                        repo_path = repo_info.get('path', '')
+                        if os.path.exists(repo_path):
                             print(f"  状态: ✅ 路径存在")
+                            # 检查缓存状态
+                            cache_exists, has_data, commit_count = check_cache_exists(repo_name)
+                            if has_data:
+                                print(f"  缓存: ✅ 已缓存 {commit_count} 个commits")
+                            else:
+                                print(f"  缓存: ⚠️  未构建缓存")
                         else:
                             print(f"  状态: ❌ 路径不存在")
             else:
                 print("\n⚠️  未找到配置的仓库")
                 print("提示: 请复制 config.example.yaml 为 config.yaml 并填写仓库配置")
+            
+        elif cmd == "build-cache":
+            # 构建缓存
+            if len(sys.argv) < 3:
+                print("用法: python test_crawl_cve.py build-cache <repo_version> [max_commits]")
+                print("示例: python test_crawl_cve.py build-cache 5.10-hulk 10000")
+                print()
+                repos = get_repository_list()
+                if repos:
+                    print("可用的仓库版本:")
+                    for r in repos:
+                        print(f"  - {r}")
+                else:
+                    print("提示: 请先配置 config.yaml 中的仓库信息")
+            else:
+                repo_version = sys.argv[2]
+                max_commits = int(sys.argv[3]) if len(sys.argv) > 3 else 10000
+                
+                print(f"\n为 {repo_version} 构建缓存...")
+                print(f"最大缓存commits数: {max_commits}")
+                print("-" * 80)
+                
+                if build_cache_for_repo(repo_version, max_commits):
+                    print("\n✅ 缓存构建成功")
+                    cache_exists, has_data, commit_count = check_cache_exists(repo_version)
+                    print(f"已缓存 {commit_count} 个commits")
+                else:
+                    print("\n❌ 缓存构建失败")
             
         elif cmd == "CVE-2025-40198":
             # 特殊CVE：运行完整的mainline测试和项目逻辑测试
@@ -1072,12 +1260,16 @@ if __name__ == "__main__":
         else:
             print(f"未知命令: {cmd}")
             print("\n可用命令:")
-            print("  python test_crawl_cve.py repos                   # 列出配置的仓库")
-            print("  python test_crawl_cve.py mainline                # 测试mainline识别")
-            print("  python test_crawl_cve.py full                    # 测试完整项目逻辑")
-            print("  python test_crawl_cve.py CVE-XXXX-XXXXX          # 测试单个CVE")
+            print("  python test_crawl_cve.py repos                        # 列出配置的仓库")
+            print("  python test_crawl_cve.py build-cache <repo> [max]     # 构建commit缓存")
+            print("  python test_crawl_cve.py mainline                     # 测试mainline识别")
+            print("  python test_crawl_cve.py full                         # 测试完整项目逻辑")
+            print("  python test_crawl_cve.py CVE-XXXX-XXXXX               # 测试单个CVE")
             print("  python test_crawl_cve.py search_introduced <commit> [repo]")
             print("  python test_crawl_cve.py check_fix <commit> [repo] [cve_id]")
+            print("\n重要提示:")
+            print("  首次使用前，请先执行 build-cache 命令构建缓存，以提高搜索效率。")
+            print("  示例: python test_crawl_cve.py build-cache 5.10-hulk 10000")
     else:
         # 运行所有测试
         print("运行完整测试套件...\n")
