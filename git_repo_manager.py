@@ -126,9 +126,16 @@ class GitRepoManager:
     def execute_git_command(self, 
                            cmd: List[str], 
                            repo_version: str,
-                           capture_output: bool = True) -> Optional[str]:
+                           capture_output: bool = True,
+                           timeout: int = 600) -> Optional[str]:
         """
         在指定仓库中执行git命令
+        
+        Args:
+            cmd: Git命令列表
+            repo_version: 仓库版本
+            capture_output: 是否捕获输出
+            timeout: 超时时间（秒），默认600秒（10分钟）
         """
         repo_path = self._get_repo_path(repo_version)
         if not repo_path:
@@ -138,12 +145,15 @@ class GitRepoManager:
             raise FileNotFoundError(f"仓库路径不存在: {repo_path}")
         
         try:
+            # 使用 errors='replace' 处理非 UTF-8 编码的字符（如旧的 commit message）
             result = subprocess.run(
                 cmd,
                 cwd=repo_path,
                 capture_output=capture_output,
                 text=True,
-                timeout=300  # 5分钟超时
+                encoding='utf-8',
+                errors='replace',  # 用 � 替换无法解码的字符
+                timeout=timeout
             )
             
             if result.returncode != 0:
@@ -416,10 +426,14 @@ class GitRepoManager:
         except Exception as e:
             print(f"缓存commit时出错: {e}")
     
-    def build_commit_cache(self, repo_version: str, max_commits: int = 10000):
+    def build_commit_cache(self, repo_version: str, max_commits: int = None):
         """
         预先构建commit缓存（只缓存配置的分支）
         适合在第一次使用前运行，加速后续搜索
+        
+        Args:
+            repo_version: 仓库版本名称
+            max_commits: 最大缓存的commit数量，None或0表示缓存所有commits
         """
         branch = self._get_repo_branch(repo_version)
         
@@ -428,6 +442,12 @@ class GitRepoManager:
         else:
             print(f"开始构建 {repo_version} 的commit缓存（当前分支）...")
         
+        # 使用特殊分隔符避免与commit message内容冲突
+        # \x1e (ASCII Record Separator) 用于分隔字段
+        # \x1f (ASCII Unit Separator) 用于分隔每个commit记录
+        FIELD_SEP = '\x1e'
+        RECORD_SEP = '\x1f'
+        
         # 构建git log命令，只查询指定分支
         cmd = ["git", "log"]
         
@@ -435,39 +455,51 @@ class GitRepoManager:
         if branch:
             cmd.append(branch)
         
-        cmd.extend([
-            f"--max-count={max_commits}",
-            "--format=%H|%s|%b|%an|%at"
-        ])
+        # 使用特殊分隔符：%x1e (字段分隔) 和 %x1f (记录分隔)
+        # 如果 max_commits 为 None 或 0，则获取所有 commits
+        if max_commits and max_commits > 0:
+            cmd.append(f"--max-count={max_commits}")
+            count_desc = str(max_commits)
+        else:
+            count_desc = "全部"
         
-        print(f"  执行命令: {' '.join(cmd)}")
+        cmd.append(f"--format=%H{FIELD_SEP}%s{FIELD_SEP}%b{FIELD_SEP}%an{FIELD_SEP}%at{RECORD_SEP}")
         
-        output = self.execute_git_command(cmd, repo_version)
+        print(f"  执行命令: git log {branch if branch else ''} (数量: {count_desc}) ...")
+        
+        # 获取所有commits可能需要很长时间，设置更长的超时（30分钟）
+        timeout = 1800 if not max_commits else 600
+        if not max_commits:
+            print(f"  ⏳ 正在获取所有commits，这可能需要几分钟...")
+        
+        output = self.execute_git_command(cmd, repo_version, timeout=timeout)
         if not output:
             print("获取commits失败")
             return
         
         commits_data = []
-        lines = output.strip().split('\n')
+        # 按记录分隔符分割每个commit
+        records = output.strip().split(RECORD_SEP)
         
-        print(f"  正在处理 {len(lines)} 个commits...")
+        print(f"  正在处理 {len(records)} 个commits...")
         
-        for i, line in enumerate(lines):
-            if not line.strip():
+        for i, record in enumerate(records):
+            if not record.strip():
                 continue
             
-            parts = line.split('|', 4)
+            # 按字段分隔符分割各字段
+            parts = record.split(FIELD_SEP)
             if len(parts) >= 5:
                 commits_data.append({
-                    "commit_id": parts[0],
-                    "subject": parts[1],
-                    "commit_msg": parts[2],
-                    "author": parts[3],
-                    "timestamp": int(parts[4]) if parts[4].isdigit() else 0
+                    "commit_id": parts[0].strip(),
+                    "subject": parts[1].strip(),
+                    "commit_msg": parts[2].strip(),
+                    "author": parts[3].strip(),
+                    "timestamp": int(parts[4].strip()) if parts[4].strip().isdigit() else 0
                 })
             
             if (i + 1) % 1000 == 0:
-                print(f"  已处理 {i + 1}/{len(lines)} commits")
+                print(f"  已处理 {i + 1}/{len(records)} commits")
         
         # 批量插入数据库
         conn = sqlite3.connect(self.cache_db_path)
@@ -475,20 +507,30 @@ class GitRepoManager:
         
         print(f"  正在保存到数据库...")
         
-        for commit in commits_data:
-            cursor.execute('''
+        # 使用批量插入提高效率
+        batch_size = 1000
+        for i in range(0, len(commits_data), batch_size):
+            batch = commits_data[i:i + batch_size]
+            cursor.executemany('''
                 INSERT OR IGNORE INTO commits 
                 (repo_version, commit_id, short_id, subject, commit_msg, author, timestamp)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                repo_version,
-                commit["commit_id"],
-                commit["commit_id"][:12],
-                commit["subject"],
-                commit["commit_msg"],
-                commit["author"],
-                commit["timestamp"]
-            ))
+            ''', [
+                (
+                    repo_version,
+                    commit["commit_id"],
+                    commit["commit_id"][:12],
+                    commit["subject"],
+                    commit["commit_msg"],
+                    commit["author"],
+                    commit["timestamp"]
+                )
+                for commit in batch
+            ])
+            conn.commit()
+            
+            if (i + batch_size) % 5000 == 0:
+                print(f"  已保存 {min(i + batch_size, len(commits_data))}/{len(commits_data)} commits")
         
         conn.commit()
         conn.close()

@@ -79,13 +79,13 @@ def check_cache_exists(repo_version: str = None) -> tuple:
         return (False, False, 0)
 
 
-def build_cache_for_repo(repo_version: str, max_commits: int = 10000):
+def build_cache_for_repo(repo_version: str, max_commits: int = None):
     """
     为指定仓库构建缓存
     
     Args:
         repo_version: 仓库版本名称
-        max_commits: 最大缓存的commit数量
+        max_commits: 最大缓存的commit数量，None或0表示缓存所有commits
     """
     try:
         from git_repo_manager import GitRepoManager
@@ -1138,7 +1138,8 @@ if __name__ == "__main__":
         
         if has_uncached:
             print("💡 提示: 首次使用建议先构建缓存，可大幅提高搜索效率")
-            print("   命令: python test_crawl_cve.py build-cache <repo_name> [max_commits]")
+            print("   命令: python test_crawl_cve.py build-cache <repo_name> [max_commits|all]")
+            print("   示例: python test_crawl_cve.py build-cache 5.10-hulk all  # 缓存所有commits")
             print()
     else:
         print("⚠️  未找到配置的仓库")
@@ -1227,8 +1228,9 @@ if __name__ == "__main__":
         elif cmd == "build-cache":
             # 构建缓存
             if len(sys.argv) < 3:
-                print("用法: python test_crawl_cve.py build-cache <repo_version> [max_commits]")
+                print("用法: python test_crawl_cve.py build-cache <repo_version> [max_commits|all]")
                 print("示例: python test_crawl_cve.py build-cache 5.10-hulk 10000")
+                print("示例: python test_crawl_cve.py build-cache 5.10-hulk all  # 缓存所有commits")
                 print()
                 repos = get_repository_list()
                 if repos:
@@ -1239,10 +1241,18 @@ if __name__ == "__main__":
                     print("提示: 请先配置 config.yaml 中的仓库信息")
             else:
                 repo_version = sys.argv[2]
-                max_commits = int(sys.argv[3]) if len(sys.argv) > 3 else 10000
+                
+                # 解析 max_commits 参数：支持数字或 "all"
+                max_commits_arg = sys.argv[3] if len(sys.argv) > 3 else "all"
+                if max_commits_arg.lower() == "all" or max_commits_arg == "0":
+                    max_commits = None  # None 表示获取所有commits
+                    commits_desc = "全部"
+                else:
+                    max_commits = int(max_commits_arg)
+                    commits_desc = str(max_commits)
                 
                 print(f"\n为 {repo_version} 构建缓存...")
-                print(f"最大缓存commits数: {max_commits}")
+                print(f"缓存commits数: {commits_desc}")
                 print("-" * 80)
                 
                 if build_cache_for_repo(repo_version, max_commits):
@@ -1266,16 +1276,17 @@ if __name__ == "__main__":
         else:
             print(f"未知命令: {cmd}")
             print("\n可用命令:")
-            print("  python test_crawl_cve.py repos                        # 列出配置的仓库")
-            print("  python test_crawl_cve.py build-cache <repo> [max]     # 构建commit缓存")
-            print("  python test_crawl_cve.py mainline                     # 测试mainline识别")
-            print("  python test_crawl_cve.py full                         # 测试完整项目逻辑")
-            print("  python test_crawl_cve.py CVE-XXXX-XXXXX               # 测试单个CVE")
+            print("  python test_crawl_cve.py repos                            # 列出配置的仓库")
+            print("  python test_crawl_cve.py build-cache <repo> [max|all]     # 构建commit缓存")
+            print("  python test_crawl_cve.py mainline                         # 测试mainline识别")
+            print("  python test_crawl_cve.py full                             # 测试完整项目逻辑")
+            print("  python test_crawl_cve.py CVE-XXXX-XXXXX                   # 测试单个CVE")
             print("  python test_crawl_cve.py search_introduced <commit> [repo]")
             print("  python test_crawl_cve.py check_fix <commit> [repo] [cve_id]")
             print("\n重要提示:")
             print("  首次使用前，请先执行 build-cache 命令构建缓存，以提高搜索效率。")
-            print("  示例: python test_crawl_cve.py build-cache 5.10-hulk 10000")
+            print("  示例: python test_crawl_cve.py build-cache 5.10-hulk all    # 缓存所有commits")
+            print("  示例: python test_crawl_cve.py build-cache 5.10-hulk 10000  # 缓存最近10000个")
     else:
         # 运行所有测试
         print("运行完整测试套件...\n")
