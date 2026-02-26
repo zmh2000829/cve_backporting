@@ -1,277 +1,149 @@
-# CVE Backporting 工具
+# CVE 补丁回溯与依赖分析工具
 
-一个用于Linux内核CVE补丁回合分析的自动化工具。
+针对自维护 Linux Kernel 仓库，自动化完成 CVE 漏洞补丁的定位、状态判定和前置依赖分析。
 
-## ✨ 核心功能
+## 功能概览
 
-1. **自动识别Mainline修复commit** - 从多个commit中准确识别主线修复
-2. **版本映射关系** - 建立完整的内核版本到commit的映射
-3. **智能commit搜索** - 多策略搜索自维护仓库中的对应commit
-4. **Backport识别** - 识别`[backport] + 社区msg`模式
-5. **修复状态检查** - 判断修复补丁是否已合入
-6. **依赖分析** - 分析并列出前置依赖补丁
+| 功能 | 说明 |
+|------|------|
+| CVE 情报获取 | 从 MITRE API 获取漏洞元数据，自动识别 mainline fix commit |
+| 版本映射 | 解析 `affected` 字段，建立 kernel 版本 → commit 的完整映射 |
+| 引入 commit 识别 | 从 `affected.versions[].version` 提取漏洞引入 commit |
+| 三级搜索定位 | 在目标仓库中按 ID → Subject → Diff 三级策略查找对应 commit |
+| 合入状态判定 | 自动判断修复补丁是否已合入目标仓库 |
+| 前置依赖分析 | 对未合入的补丁，分析修改同文件的中间 commits 和 Fixes 引用 |
 
-## 🚀 快速开始
+## 快速开始
 
-### 安装依赖
+### 1. 安装依赖
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 基础使用
+### 2. 配置仓库
 
-```bash
-# 查看CVE信息和版本映射
-python3 tests/test_crawl_cve.py CVE-2025-40198
-
-# 查找引入commit（显示搜索策略）
-python3 tests/test_crawl_cve.py search_introduced 8b67f04ab9de
-
-# 检查修复是否已合入
-python3 tests/test_crawl_cve.py check_fix abc123 "" CVE-2025-40198
-```
-
-### 配置仓库（重要）
-
-⚠️ **重要变更**: 现在必须为每个仓库配置 `branch` 字段
-
-复制配置模板并编辑：
+复制示例配置并编辑：
 
 ```bash
 cp config.example.yaml config.yaml
-# 编辑config.yaml
 ```
 
-**配置示例**（必须包含 branch）:
+编辑 `config.yaml`，填写你的内核仓库信息：
+
 ```yaml
 repositories:
   "5.10-hulk":
-    path: "/data/kernel/5.10"
-    branch: "5.10.0-60.18.0.50.oe2203"  # 必须配置
-    description: "华为5.10内核"
+    path: "/path/to/your/linux"
+    branch: "linux-5.10.y"
+    description: "自维护5.10内核"
 ```
 
-**验证配置**:
-```bash
-python verify_branch_config.py
-```
+### 3. 构建 commit 缓存（首次使用）
 
-**构建缓存**（首次使用必须执行）:
-```bash
-python tests/test_crawl_cve.py build-cache 5.10-hulk 10000
-```
-
-配置后可以进行实际的仓库搜索：
+对千万级 commit 的仓库，缓存可将搜索从分钟级降到毫秒级：
 
 ```bash
-python tests/test_crawl_cve.py search_introduced 8b67f04ab9de 5.10-hulk
-python tests/test_crawl_cve.py check_fix abc123 5.10-hulk CVE-2025-40198
+# 缓存所有 commits（推荐，约需 2-5 分钟）
+python tests/test_crawl_cve.py build-cache 5.10-hulk
+
+# 或只缓存最近 N 个
+python tests/test_crawl_cve.py build-cache 5.10-hulk 100000
 ```
 
-📖 详细说明: [基于分支的搜索指南](./docs/BRANCH_SEARCH_GUIDE.md)
+### 4. 分析 CVE
 
-## 📁 项目结构
+```bash
+# 端到端分析（推荐）
+python tests/test_crawl_cve.py full CVE-2024-26633
+
+# 仅获取 CVE 信息（不查仓库）
+python tests/test_crawl_cve.py CVE-2024-26633
+
+# Mainline 识别准确性测试
+python tests/test_crawl_cve.py mainline
+
+# 搜索指定 commit
+python tests/test_crawl_cve.py search da23bd709b46 5.10-hulk
+```
+
+### 5. CLI 工具
+
+```bash
+# 分析单个 CVE
+python cli.py analyze --cve CVE-2024-26633 --target 5.10-hulk
+
+# 批量分析（文件每行一个 CVE ID）
+python cli.py analyze --batch cve_list.txt --target 5.10-hulk
+
+# 构建缓存
+python cli.py build-cache --target 5.10-hulk
+
+# 搜索 commit
+python cli.py search --commit da23bd709b46 --target 5.10-hulk
+```
+
+## 输出示例
+
+以 CVE-2024-26633 为例，分析报告：
+
+```
+## 状态
+- 是否受影响: 是
+- 是否已修复: 是
+
+## 漏洞引入commit定位
+- 目标仓库commit: fbfa743a9d2a
+- 策略: exact_id
+- 置信度: 100%
+
+## 修复补丁定位
+- 目标仓库commit: da23bd709b46
+- 策略: subject_match
+- 置信度: 100%
+```
+
+对未修复的 CVE（如 CVE-2024-50257），会列出前置依赖补丁：
+
+```
+## 前置依赖补丁 (10 个)
+- 1f3b9000cb44 netfilter: x_tables: fix compat match/target pad ...
+- 3fdebc2d8e79 netfilter: x_tables: Use correct memory barriers.
+...
+
+## 建议
+- 修复补丁 f48d258f0ac5 未合入, 发现 20 个修改相同文件的commits需要review
+```
+
+## 项目结构
 
 ```
 cve_backporting/
-├── README.md                      # 本文件
-├── PROJECT_STRUCTURE.md           # 详细目录结构说明
-├── requirements.txt               # Python依赖
-├── config.example.yaml           # 配置文件示例
-│
-├── 核心模块/
-│   ├── crawl_cve_patch.py        # CVE信息获取
-│   ├── git_repo_manager.py       # Git仓库管理
-│   ├── enhanced_cve_analyzer.py  # CVE分析
-│   └── ...                       # 其他核心模块
-│
-├── tests/                        # 测试目录
-│   ├── README.md                 # 测试说明
-│   └── test_crawl_cve.py         # 测试工具
-│
-├── examples/                     # 示例代码
-│   ├── example_complete_workflow.py
-│   └── quick_start_example.py
-│
-├── docs/                         # 文档目录
-│   ├── README.md                 # 文档索引
-│   ├── TESTING_GUIDE.md          # 测试指南
-│   ├── CVE_MAINLINE_ANALYSIS.md  # 技术文档
-│   └── ...                       # 其他文档
-│
-└── output/                       # 输出目录
-    └── *.json, *.txt             # 所有输出文件
+├── crawl_cve_patch.py        # CVE 信息获取 + Patch 下载
+├── git_repo_manager.py       # Git 仓库操作 + SQLite 缓存
+├── enhanced_patch_matcher.py # 相似度匹配 + 依赖分析
+├── enhanced_cve_analyzer.py  # 端到端分析主流程
+├── config_loader.py          # YAML 配置加载
+├── cli.py                    # 命令行工具
+├── config.yaml               # 配置文件（git ignored）
+├── config.example.yaml       # 配置模板
+├── requirements.txt          # Python 依赖
+├── tests/
+│   └── test_crawl_cve.py     # 测试套件 + 快捷 CLI
+├── docs/
+│   └── TECHNICAL.md          # 技术文档
+└── output/                   # 分析结果输出目录
 ```
 
-详细结构请查看：[PROJECT_STRUCTURE.md](./PROJECT_STRUCTURE.md)
+## 配置说明
 
-## 📚 文档
+`config.yaml` 的完整字段参见 `config.example.yaml`。核心配置：
 
-- **[测试指南](./docs/TESTING_GUIDE.md)** - 完整的测试命令和使用方法
-- **[功能验证总结](./docs/功能验证总结.md)** - 项目功能验证（中文）
-- **[Mainline识别原理](./docs/CVE_MAINLINE_ANALYSIS.md)** - 技术详解
-- **[验证报告](./docs/VERIFICATION_REPORT.md)** - 详细验证报告
-- **[项目结构](./PROJECT_STRUCTURE.md)** - 目录结构说明
-
-## 🎯 使用示例
-
-### 示例1：分析CVE-2025-40198
-
-```bash
-python3 tests/test_crawl_cve.py CVE-2025-40198
-```
-
-**输出**：
-```
-✅ mainline_commit: 8ecb790ea8c3 (版本: 6.18)
-✅ 版本映射关系:
-   5.4.301  → 7bf46ff 🔄 Backport
-   5.10.246 → b2bac84 🔄 Backport
-   6.18     → 8ecb790 ⭐ Mainline
-```
-
-### 示例2：查找引入commit
-
-```bash
-# 显示搜索策略
-python3 tests/test_crawl_cve.py search_introduced 8b67f04ab9de
-```
-
-**功能**：
-- 精确commit ID匹配
-- Subject模糊匹配
-- `[backport]` 模式识别
-- 基于修改文件的搜索
-
-### 示例3：检查修复状态
-
-```bash
-python3 tests/test_crawl_cve.py check_fix abc123 5.10-hulk CVE-2025-40198
-```
-
-**功能**：
-- 自动获取社区修复commit
-- 在目标仓库中搜索
-- 计算相似度
-- 判断是否已合入
-
-## 🔧 核心模块
-
-| 模块 | 功能 |
-|------|------|
-| `crawl_cve_patch.py` | 从CVE API获取信息，识别mainline |
-| `git_repo_manager.py` | Git仓库管理，commit搜索 |
-| `enhanced_cve_analyzer.py` | 完整的CVE分析流程 |
-| `enhanced_patch_matcher.py` | Commit匹配算法 |
-| `ai_analyze.py` | AI辅助分析（可选） |
-| `config_loader.py` | 配置文件加载 |
-| `cli.py` | 命令行接口 |
-
-## 🧪 测试功能
-
-### 基础测试
-```bash
-python3 tests/test_crawl_cve.py CVE-XXXX-XXXXX   # 测试单个CVE
-python3 tests/test_crawl_cve.py mainline          # 测试mainline识别
-python3 tests/test_crawl_cve.py full              # 测试完整逻辑
-```
-
-### 功能测试
-```bash
-# 查找引入commit
-python3 tests/test_crawl_cve.py search_introduced <commit_id> [repo_version]
-
-# 检查修复状态
-python3 tests/test_crawl_cve.py check_fix <commit_id> [repo_version] [cve_id]
-```
-
-所有输出自动保存到 `output/` 目录。
-
-## 📊 测试结果
-
-**CVE-2025-40198 测试得分：90/100（优秀）**
-
-- ✅ mainline commit识别
-- ✅ mainline version识别
-- ✅ 版本到commit映射（7/7）
-- ✅ 标记正确性
-
-## 🎓 技术亮点
-
-### 1. 智能Mainline识别
-
-通过解析CVE数据中的`versionType: "original_commit_for_fix"`标记，准确识别主线修复commit。
-
-### 2. 多策略搜索
-
-- 精确commit ID匹配（100%准确）
-- Subject相似度计算（95%准确）
-- Backport模式识别（90%准确）
-- 文件匹配（80%准确）
-
-### 3. 完整的版本映射
-
-```python
-{
-  "mainline_commit": "8ecb790ea8c3",
-  "mainline_version": "6.18",
-  "version_commit_mapping": {
-    "5.4.301": "7bf46ff...",
-    "5.10.246": "b2bac84...",
-    "6.18": "8ecb790..."
-  }
-}
-```
-
-## 💡 常见问题
-
-### Q: 网络错误怎么办？
-A: 即使无法访问kernel.org，也可以：
-- 查看搜索策略
-- 测试本地仓库功能
-- 使用已保存的结果
-
-### Q: 如何配置自己的仓库？
-A: 编辑`config.yaml`：
-```yaml
-repositories:
-  my-kernel:
-    path: /path/to/your/kernel
-    branch: master
-```
-
-### Q: 输出文件在哪里？
-A: 所有输出统一保存在 `output/` 目录。
-
-## 🤝 贡献
-
-欢迎提交Issue和Pull Request！
-
-## 📄 License
-
-[您的License]
-
-## 📞 联系方式
-
-[您的联系方式]
-
----
-
-## 📚 文档链接
-
-### 必读文档
-- ⚠️ **[基于分支的搜索指南](./docs/BRANCH_SEARCH_GUIDE.md)** - 最新的分支配置要求
-- [配置使用说明](./docs/CONFIG_USAGE.md) - 配置文件详解
-- [测试和缓存指南](./docs/TESTING_CACHE_GUIDE.md) - 测试流程和缓存管理
-
-### 技术文档
-- [CVE Mainline分析](./docs/CVE_MAINLINE_ANALYSIS.md) - Mainline识别原理
-- [测试重构总结](./docs/TEST_REFACTOR_SUMMARY.md) - 测试代码说明
-- [项目结构](./PROJECT_STRUCTURE.md) - 项目架构
-- [变更日志](./CHANGELOG.md) - 版本历史
-
-### 示例和工具
-- [示例代码](./examples/) - 使用示例
-- [验证工具](./verify_branch_config.py) - 配置验证脚本
-- [完整文档目录](./docs/README.md) - 所有文档索引
+| 配置项 | 说明 | 默认值 |
+|--------|------|--------|
+| `repositories.<name>.path` | 内核仓库绝对路径 | 必填 |
+| `repositories.<name>.branch` | 目标分支名 | 必填 |
+| `cache.enabled` | 是否启用 SQLite 缓存 | `true` |
+| `cache.max_cached_commits` | 最大缓存 commit 数 | `10000000` |
+| `matching.subject_similarity_threshold` | Subject 匹配阈值 | `0.85` |
+| `matching.diff_similarity_threshold` | Diff 匹配阈值 | `0.70` |

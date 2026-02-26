@@ -1,501 +1,427 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-增强的CVE补丁分析器 - 主函数
-整合所有增强功能
+CVE补丁回溯分析器
+核心流程：
+1. 从MITRE获取CVE信息 → 识别mainline fix/introduced commit
+2. 三级搜索定位目标仓库中的对应commit（ID → Subject → Diff）
+3. 判定修复状态 + 前置依赖分析
 """
 
-import json
-import time
+import re
+import logging
 from typing import Dict, List, Optional
+from dataclasses import dataclass, field
+
+from crawl_cve_patch import CveFetcher, CveInfo, PatchInfo
+from git_repo_manager import GitRepoManager, GitCommit
 from enhanced_patch_matcher import (
-    CommitInfo, CommitMatcher, DependencyAnalyzer,
-    PatchBackportAnalyzer, generate_analysis_report
+    CommitInfo, CommitMatcher, DependencyAnalyzer, MatchResult,
+    extract_keywords, extract_files_from_diff, extract_functions_from_diff,
+    subject_similarity, normalize_subject,
 )
 
+logger = logging.getLogger(__name__)
 
-class EnhancedCVEAnalyzer:
+
+@dataclass
+class SearchResult:
+    """commit搜索结果"""
+    found: bool = False
+    strategy: str = "none"
+    confidence: float = 0.0
+    target_commit: str = ""
+    target_subject: str = ""
+    candidates: List[Dict] = field(default_factory=list)
+
+
+@dataclass
+class AnalysisResult:
+    """CVE分析结果"""
+    cve_id: str
+    target_version: str
+    cve_info: Optional[CveInfo] = None
+    fix_patch: Optional[PatchInfo] = None
+    introduced_search: Optional[SearchResult] = None
+    fix_search: Optional[SearchResult] = None
+    is_vulnerable: bool = False
+    is_fixed: bool = False
+    prerequisite_patches: List[Dict] = field(default_factory=list)
+    conflict_files: List[str] = field(default_factory=list)
+    recommendations: List[str] = field(default_factory=list)
+
+
+class BackportAnalyzer:
     """
-    增强的CVE分析器
+    CVE补丁回溯分析器
+    不依赖AI模块，纯逻辑分析
     """
-    
-    def __init__(self, crawl_cve_patch, ai_analyze, git_repo_manager):
-        self.crawl_cve_patch = crawl_cve_patch
-        self.ai_analyze = ai_analyze
-        self.git_repo_manager = git_repo_manager  # 用于操作目标git仓库
-        self.patch_analyzer = PatchBackportAnalyzer(crawl_cve_patch, ai_analyze)
-        self.commit_matcher = CommitMatcher()
-    
-    def get_target_repo_commits(self, 
-                               target_version: str,
-                               time_window: Optional[tuple] = None,
-                               file_paths: Optional[List[str]] = None,
-                               limit: int = 1000) -> List[CommitInfo]:
+
+    def __init__(self, fetcher: CveFetcher, git_mgr: GitRepoManager):
+        self.fetcher = fetcher
+        self.git_mgr = git_mgr
+        self.matcher = CommitMatcher()
+
+    # ─── 主入口 ──────────────────────────────────────────────────────
+
+    def analyze(self, cve_id: str, target_version: str) -> AnalysisResult:
         """
-        从目标仓库获取候选commits
-        
-        Args:
-            target_version: 目标内核版本
-            time_window: (start_ts, end_ts) 时间窗口
-            file_paths: 要关注的文件路径列表
-            limit: 最大返回数量
+        完整CVE分析流程
         """
-        commits = []
-        
-        # 方法1: 通过git log获取
-        # 构建git log命令
-        cmd_parts = ["git", "log", f"--max-count={limit}", "--format=%H|%s|%at|%an"]
-        
-        if time_window:
-            start_ts, end_ts = time_window
-            cmd_parts.append(f"--since={start_ts}")
-            cmd_parts.append(f"--until={end_ts}")
-        
-        if file_paths:
-            cmd_parts.append("--")
-            cmd_parts.extend(file_paths)
-        
-        # 执行git命令（需要实现具体的执行逻辑）
-        # git_output = self.git_repo_manager.execute_git_command(cmd_parts, target_version)
-        
-        # 方法2: 如果你有数据库，直接查询
-        # commits = self.git_repo_manager.query_commits_from_db(
-        #     version=target_version,
-        #     time_window=time_window,
-        #     file_paths=file_paths,
-        #     limit=limit
-        # )
-        
-        # 暂时返回空列表，你需要实现具体的获取逻辑
-        return commits
-    
-    def search_commit_with_multiple_strategies(self,
-                                               source_commit_id: str,
-                                               source_subject: str,
-                                               source_diff: str,
-                                               target_version: str) -> Dict:
-        """
-        使用多种策略搜索commit
-        """
-        # 构建源commit信息
-        source_commit = CommitInfo(
-            commit_id=source_commit_id,
-            subject=source_subject,
-            commit_msg="",
-            diff_code=source_diff,
-            modified_files=self.commit_matcher.extract_modified_files(source_diff),
-            modified_functions=self.commit_matcher.extract_modified_functions(source_diff)
-        )
-        
-        # 策略1: 精确commit ID查找（最快）
-        print(f"[策略1] 精确查找commit ID: {source_commit_id[:12]}")
-        exact_match = self.git_repo_manager.find_commit_by_id(source_commit_id[:12], target_version)
-        if exact_match:
-            return {
-                "found": True,
-                "strategy": "exact_commit_id",
-                "confidence": 1.0,
-                "target_commit": exact_match["commit_id"],
-                "target_subject": exact_match.get("subject", "")
-            }
-        
-        # 策略2: 基于subject的模糊搜索（快速）
-        print(f"[策略2] 基于subject模糊搜索")
-        # 先搜索包含关键词的commits
-        keywords = self.extract_keywords_from_subject(source_subject)
-        candidate_commits = self.git_repo_manager.search_commits_by_keywords(
-            keywords, target_version, limit=100
-        )
-        
-        if candidate_commits:
-            matches = self.commit_matcher.match_by_subject(
-                source_commit, candidate_commits, threshold=0.80
+        result = AnalysisResult(cve_id=cve_id, target_version=target_version)
+
+        # Step 1: 获取CVE信息
+        logger.info("=" * 70)
+        logger.info("[Step 1] 获取 %s 的CVE信息", cve_id)
+        cve_info = self.fetcher.fetch_cve(cve_id)
+        if not cve_info or not cve_info.fix_commit_id:
+            result.recommendations.append(f"无法获取 {cve_id} 的修复commit信息")
+            return result
+        result.cve_info = cve_info
+
+        logger.info("  Mainline fix: %s (%s)",
+                     cve_info.mainline_fix_commit[:12] if cve_info.mainline_fix_commit else "N/A",
+                     cve_info.mainline_version or "N/A")
+        logger.info("  Introduced: %s", cve_info.introduced_commit_id or "未知")
+
+        # Step 2: 获取mainline fix patch
+        logger.info("[Step 2] 获取mainline修复补丁内容")
+        fix_patch = self.fetcher.fetch_patch(cve_info.fix_commit_id)
+        if not fix_patch:
+            result.recommendations.append("无法获取修复补丁内容")
+            return result
+        result.fix_patch = fix_patch
+
+        # Step 3: 检查问题引入commit是否在目标仓库
+        if cve_info.introduced_commit_id:
+            logger.info("[Step 3] 搜索问题引入commit: %s", cve_info.introduced_commit_id[:12])
+            intro_patch = self.fetcher.fetch_patch(cve_info.introduced_commit_id)
+            intro_subject = intro_patch.subject if intro_patch else ""
+            intro_diff = intro_patch.diff_code if intro_patch else ""
+
+            result.introduced_search = self._search_commit(
+                cve_info.introduced_commit_id, intro_subject, intro_diff, target_version
             )
-            if matches and matches[0].confidence > 0.85:
-                return {
-                    "found": True,
-                    "strategy": "subject_match",
-                    "confidence": matches[0].confidence,
-                    "target_commit": matches[0].target_commit,
-                    "all_candidates": [
-                        {
-                            "commit": m.target_commit,
-                            "confidence": m.confidence,
-                            "details": m.details
-                        }
-                        for m in matches[:5]
-                    ]
-                }
-        
-        # 策略3: 基于修改文件的搜索（中速）
-        print(f"[策略3] 基于修改文件搜索")
-        if source_commit.modified_files:
-            # 搜索修改了相同文件的commits
-            file_based_commits = self.git_repo_manager.search_commits_by_files(
-                source_commit.modified_files, target_version, limit=200
-            )
-            
-            if file_based_commits:
-                # 同时用subject和diff匹配
-                subject_matches = self.commit_matcher.match_by_subject(
-                    source_commit, file_based_commits, threshold=0.75
-                )
-                diff_matches = self.commit_matcher.match_by_diff(
-                    source_commit, file_based_commits, threshold=0.65
-                )
-                
-                # 合并结果
-                all_matches = {}
-                for match in subject_matches + diff_matches:
-                    if match.target_commit not in all_matches or \
-                       match.confidence > all_matches[match.target_commit].confidence:
-                        all_matches[match.target_commit] = match
-                
-                sorted_matches = sorted(all_matches.values(), 
-                                       key=lambda x: x.confidence, reverse=True)
-                
-                if sorted_matches and sorted_matches[0].confidence > 0.70:
-                    return {
-                        "found": True,
-                        "strategy": "file_and_code_match",
-                        "confidence": sorted_matches[0].confidence,
-                        "target_commit": sorted_matches[0].target_commit,
-                        "all_candidates": [
-                            {
-                                "commit": m.target_commit,
-                                "confidence": m.confidence,
-                                "match_type": m.match_type,
-                                "details": m.details
-                            }
-                            for m in sorted_matches[:5]
-                        ]
-                    }
-        
-        # 策略4: 时间窗口 + 作者搜索（慢速，最后手段）
-        print(f"[策略4] 时间窗口 + 全局搜索")
-        # 假设回合时间不会超过±6个月
-        # 这一步比较慢，只在前面策略都失败时使用
-        
-        return {
-            "found": False,
-            "strategy": "none",
-            "confidence": 0.0,
-            "message": "未找到匹配的commit"
-        }
-    
-    def extract_keywords_from_subject(self, subject: str) -> List[str]:
-        """
-        从subject中提取关键词用于搜索
-        """
-        import re
-        
-        # 标准化
-        normalized = self.commit_matcher.normalize_subject(subject)
-        
-        # 移除常见的停用词
-        stopwords = {'a', 'an', 'the', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by'}
-        
-        # 分词并过滤
-        words = re.findall(r'\w+', normalized)
-        keywords = [w for w in words if len(w) > 3 and w not in stopwords]
-        
-        # 取前5个最重要的关键词
-        return keywords[:5]
-    
-    def analyze_cve_patch_enhanced(self, cve_id: str, target_kernel_version: str) -> Dict:
-        """
-        增强版CVE补丁分析主函数
-        """
-        start_time = time.time()
-        
-        analysis_result = {
-            "vuln_id": cve_id,
-            "kernel_version": target_kernel_version,
-            "introduced_commit_analysis": {},
-            "fix_commit_analysis": {},
-            "dependency_analysis": {},
-            "recommendations": []
-        }
-        
-        print(f"\n{'='*80}")
-        print(f"开始分析 CVE: {cve_id}, 目标版本: {target_kernel_version}")
-        print(f"{'='*80}\n")
-        
-        # ===== 步骤0: 获取CVE信息 =====
-        print(f"[步骤0] 从CVE API获取补丁信息...")
-        cve_patch_info = self.crawl_cve_patch.get_introduced_fixed_commit(cve_id)
-        
-        if not cve_patch_info or not cve_patch_info.get("fix_commit_id"):
-            return {
-                "code": 1,
-                "msg": f"CVE {cve_id} 未找到修复补丁信息",
-                "data": analysis_result
-            }
-        
-        introduced_commit = cve_patch_info.get("introduced_commit_id")
-        fix_commit = cve_patch_info["fix_commit_id"]
-        
-        print(f"  - 引入问题的commit: {introduced_commit or '未知'}")
-        print(f"  - 修复补丁commit: {fix_commit}")
-        
-        # ===== 步骤1: 分析引入问题的commit（如果存在）=====
-        if introduced_commit:
-            print(f"\n[步骤1] 分析问题引入commit: {introduced_commit}")
-            
-            # 获取社区引入commit的详细信息
-            intro_patch_content = self.crawl_cve_patch.get_patch_content(
-                introduced_commit, kernel_version="Stable"
-            )
-            
-            # 在目标仓库中搜索
-            intro_search_result = self.search_commit_with_multiple_strategies(
-                source_commit_id=introduced_commit,
-                source_subject=intro_patch_content.get("subject", ""),
-                source_diff=intro_patch_content.get("diff_code", ""),
-                target_version=target_kernel_version
-            )
-            
-            analysis_result["introduced_commit_analysis"] = {
-                "community_commit": introduced_commit,
-                "community_subject": intro_patch_content.get("subject", ""),
-                "search_result": intro_search_result
-            }
-            
-            if intro_search_result["found"]:
-                print(f"  ✓ 找到匹配: {intro_search_result['target_commit']}")
-                print(f"    置信度: {intro_search_result['confidence']:.2%}")
-                print(f"    匹配策略: {intro_search_result['strategy']}")
-                analysis_result["recommendations"].append(
-                    f"目标仓库包含问题引入commit {intro_search_result['target_commit']}, "
-                    f"需要合入修复补丁"
+            result.is_vulnerable = result.introduced_search.found
+            if result.is_vulnerable:
+                logger.info("  目标仓库包含漏洞引入commit -> 受影响")
+                result.recommendations.append(
+                    f"目标仓库包含漏洞引入commit ({result.introduced_search.target_commit[:12]}), 需要修复"
                 )
             else:
-                print(f"  ✗ 未找到匹配的commit")
-                analysis_result["recommendations"].append(
-                    f"目标仓库中未找到问题引入commit的匹配, 可能不受此CVE影响, "
-                    f"或需要人工确认"
-                )
-        
-        # ===== 步骤2: 分析修复补丁 =====
-        print(f"\n[步骤2] 分析修复补丁: {fix_commit}")
-        
-        fix_patch_content = self.crawl_cve_patch.get_patch_content(
-            fix_commit, kernel_version="Stable"
-        )
-        
-        if not fix_patch_content.get("patch"):
-            return {
-                "code": 1,
-                "msg": f"无法获取修复补丁 {fix_commit} 的内容",
-                "data": analysis_result
-            }
-        
-        # AI分析补丁内容
-        print(f"  - 使用AI分析补丁内容...")
-        fix_ai_analysis = self.ai_analyze.analyze_patch(
-            fix_patch_content["patch"], cve_id
-        )
-        
-        # 在目标仓库中搜索修复补丁
-        print(f"  - 在目标仓库中搜索修复补丁...")
-        fix_search_result = self.search_commit_with_multiple_strategies(
-            source_commit_id=fix_commit,
-            source_subject=fix_patch_content.get("subject", ""),
-            source_diff=fix_patch_content.get("diff_code", ""),
-            target_version=target_kernel_version
-        )
-        
-        analysis_result["fix_commit_analysis"] = {
-            "community_commit": fix_commit,
-            "community_subject": fix_patch_content.get("subject", ""),
-            "patch_content": fix_patch_content.get("patch", ""),
-            "ai_analysis": fix_ai_analysis.get("choices", [{}])[0].get("message", {}).get("content", ""),
-            "search_result": fix_search_result,
-            "modified_files": self.commit_matcher.extract_modified_files(
-                fix_patch_content.get("diff_code", "")
-            )
-        }
-        
-        if fix_search_result["found"]:
-            print(f"  ✓ 修复补丁已合入: {fix_search_result['target_commit']}")
-            print(f"    置信度: {fix_search_result['confidence']:.2%}")
-            analysis_result["recommendations"].append(
-                f"修复补丁可能已合入目标仓库 (commit: {fix_search_result['target_commit']}), "
-                f"建议人工确认"
-            )
-            
-            # 如果已合入，任务基本完成
-            end_time = time.time()
-            analysis_result["duration"] = end_time - start_time
-            analysis_result["code"] = 0
-            return analysis_result
+                logger.info("  目标仓库中未找到漏洞引入commit")
+                result.recommendations.append("未找到漏洞引入commit, 可能不受影响(建议人工确认)")
         else:
-            print(f"  ✗ 修复补丁未合入目标仓库")
-            analysis_result["recommendations"].append(
-                f"修复补丁未合入，需要分析依赖并准备回合"
-            )
-        
-        # ===== 步骤3: 分析依赖补丁 =====
-        print(f"\n[步骤3] 分析修复补丁的依赖...")
-        
-        # 获取社区依赖补丁列表
-        dep_params = {"fix_commit": fix_commit}
-        if introduced_commit:
-            dep_params["issue_commit"] = introduced_commit
-        
-        print(f"  - 从社区获取相关补丁...")
-        associated_patch_info = self.crawl_cve_patch.analyze_fix_deps_commit(dep_params)
-        
-        # 解析依赖补丁列表
-        dep_commits = []
-        for line in associated_patch_info.get("dep_post_patch", "").split("\n"):
-            if line.strip():
-                commit_id = line.strip().split()[0]
-                dep_commits.append(commit_id)
-        
-        for line in associated_patch_info.get("fix_post_patch", "").split("\n"):
-            if line.strip():
-                commit_id = line.strip().split()[0]
-                if commit_id not in dep_commits:
-                    dep_commits.append(commit_id)
-        
-        print(f"  - 找到 {len(dep_commits)} 个相关补丁")
-        
-        # 分析每个依赖补丁
-        dependency_details = {}
-        for idx, dep_commit in enumerate(dep_commits, 1):
-            print(f"\n  [{idx}/{len(dep_commits)}] 分析依赖补丁: {dep_commit}")
-            
-            # 获取依赖补丁内容
-            dep_patch_content = self.crawl_cve_patch.get_patch_content(
-                dep_commit, kernel_version="Stable"
-            )
-            
-            if not dep_patch_content.get("patch"):
-                print(f"    ⚠ 无法获取补丁内容，跳过")
-                continue
-            
-            # AI分析依赖关系
-            print(f"    - AI分析依赖关系...")
-            dep_ai_analysis = self.ai_analyze.analyze_patch_dependencies(
-                fix_commit[:12],
-                fix_patch_content,
-                dep_commit[:12],
-                dep_patch_content["patch"],
-                cve_id
-            )
-            
-            # 在目标仓库中搜索
-            print(f"    - 在目标仓库中搜索...")
-            dep_search_result = self.search_commit_with_multiple_strategies(
-                source_commit_id=dep_commit,
-                source_subject=dep_patch_content.get("subject", ""),
-                source_diff=dep_patch_content.get("diff_code", ""),
-                target_version=target_kernel_version
-            )
-            
-            dependency_details[dep_commit] = {
-                "community_subject": dep_patch_content.get("subject", ""),
-                "patch_content": dep_patch_content.get("patch", ""),
-                "ai_dependency_analysis": dep_ai_analysis.get("choices", [{}])[0].get("message", {}).get("content", ""),
-                "search_result": dep_search_result,
-                "is_merged": dep_search_result["found"] and dep_search_result["confidence"] > 0.80
-            }
-            
-            if dep_search_result["found"]:
-                print(f"    ✓ 已合入: {dep_search_result['target_commit']} "
-                      f"(置信度: {dep_search_result['confidence']:.2%})")
-            else:
-                print(f"    ✗ 未合入，需要回合")
-        
-        analysis_result["dependency_analysis"]["dependencies"] = dependency_details
-        
-        # ===== 步骤4: 生成回合建议 =====
-        print(f"\n[步骤4] 生成回合建议...")
-        
-        # 统计需要合入的补丁
-        not_merged = [
-            commit for commit, info in dependency_details.items()
-            if not info["is_merged"]
-        ]
-        
-        already_merged = [
-            commit for commit, info in dependency_details.items()
-            if info["is_merged"]
-        ]
-        
-        analysis_result["dependency_analysis"]["summary"] = {
-            "total_dependencies": len(dep_commits),
-            "already_merged": len(already_merged),
-            "need_to_merge": len(not_merged),
-            "not_merged_list": not_merged,
-            "already_merged_list": already_merged
-        }
-        
-        print(f"\n{'='*80}")
-        print(f"分析完成!")
-        print(f"  - 总依赖补丁: {len(dep_commits)}")
-        print(f"  - 已合入: {len(already_merged)}")
-        print(f"  - 需要合入: {len(not_merged) + 1}")  # +1 for fix commit
-        print(f"{'='*80}")
-        
-        # 生成建议
-        if not_merged:
-            analysis_result["recommendations"].append(
-                f"需要先合入 {len(not_merged)} 个依赖补丁: {', '.join(not_merged)}"
-            )
-        analysis_result["recommendations"].append(
-            f"最后合入修复补丁: {fix_commit}"
+            logger.info("[Step 3] 无引入commit信息, 基于5.10版本假定受影响")
+            result.is_vulnerable = True
+
+        # Step 4: 检查修复补丁是否已合入
+        logger.info("[Step 4] 搜索修复补丁: %s", cve_info.fix_commit_id[:12])
+        result.fix_search = self._search_commit(
+            cve_info.fix_commit_id, fix_patch.subject, fix_patch.diff_code, target_version
         )
-        
-        end_time = time.time()
-        analysis_result["duration"] = end_time - start_time
-        analysis_result["code"] = 0
-        
-        return analysis_result
+        result.is_fixed = result.fix_search.found
+
+        if result.is_fixed:
+            logger.info("  修复补丁已合入: %s (置信度: %.0f%%)",
+                        result.fix_search.target_commit[:12], result.fix_search.confidence * 100)
+            result.recommendations.append(
+                f"修复补丁已合入 ({result.fix_search.target_commit[:12]}), "
+                f"置信度 {result.fix_search.confidence:.0%}"
+            )
+            return result
+
+        logger.info("  修复补丁未合入")
+
+        # Step 5: 也检查stable backport版本(5.10.x)是否已合入
+        backport_commit = cve_info.version_commit_mapping.get(
+            self._find_closest_version(cve_info.version_commit_mapping, "5.10")
+        )
+        if backport_commit and backport_commit != cve_info.fix_commit_id:
+            logger.info("[Step 5] 检查5.10 stable backport: %s", backport_commit[:12])
+            bp_patch = self.fetcher.fetch_patch(backport_commit)
+            if bp_patch:
+                bp_search = self._search_commit(
+                    backport_commit, bp_patch.subject, bp_patch.diff_code, target_version
+                )
+                if bp_search.found:
+                    result.is_fixed = True
+                    result.fix_search = bp_search
+                    result.recommendations.append(
+                        f"5.10 stable backport已合入 ({bp_search.target_commit[:12]})"
+                    )
+                    return result
+
+        # Step 6: 依赖分析
+        logger.info("[Step 6] 分析前置依赖补丁")
+        self._analyze_prerequisites(result, target_version)
+
+        return result
+
+    # ─── 三级搜索 ────────────────────────────────────────────────────
+
+    def _search_commit(self, commit_id: str, subject: str,
+                       diff_code: str, target_version: str) -> SearchResult:
+        """
+        三级搜索策略定位目标仓库中的commit
+        Level 1: 精确 commit ID
+        Level 2: 语义 subject 匹配 (含 [backport] 变体)
+        Level 3: 代码 diff 匹配
+        """
+        sr = SearchResult()
+
+        # Level 1: ID精确匹配
+        logger.info("  [L1] 精确ID匹配: %s", commit_id[:12])
+        exact = self.git_mgr.find_commit_by_id(commit_id, target_version)
+        if exact:
+            sr.found = True
+            sr.strategy = "exact_id"
+            sr.confidence = 1.0
+            sr.target_commit = exact["commit_id"]
+            sr.target_subject = exact["subject"]
+            logger.info("  [L1] 找到: %s", exact["commit_id"][:12])
+            return sr
+
+        if not subject:
+            logger.info("  [L1] 无subject信息, 跳过L2/L3")
+            return sr
+
+        # Level 2: Subject语义匹配
+        logger.info("  [L2] Subject语义匹配: %s", subject[:60])
+        sr = self._search_by_subject(commit_id, subject, target_version)
+        if sr.found:
+            return sr
+
+        # Level 3: Diff代码匹配
+        if diff_code:
+            files = extract_files_from_diff(diff_code)
+            if files:
+                logger.info("  [L3] Diff代码匹配 (文件: %s)", ", ".join(files[:3]))
+                sr = self._search_by_diff(commit_id, subject, diff_code, files, target_version)
+                if sr.found:
+                    return sr
+
+        return sr
+
+    def _search_by_subject(self, commit_id: str, subject: str,
+                           target_version: str) -> SearchResult:
+        """Level 2: 基于subject搜索"""
+        sr = SearchResult()
+        norm_subj = normalize_subject(subject)
+
+        # 策略2a: 精确subject搜索
+        candidates = self.git_mgr.search_by_subject(norm_subj, target_version, limit=10)
+
+        # 策略2b: 关键词搜索
+        if not candidates:
+            keywords = extract_keywords(subject)
+            if keywords:
+                candidates = self.git_mgr.search_by_keywords(keywords, target_version, limit=30)
+
+        if not candidates:
+            return sr
+
+        # 计算相似度
+        best_match = None
+        best_sim = 0.0
+        all_candidates = []
+
+        for c in candidates:
+            sim = subject_similarity(subject, c.subject)
+            all_candidates.append({
+                "commit_id": c.commit_id,
+                "subject": c.subject,
+                "similarity": sim,
+            })
+            if sim > best_sim:
+                best_sim = sim
+                best_match = c
+
+        sr.candidates = sorted(all_candidates, key=lambda x: x["similarity"], reverse=True)[:5]
+
+        if best_match and best_sim >= 0.85:
+            sr.found = True
+            sr.strategy = "subject_match"
+            sr.confidence = best_sim
+            sr.target_commit = best_match.commit_id
+            sr.target_subject = best_match.subject
+            logger.info("  [L2] 找到: %s (相似度: %.0f%%)", best_match.commit_id[:12], best_sim * 100)
+
+        return sr
+
+    def _search_by_diff(self, commit_id: str, subject: str,
+                        diff_code: str, files: List[str],
+                        target_version: str) -> SearchResult:
+        """Level 3: 基于diff搜索"""
+        sr = SearchResult()
+
+        file_commits = self.git_mgr.search_by_files(files[:3], target_version, limit=50)
+        if not file_commits:
+            return sr
+
+        source = CommitInfo(
+            commit_id=commit_id,
+            subject=subject,
+            diff_code=diff_code,
+            modified_files=files,
+        )
+
+        targets = []
+        for gc in file_commits:
+            diff = self.git_mgr.get_commit_diff(gc.commit_id, target_version)
+            targets.append(CommitInfo(
+                commit_id=gc.commit_id,
+                subject=gc.subject,
+                diff_code=diff or "",
+                modified_files=extract_files_from_diff(diff or ""),
+            ))
+
+        matches = self.matcher.match_comprehensive(source, targets)
+        if matches and matches[0].confidence >= 0.70:
+            best = matches[0]
+            sr.found = True
+            sr.strategy = f"diff_match ({best.match_type})"
+            sr.confidence = best.confidence
+            sr.target_commit = best.target_commit
+            sr.target_subject = best.details.get("target_subject", "")
+            sr.candidates = [
+                {"commit_id": m.target_commit, "confidence": m.confidence, "type": m.match_type}
+                for m in matches[:5]
+            ]
+            logger.info("  [L3] 找到: %s (置信度: %.0f%%)", best.target_commit[:12], best.confidence * 100)
+
+        return sr
+
+    # ─── 前置依赖分析 ────────────────────────────────────────────────
+
+    def _analyze_prerequisites(self, result: AnalysisResult, target_version: str):
+        """
+        分析修复补丁的前置依赖：
+        对比mainline修复补丁修改的文件/行号，查找目标仓库中的差异
+        """
+        if not result.fix_patch:
+            return
+
+        fix_files = result.fix_patch.modified_files
+        if not fix_files:
+            result.recommendations.append("修复补丁未合入, 补丁无文件修改信息, 无法分析依赖")
+            return
+
+        logger.info("  分析修改文件的中间补丁: %s", ", ".join(fix_files[:5]))
+
+        # 在mainline中查找fix之前修改相同文件的commits
+        # （用mainline仓库的patch内容中的Fixes:标签等信息）
+        fix_commit_id = result.cve_info.fix_commit_id
+        fix_msg = result.fix_patch.commit_msg or ""
+
+        # 从Fixes:标签提取
+        fixes_commits = re.findall(r"Fixes:\s*([0-9a-f]{7,40})", fix_msg)
+        if fixes_commits:
+            logger.info("  Fixes标签引用: %s", ", ".join(c[:12] for c in fixes_commits))
+
+        # 在目标仓库中查找修改同文件的近期commits（可能是缺失的前置依赖）
+        intervening = self.git_mgr.search_by_files(fix_files[:3], target_version, limit=20)
+
+        prereqs = []
+        for c in intervening:
+            # 排除已找到的commit
+            if result.fix_search and c.commit_id[:12] == result.fix_search.target_commit[:12]:
+                continue
+            if result.introduced_search and result.introduced_search.target_commit:
+                if c.commit_id[:12] == result.introduced_search.target_commit[:12]:
+                    continue
+
+            prereqs.append({
+                "commit_id": c.commit_id,
+                "subject": c.subject,
+                "timestamp": c.timestamp,
+            })
+
+        result.conflict_files = fix_files
+        result.prerequisite_patches = prereqs[:10]
+
+        not_merged_msg = f"修复补丁 {fix_commit_id[:12]} 未合入"
+        if prereqs:
+            not_merged_msg += f", 发现 {len(prereqs)} 个修改相同文件的commits需要review"
+        result.recommendations.append(not_merged_msg)
+
+    # ─── 工具方法 ────────────────────────────────────────────────────
+
+    @staticmethod
+    def _find_closest_version(mapping: Dict[str, str], prefix: str) -> Optional[str]:
+        """从版本映射中找最接近prefix的版本"""
+        for ver in mapping:
+            if ver.startswith(prefix):
+                return ver
+        return None
+
+    # ─── 报告生成 ────────────────────────────────────────────────────
+
+    @staticmethod
+    def format_report(result: AnalysisResult) -> str:
+        """生成人类可读的分析报告"""
+        lines = [
+            f"# CVE补丁回溯分析报告: {result.cve_id}",
+            f"目标版本: {result.target_version}",
+            "",
+        ]
+
+        if result.cve_info:
+            lines.append(f"## CVE信息")
+            lines.append(f"- 描述: {result.cve_info.description[:200]}")
+            lines.append(f"- 严重程度: {result.cve_info.severity}")
+            lines.append(f"- Mainline fix: {result.cve_info.mainline_fix_commit[:12] if result.cve_info.mainline_fix_commit else 'N/A'}")
+            lines.append(f"- 引入commit: {result.cve_info.introduced_commit_id or '未知'}")
+            lines.append("")
+
+        if result.fix_patch:
+            lines.append(f"## 修复补丁")
+            lines.append(f"- Subject: {result.fix_patch.subject}")
+            lines.append(f"- 修改文件: {', '.join(result.fix_patch.modified_files[:5])}")
+            lines.append("")
+
+        lines.append(f"## 状态")
+        lines.append(f"- 是否受影响: {'是' if result.is_vulnerable else '未确认'}")
+        lines.append(f"- 是否已修复: {'是' if result.is_fixed else '否'}")
+        lines.append("")
+
+        if result.introduced_search and result.introduced_search.found:
+            sr = result.introduced_search
+            lines.append(f"## 漏洞引入commit定位")
+            lines.append(f"- 目标仓库commit: {sr.target_commit[:12]}")
+            lines.append(f"- 策略: {sr.strategy}")
+            lines.append(f"- 置信度: {sr.confidence:.0%}")
+            lines.append("")
+
+        if result.fix_search:
+            sr = result.fix_search
+            lines.append(f"## 修复补丁定位")
+            if sr.found:
+                lines.append(f"- 目标仓库commit: {sr.target_commit[:12]}")
+                lines.append(f"- 策略: {sr.strategy}")
+                lines.append(f"- 置信度: {sr.confidence:.0%}")
+            else:
+                lines.append(f"- 状态: 未找到/未合入")
+                if sr.candidates:
+                    lines.append(f"- 最接近的候选:")
+                    for c in sr.candidates[:3]:
+                        lines.append(f"  - {c.get('commit_id', '')[:12]} "
+                                     f"(相似度: {c.get('similarity', c.get('confidence', 0)):.0%})")
+            lines.append("")
+
+        if result.prerequisite_patches:
+            lines.append(f"## 前置依赖补丁 ({len(result.prerequisite_patches)} 个)")
+            for p in result.prerequisite_patches:
+                lines.append(f"- {p['commit_id'][:12]} {p['subject'][:60]}")
+            lines.append("")
+
+        if result.recommendations:
+            lines.append(f"## 建议")
+            for r in result.recommendations:
+                lines.append(f"- {r}")
+
+        return "\n".join(lines)
 
 
-def main():
-    """
-    使用示例
-    """
-    # 导入实际的模块
-    from crawl_cve_patch import Crawl_Cve_Patch
-    from git_repo_manager import GitRepoManager
-    from ai_analyze import Ai_Analyze
-    from config_loader import ConfigLoader
-    
-    # 加载配置
-    config = ConfigLoader.load("config.yaml")
-    
-    # 初始化组件
-    crawl_cve_patch = Crawl_Cve_Patch()
-    ai_analyze = Ai_Analyze()
-    
-    # 初始化GitRepoManager（传递完整的配置信息，包括path和branch）
-    repo_configs = {k: {'path': v['path'], 'branch': v.get('branch')} 
-                   for k, v in config.repositories.items()}
-    git_repo_manager = GitRepoManager(repo_configs, use_cache=config.cache.enabled)
-    
-    analyzer = EnhancedCVEAnalyzer(crawl_cve_patch, ai_analyze, git_repo_manager)
-    
-    # 分析CVE
-    result = analyzer.analyze_cve_patch_enhanced(
-        cve_id="CVE-2024-12345",
-        target_kernel_version="5.10-hulk"
-    )
-    
-    # 打印结果
-    print(json.dumps(result, indent=4, ensure_ascii=False))
-    
-    # 生成报告
-    report = generate_analysis_report(result)
-    print("\n" + report)
-    
-    # 保存结果
-    with open(f"cve_analysis_{result['vuln_id']}.json", "w", encoding="utf-8") as f:
-        json.dump(result, f, indent=4, ensure_ascii=False)
-
-
-if __name__ == "__main__":
-    main()
+# 向后兼容
+EnhancedCVEAnalyzer = BackportAnalyzer
