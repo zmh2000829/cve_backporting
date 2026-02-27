@@ -1,149 +1,108 @@
-# CVE 补丁回溯与依赖分析工具
+# CVE 补丁回溯分析工具
 
-针对自维护 Linux Kernel 仓库，自动化完成 CVE 漏洞补丁的定位、状态判定和前置依赖分析。
+针对自维护 Linux Kernel 仓库的 CVE 漏洞补丁回溯与依赖分析工具。
 
-## 功能概览
+## 架构
 
-| 功能 | 说明 |
-|------|------|
-| CVE 情报获取 | 从 MITRE API 获取漏洞元数据，自动识别 mainline fix commit |
-| 版本映射 | 解析 `affected` 字段，建立 kernel 版本 → commit 的完整映射 |
-| 引入 commit 识别 | 从 `affected.versions[].version` 提取漏洞引入 commit |
-| 三级搜索定位 | 在目标仓库中按 ID → Subject → Diff 三级策略查找对应 commit |
-| 合入状态判定 | 自动判断修复补丁是否已合入目标仓库 |
-| 前置依赖分析 | 对未合入的补丁，分析修改同文件的中间 commits 和 Fixes 引用 |
+四个核心 Agent 通过 Pipeline 编排：
+
+```
+Crawler Agent → Analysis Agent → Dependency Agent → DryRun Agent
+```
+
+| Agent | 职责 |
+|-------|------|
+| **Crawler** | 从 MITRE API + googlesource 获取 CVE 元数据和补丁内容 |
+| **Analysis** | 三级搜索定位目标仓库中的对应 commit (ID → Subject → Diff) |
+| **Dependency** | 分析前置依赖补丁、Fixes 标签引用、函数级冲突检测 |
+| **DryRun** | `git apply --check` 试应用补丁，检测冲突文件 |
 
 ## 快速开始
 
-### 1. 安装依赖
-
 ```bash
+# 安装依赖
 pip install -r requirements.txt
-```
 
-### 2. 配置仓库
+# 编辑配置（填入本地仓库路径）
+vim config.yaml
 
-复制示例配置并编辑：
+# 构建 commit 缓存（千万级仓库首次需要）
+python cli.py build-cache --target 5.10-hulk
 
-```bash
-cp config.example.yaml config.yaml
-```
-
-编辑 `config.yaml`，填写你的内核仓库信息：
-
-```yaml
-repositories:
-  "5.10-hulk":
-    path: "/path/to/your/linux"
-    branch: "linux-5.10.y"
-    description: "自维护5.10内核"
-```
-
-### 3. 构建 commit 缓存（首次使用）
-
-对千万级 commit 的仓库，缓存可将搜索从分钟级降到毫秒级：
-
-```bash
-# 缓存所有 commits（推荐，约需 2-5 分钟）
-python tests/test_crawl_cve.py build-cache 5.10-hulk
-
-# 或只缓存最近 N 个
-python tests/test_crawl_cve.py build-cache 5.10-hulk 100000
-```
-
-### 4. 分析 CVE
-
-```bash
-# 端到端分析（推荐）
-python tests/test_crawl_cve.py full CVE-2024-26633
-
-# 仅获取 CVE 信息（不查仓库）
-python tests/test_crawl_cve.py CVE-2024-26633
-
-# Mainline 识别准确性测试
-python tests/test_crawl_cve.py mainline
-
-# 搜索指定 commit
-python tests/test_crawl_cve.py search da23bd709b46 5.10-hulk
-```
-
-### 5. CLI 工具
-
-```bash
 # 分析单个 CVE
 python cli.py analyze --cve CVE-2024-26633 --target 5.10-hulk
 
-# 批量分析（文件每行一个 CVE ID）
+# 跳过 dry-run（加快速度）
+python cli.py analyze --cve CVE-2024-26633 --target 5.10-hulk --no-dryrun
+
+# 批量分析
 python cli.py analyze --batch cve_list.txt --target 5.10-hulk
 
-# 构建缓存
-python cli.py build-cache --target 5.10-hulk
-
 # 搜索 commit
-python cli.py search --commit da23bd709b46 --target 5.10-hulk
+python cli.py search --commit d375b98e0248 --target 5.10-hulk
 ```
 
-## 输出示例
+## 测试
 
-以 CVE-2024-26633 为例，分析报告：
+```bash
+# 完整测试套件
+python -m tests.test_agents
 
-```
-## 状态
-- 是否受影响: 是
-- 是否已修复: 是
+# 单个 CVE
+python -m tests.test_agents CVE-2024-26633
 
-## 漏洞引入commit定位
-- 目标仓库commit: fbfa743a9d2a
-- 策略: exact_id
-- 置信度: 100%
+# Mainline 识别准确性
+python -m tests.test_agents mainline
 
-## 修复补丁定位
-- 目标仓库commit: da23bd709b46
-- 策略: subject_match
-- 置信度: 100%
-```
+# 端到端分析（含 dry-run）
+python -m tests.test_agents full CVE-2024-26633
 
-对未修复的 CVE（如 CVE-2024-50257），会列出前置依赖补丁：
+# 单独测试 DryRun Agent
+python -m tests.test_agents dryrun CVE-2024-26633
 
-```
-## 前置依赖补丁 (10 个)
-- 1f3b9000cb44 netfilter: x_tables: fix compat match/target pad ...
-- 3fdebc2d8e79 netfilter: x_tables: Use correct memory barriers.
-...
-
-## 建议
-- 修复补丁 f48d258f0ac5 未合入, 发现 20 个修改相同文件的commits需要review
+# 查看仓库配置
+python -m tests.test_agents repos
 ```
 
 ## 项目结构
 
 ```
 cve_backporting/
-├── crawl_cve_patch.py        # CVE 信息获取 + Patch 下载
-├── git_repo_manager.py       # Git 仓库操作 + SQLite 缓存
-├── enhanced_patch_matcher.py # 相似度匹配 + 依赖分析
-├── enhanced_cve_analyzer.py  # 端到端分析主流程
-├── config_loader.py          # YAML 配置加载
-├── cli.py                    # 命令行工具
-├── config.yaml               # 配置文件（git ignored）
-├── config.example.yaml       # 配置模板
-├── requirements.txt          # Python 依赖
+├── core/                     # 基础设施层
+│   ├── models.py             #   所有数据模型
+│   ├── config.py             #   YAML 配置加载
+│   ├── git_manager.py        #   Git 仓库操作 + SQLite 缓存
+│   └── matcher.py            #   相似度算法 + 依赖图
+├── agents/                   # 核心 Agent 层
+│   ├── crawler.py            #   Crawler Agent
+│   ├── analysis.py           #   Analysis Agent
+│   ├── dependency.py         #   Dependency Agent
+│   └── dryrun.py             #   DryRun Agent
+├── pipeline.py               # Pipeline 编排器
+├── cli.py                    # CLI 入口
 ├── tests/
-│   └── test_crawl_cve.py     # 测试套件 + 快捷 CLI
-├── docs/
-│   └── TECHNICAL.md          # 技术文档
-└── output/                   # 分析结果输出目录
+│   └── test_agents.py        # 测试套件
+├── config.yaml               # 配置文件
+├── requirements.txt
+└── docs/
+    └── TECHNICAL.md          # 技术文档
 ```
 
-## 配置说明
+## 配置
 
-`config.yaml` 的完整字段参见 `config.example.yaml`。核心配置：
+`config.yaml` 关键配置：
 
-| 配置项 | 说明 | 默认值 |
-|--------|------|--------|
-| `repositories.<name>.path` | 内核仓库绝对路径 | 必填 |
-| `repositories.<name>.branch` | 目标分支名 | 必填 |
-| `cache.enabled` | 是否启用 SQLite 缓存 | `true` |
-| `cache.max_cached_commits` | 最大缓存 commit 数 | `10000000` |
-| `matching.subject_similarity_threshold` | Subject 匹配阈值 | `0.85` |
-| `matching.diff_similarity_threshold` | Diff 匹配阈值 | `0.70` |
+```yaml
+repositories:
+  "5.10-hulk":
+    path: "/path/to/linux"
+    branch: "linux-5.10.y"
+
+cache:
+  enabled: true
+  database_path: "./commit_cache.db"
+
+matching:
+  subject_similarity_threshold: 0.85
+  diff_similarity_threshold: 0.70
+```

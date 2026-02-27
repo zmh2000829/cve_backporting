@@ -1,274 +1,160 @@
 # 技术文档
 
-## 1. 系统架构
+## 系统架构
 
 ```
-                  ┌─────────────────────────────────┐
-                  │       BackportAnalyzer           │
-                  │    (enhanced_cve_analyzer.py)    │
-                  │                                  │
-                  │  analyze(cve_id, target_version) │
-                  └──────┬──────────────┬────────────┘
-                         │              │
-              ┌──────────▼──┐    ┌──────▼──────────┐
-              │  CveFetcher │    │  GitRepoManager  │
-              │ (crawl_cve_ │    │ (git_repo_       │
-              │  patch.py)  │    │  manager.py)     │
-              └──────┬──────┘    └──────┬───────────┘
-                     │                  │
-        ┌────────────▼───┐    ┌────────▼─────────┐
-        │  MITRE CVE API │    │  本地 Git 仓库    │
-        │  Googlesource  │    │  SQLite 缓存      │
-        └────────────────┘    └──────────────────┘
-
-              ┌─────────────────────────┐
-              │   CommitMatcher /       │
-              │   DependencyAnalyzer    │
-              │ (enhanced_patch_        │
-              │  matcher.py)            │
-              └─────────────────────────┘
+                    Pipeline (编排器)
+                         │
+    ┌────────────┬───────┴───────┬────────────┐
+    ▼            ▼               ▼            ▼
+ Crawler     Analysis       Dependency     DryRun
+  Agent       Agent           Agent        Agent
+    │            │               │            │
+    ▼            ▼               ▼            ▼
+ MITRE API   GitRepoManager  GitRepoManager  git apply
+ Google Git  CommitMatcher   DependencyGraph  --check
 ```
 
-数据流：`MITRE API` → `CveFetcher` → `BackportAnalyzer` → `GitRepoManager` → 分析结果
+### 数据流
 
-## 2. 模块详解
+1. **Pipeline.analyze(cve_id, target_version)** 启动分析
+2. **Crawler** 从外部API获取 CveInfo + PatchInfo
+3. **Analysis** 在目标仓库执行三级搜索，返回 SearchResult
+4. **Dependency** 分析未合入补丁的前置依赖
+5. **DryRun** 试应用补丁检测冲突
 
-### 2.1 CveFetcher (`crawl_cve_patch.py`)
+---
 
-负责从外部数据源获取 CVE 漏洞信息和补丁内容。
+## core/ 基础设施
 
-#### 数据结构
+### models.py — 数据模型
 
+| 类 | 用途 |
+|---|------|
+| `CveInfo` | CVE元数据：ID、描述、severity、fix/introduced commits、版本映射 |
+| `PatchInfo` | 补丁内容：subject、commit_msg、diff_code、modified_files |
+| `GitCommit` | Git commit记录（简化） |
+| `CommitInfo` | 匹配用commit详情（含diff、函数列表） |
+| `MatchResult` | 匹配结果：target_commit、confidence、match_type |
+| `SearchResult` | 搜索结果：found、strategy、candidates |
+| `DryRunResult` | 试应用结果：applies_cleanly、conflicting_files |
+| `AnalysisResult` | 完整分析结果（聚合以上所有） |
+
+### git_manager.py — Git仓库管理
+
+**千万级commit优化：**
+- `git merge-base --is-ancestor` 替代 `git branch --contains`（毫秒级 vs 分钟级）
+- `\x1e`/`\x1f` 作为字段/记录分隔符，避免commit message中的`|`冲突
+- SQLite + FTS5 全文索引加速subject搜索
+- 批量缓存构建：WAL模式 + 5000条批写入
+
+**关键API：**
 ```python
-@dataclass
-class CveInfo:
-    cve_id: str
-    description: str
-    severity: str
-    introduced_commits: List[Dict]       # 漏洞引入 commits
-    fix_commits: List[Dict]              # 修复 commits
-    mainline_fix_commit: str             # mainline 修复 commit ID
-    mainline_version: str                # mainline 对应版本号
-    version_commit_mapping: Dict[str, str]  # {版本号: commit_id}
-
-@dataclass
-class PatchInfo:
-    commit_id: str
-    subject: str
-    commit_msg: str
-    author: str
-    diff_code: str
-    modified_files: List[str]
+find_commit_by_id(commit_id, repo_version)   # Level 1
+search_by_subject(subject, repo_version)      # Level 2
+search_by_keywords(keywords, repo_version)    # Level 2
+search_by_files(files, repo_version)          # Level 3 / Dependency
+get_commit_diff(commit_id, repo_version)      # Level 3
+build_commit_cache(repo_version, max_commits) # 缓存构建
 ```
 
-#### CVE 数据解析逻辑
+### matcher.py — 相似度算法
 
-MITRE CVE API (`https://cveawg.mitre.org/api/cve/{CVE_ID}`) 返回的数据中，关键字段位于 `containers.cna`：
-
-1. **references** — 包含补丁链接，通过 URL 正则提取 commit ID
-2. **affected** — 包含两类 product 条目：
-   - `versionType: "git"` → `version` 是**引入 commit**，`lessThan` 是**修复 commit**
-   - `versionType: "semver"` / `"original_commit_for_fix"` → 版本号
-
-映射建立算法：
-```
-git_commits = [每个 git 版本的 lessThan]    # 按顺序
-semver_versions = [每个 semver 的 version]  # 按顺序
-if len(git_commits) == len(semver_versions):
-    mapping = dict(zip(semver_versions, git_commits))
-```
-
-`versionType == "original_commit_for_fix"` 标记的版本即为 **mainline 版本**，其对应的 git commit 即为 **mainline fix commit**。
-
-#### Patch 获取
-
-使用 Google Kernel 镜像的两个端点：
-
-| 端点 | 格式 | 内容 |
+| 函数 | 算法 | 用途 |
 |------|------|------|
-| `/+/{commit}?format=JSON` | JSON（去掉 `)]}'` 前缀） | subject, author, date, tree_diff |
-| `/+/{commit}^!?format=TEXT` | Base64 编码的 unified diff | 完整 diff 内容 |
+| `subject_similarity` | SequenceMatcher (标准化后) | Level 2 匹配 |
+| `diff_similarity` | SequenceMatcher (仅+/-行) | Level 3 匹配 |
+| `file_similarity` | Jaccard (文件名集合) | 过滤 + 评分 |
+| `normalize_subject` | 去除[backport]等前缀 | 预处理 |
+| `extract_keywords` | 去停用词 + 截断 | 关键词搜索 |
 
-两步获取：先 JSON 拿元数据，再 TEXT 拿 diff，合并为 `PatchInfo`。
+**CommitMatcher.match_comprehensive 流程：**
+1. ID精确比较 → confidence=1.0
+2. Subject相似度 ≥ 0.95 → 直接返回
+3. Diff相似度 (file×0.4 + diff×0.6) ≥ 0.70
+4. 合并去重，按confidence降序
 
-### 2.2 GitRepoManager (`git_repo_manager.py`)
+---
 
-负责本地 Git 仓库的高效查询，针对千万级 commit 做了专门优化。
+## agents/ 核心Agent
 
-#### 性能关键决策
+### Crawler Agent (`agents/crawler.py`)
 
-| 操作 | 旧方案 | 新方案 | 提速 |
-|------|--------|--------|------|
-| 判断 commit 是否在分支上 | `git branch --contains` O(n) | `git merge-base --is-ancestor` O(1) | ~1000x |
-| commit 日志解析分隔符 | `\|`（与 body 冲突） | `\x1e` / `\x1f`（ASCII 控制字符） | 正确性修复 |
-| 缓存写入 | 逐条 INSERT | 批量 INSERT + WAL 模式 | ~10x |
+**数据源：**
+- MITRE CVE API: `https://cveawg.mitre.org/api/cve/{CVE_ID}`
+- Google Kernel Mirror: `kernel.googlesource.com/pub/scm/linux/kernel/git/stable/linux`
 
-#### 分支感知查询
+**Mainline识别逻辑：**
+1. `affected[].versions[]` 中 `versionType="git"` 的条目提取 fix commits
+2. `versionType="original_commit_for_fix"` 标识 mainline 版本号
+3. git commits 与 semver versions 一一映射
+4. 匹配 mainline 版本号的 commit 即为 mainline fix
 
-所有查询方法（`find_commit_by_id`, `search_by_subject`, `search_by_keywords`, `search_by_files`）都自动限定在配置的分支上，避免查到其他分支的 commit。
+**Patch获取（双请求）：**
+1. `?format=JSON` → commit元数据（subject、author、tree_diff文件列表）
+2. `%5E%21?format=TEXT` → base64编码的diff
 
-```python
-# find_commit_by_id 的完整流程：
-1. 查 SQLite 缓存（按 short_id 索引）
-2. git cat-file -t {commit}          # 验证 commit 存在
-3. git merge-base --is-ancestor {commit} {branch}  # 验证在目标分支上
-4. git log -1 --format=... {commit}  # 获取详细信息
-```
+### Analysis Agent (`agents/analysis.py`)
 
-#### SQLite 缓存架构
+**三级搜索：**
 
-```sql
-CREATE TABLE commits (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    repo_version TEXT NOT NULL,
-    commit_id TEXT NOT NULL,
-    short_id TEXT NOT NULL,        -- commit_id[:12]，用于快速匹配
-    subject TEXT NOT NULL,
-    author TEXT,
-    timestamp INTEGER,
-    UNIQUE(repo_version, commit_id)
-);
+| Level | 策略 | 条件 | 置信度 |
+|-------|------|------|--------|
+| L1 | Commit ID精确匹配 | `git cat-file -t` + `git merge-base --is-ancestor` | 100% |
+| L2 | Subject语义匹配 | `git log --grep` + SequenceMatcher ≥ 85% | 85-100% |
+| L3 | Code Diff匹配 | `git log -- <files>` + diff_similarity ≥ 70% | 70-100% |
 
--- 索引
-CREATE INDEX idx_short_id ON commits(repo_version, short_id);
-CREATE INDEX idx_subject ON commits(repo_version, subject);
-CREATE INDEX idx_timestamp ON commits(repo_version, timestamp);
+L2 两阶段搜索：先精确subject，再关键词OR搜索。
 
--- FTS5 全文搜索（如果 SQLite 支持）
-CREATE VIRTUAL TABLE commits_fts USING fts5(commit_id, subject, ...);
-```
+### Dependency Agent (`agents/dependency.py`)
 
-缓存构建使用 `PRAGMA journal_mode=WAL` 和 `PRAGMA synchronous=NORMAL` 加速批量写入。
+**分析流程：**
+1. 提取 Fixes: 标签引用的commit
+2. 在目标仓库搜索修改同文件的近期commits
+3. 排除已找到的fix/introduced commits
+4. 对候选补丁做函数级重叠分析，标记强依赖
 
-### 2.3 CommitMatcher / DependencyAnalyzer (`enhanced_patch_matcher.py`)
+### DryRun Agent (`agents/dryrun.py`)
 
-#### 三级搜索算法
+**流程：**
+1. 从PatchInfo提取纯diff部分，写入临时文件
+2. `git apply --stat` 获取修改统计
+3. `git apply --check` 检测能否干净应用
+4. 若失败，解析stderr提取冲突文件列表
+5. 可选 `git apply --check --3way` 尝试3-way merge
 
-```
-Level 1: ID 精确匹配
-  ├── 查缓存 (short_id 索引)
-  └── git cat-file + merge-base --is-ancestor
-  置信度: 1.0
+**冲突解析模式：**
+- `error: patch failed: <file>:<line>`
+- `error: <file>: does not exist in index`
 
-Level 2: Subject 语义匹配
-  ├── 标准化 subject（移除 [backport] 前缀、小写化）
-  ├── 精确 subject 搜索（git log --grep --fixed-strings）
-  ├── 关键词搜索（git log --grep --extended-regexp）
-  └── SequenceMatcher 计算相似度
-  阈值: ≥ 0.85
+---
 
-Level 3: Diff 代码匹配
-  ├── 搜索修改相同文件的 commits
-  ├── 获取每个候选的 diff
-  ├── 文件相似度 (Jaccard, 权重 0.4) + diff 相似度 (SequenceMatcher, 权重 0.6)
-  └── 综合评分
-  阈值: ≥ 0.70
-```
-
-#### 相似度算法
-
-**Subject 相似度：**
-```python
-normalize(s) = lowercase → remove_backport_prefix → strip_special_chars
-similarity = SequenceMatcher(None, normalize(s1), normalize(s2)).ratio()
-```
-
-**Diff 相似度：**
-```python
-# 只比较实际修改的代码行（以 + 或 - 开头，去掉 +++ / ---）
-changes = [line[1:].strip() for line in diff if line starts with +/-]
-similarity = SequenceMatcher(None, changes1, changes2).ratio()
-```
-
-**文件列表相似度（Jaccard）：**
-```python
-# 只比较文件名（不含路径），应对重构导致的路径变化
-names = {path.split('/')[-1] for path in files}
-similarity = |A ∩ B| / |A ∪ B|
-```
-
-#### 依赖分析
-
-`DependencyAnalyzer` 基于文件/函数重叠度评估依赖强度：
+## Pipeline 编排
 
 ```
-dependency_score = file_overlap * 0.6 + function_overlap * 0.4
+Step 1: Crawler.fetch_cve + fetch_patch
+Step 2: Analysis.search (引入commit)
+Step 3: Analysis.search (修复commit)
+       └─ 若已合入 → 结束
+       └─ 尝试 5.10 stable backport
+Step 4: Dependency.analyze (前置依赖)
+Step 5: DryRun.check (试应用)
+       └─ 若失败 → DryRun.check_with_3way
 ```
 
-支持拓扑排序确定合入顺序，检测循环依赖。
+---
 
-### 2.4 BackportAnalyzer (`enhanced_cve_analyzer.py`)
+## 已验证测试用例
 
-端到端分析主流程：
+| CVE | 状态 | 验证点 |
+|-----|------|--------|
+| CVE-2024-26633 | 已修复 | L1找到引入commit, L2找到修复backport |
+| CVE-2025-40198 | N/A | Mainline识别准确性 (7个版本映射全部正确) |
+| CVE-2024-50154 | 已修复 | L1引入 + L2修复 + DryRun冲突检测 |
 
-```
-Step 1: fetch_cve(cve_id)
-    → CveInfo (mainline_fix, introduced, version_mapping)
+## 已知限制
 
-Step 2: fetch_patch(fix_commit_id)
-    → PatchInfo (subject, diff, files)
-
-Step 3: _search_commit(introduced_commit, ...)
-    → SearchResult (判断目标仓库是否包含漏洞引入代码)
-
-Step 4: _search_commit(fix_commit, ...)
-    → SearchResult (判断修复补丁是否已合入)
-
-Step 5: 检查 stable backport (5.10.x 版本的 commit)
-    → 如果 mainline 未命中，尝试匹配 stable 版本
-
-Step 6: _analyze_prerequisites(...)
-    → 分析修改同文件的中间 commits
-    → 提取 Fixes: 标签引用
-    → 生成前置依赖补丁列表
-```
-
-#### 输出数据结构
-
-```python
-@dataclass
-class AnalysisResult:
-    cve_id: str
-    target_version: str
-    cve_info: CveInfo              # CVE 元数据
-    fix_patch: PatchInfo           # 修复补丁内容
-    introduced_search: SearchResult # 引入 commit 搜索结果
-    fix_search: SearchResult       # 修复 commit 搜索结果
-    is_vulnerable: bool            # 目标仓库是否受影响
-    is_fixed: bool                 # 修复补丁是否已合入
-    prerequisite_patches: List[Dict]  # 前置依赖补丁
-    conflict_files: List[str]      # 可能冲突的文件
-    recommendations: List[str]     # 建议操作
-```
-
-## 3. 外部接口
-
-### MITRE CVE API
-
-- 端点：`GET https://cveawg.mitre.org/api/cve/{CVE_ID}`
-- 返回：JSON，包含 `containers.cna.affected`、`containers.cna.references` 等
-- 无需认证，有 rate limit
-
-### Google Kernel 镜像
-
-- 仓库地址：`https://kernel.googlesource.com/pub/scm/linux/kernel/git/stable/linux`
-- Commit 元数据：`/+/{commit}?format=JSON`（注意去掉 `)]}'` 前缀）
-- Commit Diff：`/+/{commit}^!?format=TEXT`（Base64 编码）
-- 无需认证
-
-## 4. 已验证的 CVE 测试用例
-
-| CVE | 场景 | 验证结果 |
-|-----|------|----------|
-| CVE-2024-26633 | 已修复；introduced 在 5.10.y 上 | L1 找到 introduced (exact_id)，L2 找到 fix (subject 100%) |
-| CVE-2024-50257 | 未修复；无 5.10 backport | 三级搜索均未命中，列出 10 个前置依赖 |
-| CVE-2025-40198 | Mainline 识别 | 4/4 全通过，7/7 版本映射正确 |
-| CVE-2024-53104 | Introduced commit 提取 | 正确从 affected 字段提取 `c0efd232929c` |
-
-## 5. 已知限制
-
-1. **网络依赖** — CVE 获取和 patch 下载需要访问外网（MITRE API + googlesource）
-2. **Diff 匹配性能** — Level 3 需要逐个获取候选 commit 的 diff，对大量候选较慢
-3. **引入 commit 判断** — 部分 CVE 的 affected 字段没有引入 commit 信息
-4. **前置依赖精度** — 基于文件重叠的依赖分析是粗粒度的，复杂情况需人工review
-5. **缓存一致性** — 如果仓库有新 commit 推入，需重建缓存
+1. Diff匹配(L3)需要逐commit获取diff，大量候选时较慢
+2. 依赖分析基于文件/函数重叠，无法捕获数据结构变更等间接依赖
+3. DryRun只检测形式冲突，不检测语义冲突（编译/逻辑错误）
+4. MITRE API对部分老旧CVE可能缺少structured affected数据

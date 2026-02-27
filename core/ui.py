@@ -1,0 +1,272 @@
+"""
+Rich 终端 UI
+提供阶段状态面板、进度条、分析报告渲染
+"""
+
+import time
+from typing import Optional, Callable
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+from rich.progress import Progress, BarColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn, SpinnerColumn
+from rich.live import Live
+from rich.text import Text
+from rich.columns import Columns
+from rich import box
+
+console = Console()
+
+# ─── 阶段状态图标 ───────────────────────────────────────────────────
+
+_ICONS = {
+    "pending":  "[dim]○[/]",
+    "running":  "[cyan]◉[/]",
+    "success":  "[green]✔[/]",
+    "fail":     "[red]✘[/]",
+    "skip":     "[yellow]⊘[/]",
+    "warn":     "[yellow]⚠[/]",
+}
+
+
+class StageTracker:
+    """多阶段状态跟踪器"""
+
+    def __init__(self, stages: list[tuple[str, str]]):
+        """stages: [(key, label), ...]"""
+        self.stages = stages
+        self.status: dict[str, str] = {k: "pending" for k, _ in stages}
+        self.details: dict[str, str] = {}
+        self.timings: dict[str, float] = {}
+        self._start_times: dict[str, float] = {}
+
+    def start(self, key: str):
+        self.status[key] = "running"
+        self._start_times[key] = time.time()
+
+    def done(self, key: str, status: str = "success", detail: str = ""):
+        self.status[key] = status
+        self.details[key] = detail
+        if key in self._start_times:
+            self.timings[key] = time.time() - self._start_times[key]
+
+    def render(self) -> Table:
+        t = Table(box=box.SIMPLE, show_header=False, padding=(0, 1),
+                  expand=True, show_edge=False)
+        t.add_column("", width=3)
+        t.add_column("阶段", ratio=3)
+        t.add_column("详情", ratio=5)
+        t.add_column("耗时", width=8, justify="right")
+
+        for key, label in self.stages:
+            icon = _ICONS.get(self.status[key], "○")
+            det = self.details.get(key, "")
+            elapsed = ""
+            if key in self.timings:
+                elapsed = f"[dim]{self.timings[key]:.1f}s[/]"
+            elif self.status[key] == "running":
+                elapsed = "[cyan]...[/]"
+
+            style = ""
+            if self.status[key] == "running":
+                style = "bold cyan"
+            elif self.status[key] == "fail":
+                style = "red"
+
+            t.add_row(icon, f"[{style}]{label}[/]" if style else label, det, elapsed)
+        return t
+
+
+def make_header(cve_id: str, target: str) -> Panel:
+    title = Text()
+    title.append("CVE 补丁回溯分析", style="bold white")
+    subtitle = Text()
+    subtitle.append(f"  {cve_id}", style="bold cyan")
+    subtitle.append(f"  →  ", style="dim")
+    subtitle.append(f"{target}", style="bold green")
+    return Panel(subtitle, title=title, border_style="blue", padding=(0, 2))
+
+
+def render_report(result) -> Panel:
+    """渲染最终分析报告为 Rich Panel"""
+    from core.models import AnalysisResult
+    r: AnalysisResult = result
+
+    grid = Table(box=box.SIMPLE_HEAD, expand=True, show_edge=False, padding=(0, 1))
+    grid.add_column("项目", style="bold", width=16)
+    grid.add_column("内容")
+
+    # CVE 基本信息
+    if r.cve_info:
+        grid.add_row("CVE", r.cve_id)
+        desc = r.cve_info.description[:150]
+        if len(r.cve_info.description) > 150:
+            desc += "..."
+        grid.add_row("描述", desc)
+        sev = r.cve_info.severity
+        sev_style = {"HIGH": "red bold", "CRITICAL": "red bold", "MEDIUM": "yellow", "LOW": "green"}.get(sev.upper(), "")
+        grid.add_row("严重程度", f"[{sev_style}]{sev}[/]" if sev_style else sev)
+        ml = r.cve_info.mainline_fix_commit[:12] if r.cve_info.mainline_fix_commit else "N/A"
+        grid.add_row("Mainline Fix", f"[cyan]{ml}[/] ({r.cve_info.mainline_version or 'N/A'})")
+        intro = r.cve_info.introduced_commit_id or "未知"
+        grid.add_row("引入 Commit", f"[dim]{intro[:12] if intro != '未知' else intro}[/]")
+
+    if r.fix_patch:
+        grid.add_row("补丁 Subject", r.fix_patch.subject[:80])
+        grid.add_row("修改文件", ", ".join(r.fix_patch.modified_files[:5]))
+
+    grid.add_row("", "")
+
+    # 状态
+    vuln = "[red bold]是[/]" if r.is_vulnerable else "[green]未确认[/]"
+    fixed = "[green bold]是[/]" if r.is_fixed else "[red bold]否[/]"
+    grid.add_row("受影响", vuln)
+    grid.add_row("已修复", fixed)
+
+    # 搜索结果
+    if r.introduced_search and r.introduced_search.found:
+        s = r.introduced_search
+        grid.add_row("引入定位", f"[cyan]{s.target_commit[:12]}[/] via {s.strategy} ({s.confidence:.0%})")
+    if r.fix_search:
+        s = r.fix_search
+        if s.found:
+            grid.add_row("修复定位", f"[green]{s.target_commit[:12]}[/] via {s.strategy} ({s.confidence:.0%})")
+        else:
+            cands = ""
+            for c in s.candidates[:2]:
+                sim = c.get("similarity", c.get("confidence", 0))
+                cands += f"{c.get('commit_id', '')[:12]}({sim:.0%}) "
+            grid.add_row("修复定位", f"[red]未合入[/]" + (f"  候选: {cands}" if cands else ""))
+
+    # Dry-run
+    if r.dry_run:
+        if r.dry_run.applies_cleanly:
+            grid.add_row("Dry-Run", "[green bold]可以干净应用[/]")
+        else:
+            cf = ", ".join(r.dry_run.conflicting_files[:3])
+            grid.add_row("Dry-Run", f"[red]冲突[/] {cf}")
+
+    # 前置依赖
+    if r.prerequisite_patches:
+        first = r.prerequisite_patches[0]
+        strong = " [强]" if first.get("is_strong") else ""
+        grid.add_row("前置依赖",
+                      f"[yellow]{len(r.prerequisite_patches)} 个[/]  "
+                      f"Top: {first['commit_id'][:12]} {first['subject'][:40]}{strong}")
+
+    border = "green" if r.is_fixed else ("red" if r.is_vulnerable else "yellow")
+    verdict = "已修复" if r.is_fixed else ("需修复" if r.is_vulnerable else "待确认")
+    return Panel(grid, title=f"[bold]分析报告[/]  [{border} bold]{verdict}[/]",
+                 border_style=border, padding=(1, 2))
+
+
+def render_recommendations(result) -> Panel:
+    """渲染建议列表"""
+    lines = []
+    for i, rec in enumerate(result.recommendations, 1):
+        lines.append(f"  {i}. {rec}")
+    text = "\n".join(lines) if lines else "  无建议"
+    return Panel(text, title="[bold]建议[/]", border_style="blue", padding=(0, 2))
+
+
+def render_multi_strategy(msr) -> Panel:
+    """渲染多策略搜索结果面板"""
+    from core.models import MultiStrategyResult
+    r: MultiStrategyResult = msr
+
+    # 源commit信息
+    info = Table(box=None, show_header=False, padding=(0, 1), expand=True, show_edge=False)
+    info.add_column("k", style="bold", width=14)
+    info.add_column("v")
+    info.add_row("Commit ID", f"[cyan]{r.commit_id[:12]}[/] [dim]({r.commit_id})[/]")
+    if r.subject:
+        info.add_row("Subject", r.subject[:100])
+    if r.author:
+        info.add_row("Author", r.author)
+    if r.modified_files:
+        info.add_row("修改文件", ", ".join(r.modified_files[:5])
+                      + (f" (+{len(r.modified_files)-5})" if len(r.modified_files) > 5 else ""))
+
+    # 策略结果表
+    stbl = Table(box=box.ROUNDED, expand=True, border_style="blue",
+                 title="[bold]三级搜索策略[/]", title_style="bold", padding=(0, 1))
+    stbl.add_column("", width=3)
+    stbl.add_column("策略", width=20, style="bold")
+    stbl.add_column("结果", width=8)
+    stbl.add_column("置信度", width=8, justify="right")
+    stbl.add_column("目标 Commit", width=14)
+    stbl.add_column("详情", ratio=3)
+    stbl.add_column("耗时", width=7, justify="right")
+
+    for s in r.strategies:
+        if s.found:
+            icon = "[green]✔[/]"
+            res = "[green bold]命中[/]"
+            conf = f"[green]{s.confidence:.0%}[/]"
+            tgt = f"[cyan]{s.target_commit[:12]}[/]" if s.target_commit else ""
+        elif s.target_commit:
+            # 存在但不在分支上
+            icon = "[yellow]⚠[/]"
+            res = "[yellow]不在分支[/]"
+            conf = "[dim]-[/]"
+            tgt = f"[dim]{s.target_commit[:12]}[/]"
+        else:
+            icon = "[red]✘[/]"
+            res = "[red]未命中[/]"
+            conf = f"[dim]{s.confidence:.0%}[/]" if s.confidence > 0 else "[dim]-[/]"
+            tgt = ""
+
+        elapsed = f"[dim]{s.elapsed:.1f}s[/]"
+        stbl.add_row(icon, f"{s.level} {s.name}", res, conf, tgt, s.detail[:60], elapsed)
+
+    # 候选列表（取每个策略的top candidates）
+    cand_tables = []
+    for s in r.strategies:
+        if s.candidates:
+            ct = Table(box=box.SIMPLE, show_header=True, padding=(0, 1),
+                       title=f"[dim]{s.level} 候选[/]", expand=True, show_edge=False)
+            ct.add_column("Commit", width=14, style="cyan")
+            ct.add_column("相似度", width=8, justify="right")
+            ct.add_column("Subject", ratio=3)
+            for c in s.candidates[:3]:
+                sim = c.get("similarity", c.get("confidence", 0))
+                sim_style = "green" if sim >= 0.85 else ("yellow" if sim >= 0.7 else "dim")
+                subj = c.get("subject", c.get("type", ""))[:50]
+                ct.add_row(c.get("commit_id", "")[:12], f"[{sim_style}]{sim:.0%}[/]", subj)
+            cand_tables.append(ct)
+
+    # 综合判定
+    if r.is_present:
+        b = r.best
+        verdict_text = Text()
+        verdict_text.append("  漏洞已引入  ", style="bold white on red")
+        verdict_text.append(f"  最佳匹配: {b.target_commit[:12]} via {b.level} ({b.confidence:.0%})",
+                            style="bold")
+    else:
+        verdict_text = Text()
+        verdict_text.append("  未发现引入  ", style="bold white on green")
+        verdict_text.append("  目标仓库中未找到该commit的对应提交", style="dim")
+
+    # 组装
+    from rich.console import Group
+    parts = [info, Text(""), stbl, Text(""), verdict_text]
+    for ct in cand_tables:
+        parts.append(Text(""))
+        parts.append(ct)
+
+    border = "red" if r.is_present else "green"
+    return Panel(Group(*parts),
+                 title="[bold]漏洞引入 Commit 检测[/]",
+                 border_style=border, padding=(1, 2))
+
+
+def make_cache_progress() -> Progress:
+    return Progress(
+        SpinnerColumn(),
+        TextColumn("[bold blue]{task.description}"),
+        BarColumn(bar_width=40),
+        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        TextColumn("{task.completed:,}/{task.total:,}"),
+        TimeElapsedColumn(),
+        TimeRemainingColumn(),
+        console=console,
+    )

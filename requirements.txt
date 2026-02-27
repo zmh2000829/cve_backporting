@@ -1,6 +1,7 @@
 # 运行时依赖
 requests
 pyyaml
+rich
 
 # 开发/测试依赖
 pytest
