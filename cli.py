@@ -275,22 +275,40 @@ def cmd_build_cache(args, config):
         title="[bold blue]缓存构建[/]", border_style="blue", padding=(0, 2),
     ))
 
+    console.print("[dim]正在统计分支 commit 数量 (大仓库可能需要几分钟)...[/]")
     actual_count = git_mgr.count_commits(rv)
     mx = config.cache.max_cached_commits if hasattr(config.cache, "max_cached_commits") else None
-    if mx and mx > actual_count:
-        mx = None
-    total = mx or actual_count
-    console.print(f"[dim]分支共 {actual_count:,} 个commits, 将缓存 {total:,} 个[/]\n")
 
-    progress = make_cache_progress()
+    if actual_count > 0:
+        if mx and mx > actual_count:
+            mx = None
+        total = mx or actual_count
+        console.print(f"[dim]分支共 {actual_count:,} 个commits, 将缓存 {total:,} 个[/]\n")
+    else:
+        total = mx or 0
+        if total:
+            console.print(f"[dim]commit总数未知, 将缓存最多 {total:,} 个[/]\n")
+        else:
+            console.print("[dim]commit总数未知, 将流式缓存全部commits[/]\n")
+
+    known_total = total > 0
+    progress = make_cache_progress(known_total=known_total)
     with progress:
-        task = progress.add_task("构建commit缓存", total=total)
+        task = progress.add_task(
+            "构建commit缓存",
+            total=total if known_total else None,
+        )
 
         def on_progress(current, _total):
-            progress.update(task, completed=current)
+            if known_total:
+                progress.update(task, completed=current)
+            else:
+                progress.update(task, completed=current,
+                                description=f"构建commit缓存 ({current:,})")
 
         git_mgr.build_commit_cache(rv, max_commits=mx, progress_cb=on_progress)
-        progress.update(task, completed=total)
+        if known_total:
+            progress.update(task, completed=total)
 
     final_count = git_mgr.get_cache_count(rv)
     console.print(Panel(

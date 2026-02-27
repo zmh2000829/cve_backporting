@@ -259,14 +259,22 @@ def render_multi_strategy(msr) -> Panel:
                  border_style=border, padding=(1, 2))
 
 
-def make_cache_progress() -> Progress:
+def make_cache_progress(known_total: bool = True) -> Progress:
+    if known_total:
+        return Progress(
+            SpinnerColumn(),
+            TextColumn("[bold blue]{task.description}"),
+            BarColumn(bar_width=40),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            TextColumn("{task.completed:,}/{task.total:,}"),
+            TimeElapsedColumn(),
+            TimeRemainingColumn(),
+            console=console,
+        )
+    # 总数未知: spinner + 计数 + 耗时
     return Progress(
         SpinnerColumn(),
         TextColumn("[bold blue]{task.description}"),
-        BarColumn(bar_width=40),
-        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-        TextColumn("{task.completed:,}/{task.total:,}"),
         TimeElapsedColumn(),
-        TimeRemainingColumn(),
         console=console,
     )

@@ -178,12 +178,54 @@ class GitRepoManager:
 
     # ─── cache build (optimized for 10M+ commits) ─────────────────────
 
-    def count_commits(self, rv: str) -> int:
-        """快速统计分支commit总数"""
+    def count_commits(self, rv: str, timeout: int = 600) -> int:
+        """
+        统计分支commit总数。
+        优先使用 rev-list --count (快但可能超时)，
+        失败后回退到缓存表记录数。
+        """
         br = self._get_repo_branch(rv)
+        rp = self._get_repo_path(rv)
+        if not rp or not os.path.exists(rp):
+            return 0
+
+        # 策略1: git rev-list --count (Popen + 长超时，避免内存问题)
         cmd = ["git", "rev-list", "--count"] + ([br] if br else ["HEAD"])
-        out = self.run_git(cmd, rv, timeout=120)
-        return int(out.strip()) if out and out.strip().isdigit() else 0
+        try:
+            proc = subprocess.Popen(
+                cmd, cwd=rp, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, text=True,
+            )
+            out, _ = proc.communicate(timeout=timeout)
+            if proc.returncode == 0 and out and out.strip().isdigit():
+                return int(out.strip())
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            logger.warning("rev-list --count 超时(%ds), 尝试回退方案", timeout)
+        except Exception as e:
+            logger.warning("rev-list --count 失败: %s", e)
+
+        # 策略2: 使用已有缓存数量作为近似值
+        if self.use_cache and os.path.exists(self.cache_db_path):
+            cached = self.get_cache_count(rv)
+            if cached > 0:
+                logger.info("使用缓存记录数作为近似: %d", cached)
+                return cached
+
+        # 策略3: 快速采样估算 — 取最近10万条的速度推算
+        try:
+            cmd2 = ["git", "rev-list", "--count", "--max-count=100000"] + ([br] if br else ["HEAD"])
+            r = subprocess.run(cmd2, cwd=rp, capture_output=True, text=True, timeout=60)
+            if r.returncode == 0 and r.stdout.strip().isdigit():
+                sample = int(r.stdout.strip())
+                if sample < 100000:
+                    return sample
+                logger.info("rev-list采样到10万条, 总数未知, 返回0")
+        except Exception:
+            pass
+
+        return 0
 
     def build_commit_cache(self, rv: str, max_commits: int = None,
                            progress_cb: ProgressCB = None):
@@ -203,7 +245,7 @@ class GitRepoManager:
             logger.error("仓库路径不可用: %s", rv)
             return
 
-        total = max_commits or self.count_commits(rv)
+        total = max_commits or 0
         logger.info("构建缓存: %s (分支: %s, 预计: %s)", rv, br or "当前",
                      f"{total:,}" if total else "未知")
 
