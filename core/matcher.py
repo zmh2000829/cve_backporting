@@ -44,6 +44,55 @@ def extract_functions_from_diff(diff: str) -> List[str]:
     return sorted(funcs)
 
 
+def extract_hunks_from_diff(diff: str) -> List[Dict]:
+    """从 diff 中提取每个 hunk 的文件路径和行范围"""
+    hunks = []
+    current_file = ""
+    for line in diff.split("\n"):
+        if line.startswith("diff --git"):
+            m = re.search(r"a/(.*?)\s+b/", line)
+            if m:
+                current_file = m.group(1)
+        elif line.startswith("--- a/"):
+            current_file = line[6:].strip()
+        elif line.startswith("@@"):
+            m = re.match(r"@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@", line)
+            if m and current_file:
+                old_start = int(m.group(1))
+                old_count = int(m.group(2)) if m.group(2) else 1
+                new_start = int(m.group(3))
+                new_count = int(m.group(4)) if m.group(4) else 1
+                hunks.append({
+                    "file": current_file,
+                    "old_start": old_start, "old_end": old_start + old_count,
+                    "new_start": new_start, "new_end": new_start + new_count,
+                })
+    return hunks
+
+
+def compute_hunk_overlap(hunks_a: List[Dict], hunks_b: List[Dict],
+                         margin: int = 50) -> tuple:
+    """
+    比较两组 hunk 的重叠关系。
+    Returns: (direct_overlaps, adjacent_overlaps)
+      direct_overlaps: 行范围直接相交的 hunk 对数
+      adjacent_overlaps: 行范围在 margin 行内相邻的 hunk 对数
+    """
+    direct = 0
+    adjacent = 0
+    for ha in hunks_a:
+        for hb in hunks_b:
+            if ha["file"] != hb["file"]:
+                continue
+            a_start, a_end = ha["new_start"], ha["new_end"]
+            b_start, b_end = hb["new_start"], hb["new_end"]
+            if a_start <= b_end and b_start <= a_end:
+                direct += 1
+            elif (a_start - margin <= b_end and b_start - margin <= a_end):
+                adjacent += 1
+    return direct, adjacent
+
+
 def extract_keywords(subject: str, max_count: int = 5) -> List[str]:
     stops = {"a", "an", "the", "in", "on", "at", "to", "for", "of", "with", "by",
              "and", "or", "not", "is", "it", "this", "that", "from", "fix", "add"}

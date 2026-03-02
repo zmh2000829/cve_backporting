@@ -148,9 +148,15 @@ class GitRepoManager:
         ]
         return self._parse_log(self.run_git(cmd, rv))
 
-    def search_by_files(self, files: List[str], rv: str, limit: int = 100) -> List[GitCommit]:
+    def search_by_files(self, files: List[str], rv: str, limit: int = 100,
+                        after_ts: int = 0, no_merges: bool = False) -> List[GitCommit]:
         br = self._get_repo_branch(rv)
-        cmd = ["git", "log"] + ([br] if br else []) + [
+        cmd = ["git", "log"] + ([br] if br else [])
+        if no_merges:
+            cmd.append("--no-merges")
+        if after_ts > 0:
+            cmd.append(f"--after=@{after_ts}")
+        cmd += [
             f"--max-count={limit}",
             f"--format=%H{FIELD_SEP}%s{FIELD_SEP}%an{FIELD_SEP}%at{RECORD_SEP}",
             "--",

@@ -34,7 +34,7 @@ class Pipeline:
     """CVE补丁回溯分析流水线"""
 
     def __init__(self, git_mgr: GitRepoManager, api_timeout: int = 30):
-        self.crawler = CrawlerAgent(api_timeout=api_timeout)
+        self.crawler = CrawlerAgent(api_timeout=api_timeout, git_mgr=git_mgr)
         self.analysis = AnalysisAgent(git_mgr)
         self.dependency = DependencyAgent(git_mgr)
         self.dryrun = DryRunAgent(git_mgr)
@@ -64,10 +64,10 @@ class Pipeline:
 
         # ── Step 2: Crawler - Patch ──────────────────────────────────
         _cb("crawler_patch", "running")
-        fix_patch = self.crawler.fetch_patch(cve_info.fix_commit_id)
+        fix_patch = self.crawler.fetch_patch(cve_info.fix_commit_id, target_version)
         if not fix_patch:
-            _cb("crawler_patch", "fail", "获取补丁失败")
-            result.recommendations.append("无法获取修复补丁内容")
+            _cb("crawler_patch", "fail", "获取补丁失败 (远程+本地均不可用)")
+            result.recommendations.append("无法获取修复补丁内容 (googlesource不可达且本地仓库无此commit)")
             return result
         result.fix_patch = fix_patch
         _cb("crawler_patch", "success",
@@ -76,7 +76,7 @@ class Pipeline:
         # ── Step 3: Analysis - 引入commit ────────────────────────────
         if cve_info.introduced_commit_id:
             _cb("analysis_intro", "running")
-            intro_patch = self.crawler.fetch_patch(cve_info.introduced_commit_id)
+            intro_patch = self.crawler.fetch_patch(cve_info.introduced_commit_id, target_version)
             result.introduced_search = self.analysis.search(
                 cve_info.introduced_commit_id,
                 intro_patch.subject if intro_patch else "",
@@ -143,8 +143,18 @@ class Pipeline:
         result.conflict_files = dep["conflict_files"]
         result.recommendations.extend(dep["recommendations"])
         n_pre = len(result.prerequisite_patches)
-        _cb("dependency", "success" if n_pre > 0 else "warn",
-            f"{n_pre} 个潜在前置依赖" if n_pre else "无前置依赖")
+        if n_pre > 0:
+            n_s = sum(1 for p in result.prerequisite_patches if p.grade == "strong")
+            n_m = sum(1 for p in result.prerequisite_patches if p.grade == "medium")
+            parts = []
+            if n_s:
+                parts.append(f"{n_s}强")
+            if n_m:
+                parts.append(f"{n_m}中")
+            parts.append(f"共{n_pre}个")
+            _cb("dependency", "success", " / ".join(parts))
+        else:
+            _cb("dependency", "warn", "无前置依赖")
 
         # ── Step 6: DryRun ───────────────────────────────────────────
         if enable_dryrun:
@@ -178,7 +188,7 @@ class Pipeline:
             if ver.startswith("5.10"):
                 bp_cid = cve_info.version_commit_mapping[ver]
                 if bp_cid != cve_info.fix_commit_id:
-                    bp_patch = self.crawler.fetch_patch(bp_cid)
+                    bp_patch = self.crawler.fetch_patch(bp_cid, tv)
                     if bp_patch:
                         sr = self.analysis.search(bp_cid, bp_patch.subject,
                                                    bp_patch.diff_code, tv)

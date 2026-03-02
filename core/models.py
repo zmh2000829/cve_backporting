@@ -86,6 +86,7 @@ class SearchResult:
     target_commit: str = ""
     target_subject: str = ""
     candidates: List[Dict] = field(default_factory=list)
+    steps: List["SearchStep"] = field(default_factory=list)
 
 
 @dataclass
@@ -129,10 +130,34 @@ class MultiStrategyResult:
 
 
 @dataclass
+class SearchStep:
+    """搜索过程中单个级别的记录"""
+    level: str              # "L1", "L2", "L3"
+    status: str = "skip"    # "hit", "miss", "skip"
+    detail: str = ""
+    elapsed: float = 0.0
+
+
+@dataclass
+class PrerequisitePatch:
+    """前置依赖补丁"""
+    commit_id: str
+    subject: str
+    author: str = ""
+    timestamp: int = 0
+    grade: str = "weak"         # "strong", "medium", "weak"
+    score: float = 0.0
+    overlap_funcs: List[str] = field(default_factory=list)
+    overlap_hunks: int = 0      # 重叠 hunk 数量
+    adjacent_hunks: int = 0     # 相邻 hunk 数量
+
+
+@dataclass
 class DryRunResult:
     """Dry-run 试应用结果"""
     applies_cleanly: bool = False
     conflicting_files: List[str] = field(default_factory=list)
+    conflict_details: List[Dict] = field(default_factory=list)
     error_output: str = ""
     stat_output: str = ""
     patch_file: str = ""
@@ -149,7 +174,7 @@ class AnalysisResult:
     fix_search: Optional[SearchResult] = None
     is_vulnerable: bool = False
     is_fixed: bool = False
-    prerequisite_patches: List[Dict] = field(default_factory=list)
+    prerequisite_patches: List[PrerequisitePatch] = field(default_factory=list)
     conflict_files: List[str] = field(default_factory=list)
     dry_run: Optional[DryRunResult] = None
     recommendations: List[str] = field(default_factory=list)

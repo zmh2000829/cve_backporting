@@ -1,7 +1,7 @@
 from core.models import (
     CveInfo, PatchInfo, GitCommit, CommitInfo, MatchResult,
-    SearchResult, StrategyResult, MultiStrategyResult,
-    AnalysisResult, DryRunResult,
+    SearchResult, SearchStep, StrategyResult, MultiStrategyResult,
+    PrerequisitePatch, AnalysisResult, DryRunResult,
 )
 from core.config import ConfigLoader, Config
 from core.git_manager import GitRepoManager

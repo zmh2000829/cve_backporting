@@ -104,6 +104,8 @@ def _analyze_one(pipe: Pipeline, cve_id: str, target: str,
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     fp = os.path.join(out_dir, f"{cve_id}_{target}_{ts}.json")
+    from dataclasses import asdict
+    prereqs = [asdict(p) for p in result.prerequisite_patches] if result.prerequisite_patches else []
     with open(fp, "w", encoding="utf-8") as f:
         json.dump({
             "cve_id": result.cve_id,
@@ -111,6 +113,7 @@ def _analyze_one(pipe: Pipeline, cve_id: str, target: str,
             "is_vulnerable": result.is_vulnerable,
             "is_fixed": result.is_fixed,
             "dry_run_clean": result.dry_run.applies_cleanly if result.dry_run else None,
+            "prerequisite_patches": prereqs,
             "recommendations": result.recommendations,
         }, f, indent=2, ensure_ascii=False, default=str)
     console.print(f"\n[dim]报告已保存: {fp}[/]")
@@ -129,7 +132,7 @@ def cmd_check_intro(args, config):
     from agents.analysis import AnalysisAgent
 
     git_mgr = _make_git_mgr(config, args.target_version)
-    crawler = CrawlerAgent()
+    crawler = CrawlerAgent(git_mgr=git_mgr)
     analysis = AnalysisAgent(git_mgr)
     tv = args.target_version
 
@@ -187,7 +190,7 @@ def cmd_check_intro(args, config):
 
         # 获取commit补丁信息
         with console.status("[cyan]获取commit补丁信息..."):
-            patch = crawler.fetch_patch(cid)
+            patch = crawler.fetch_patch(cid, tv)
 
         subject = patch.subject if patch else ""
         diff_code = patch.diff_code if patch else ""

@@ -10,7 +10,7 @@ import time
 import logging
 from typing import List
 
-from core.models import CommitInfo, SearchResult, StrategyResult, MultiStrategyResult
+from core.models import CommitInfo, SearchResult, SearchStep, StrategyResult, MultiStrategyResult
 from core.git_manager import GitRepoManager
 from core.matcher import (
     CommitMatcher, normalize_subject, extract_keywords,
@@ -31,10 +31,11 @@ class AnalysisAgent:
 
     def search(self, commit_id: str, subject: str, diff_code: str,
                target_version: str) -> SearchResult:
-        """三级搜索（短路）：首个命中即返回"""
+        """三级搜索（短路）：首个命中即返回，同时记录每级步骤"""
         sr = SearchResult()
 
         # Level 1
+        t0 = time.time()
         logger.info("  [L1] 精确ID匹配: %s", commit_id[:12])
         exact = self.git_mgr.find_commit_by_id(commit_id, target_version)
         if exact:
@@ -43,27 +44,47 @@ class AnalysisAgent:
             sr.confidence = 1.0
             sr.target_commit = exact["commit_id"]
             sr.target_subject = exact["subject"]
+            sr.steps.append(SearchStep("L1", "hit", exact["commit_id"][:12], time.time() - t0))
             logger.info("  [L1] 命中: %s", exact["commit_id"][:12])
             return sr
+        sr.steps.append(SearchStep("L1", "miss", "目标分支中不存在", time.time() - t0))
 
         if not subject:
             return sr
 
         # Level 2
+        t0 = time.time()
         logger.info("  [L2] Subject匹配: %s", subject[:60])
         sr = self._search_subject(commit_id, subject, target_version)
         if sr.found:
+            sr.steps.insert(0, SearchStep("L1", "miss", "目标分支中不存在"))
+            sr.steps.append(SearchStep("L2", "hit",
+                f"{sr.target_commit[:12]} ({sr.confidence:.0%})", time.time() - t0))
             return sr
+        step2_detail = f"{len(sr.candidates)} 个候选, 最高 {sr.candidates[0]['similarity']:.0%}" if sr.candidates else "无匹配"
+        l2_step = SearchStep("L2", "miss", step2_detail, time.time() - t0)
 
         # Level 3
         if diff_code:
             files = extract_files_from_diff(diff_code)
             if files:
+                t0 = time.time()
                 logger.info("  [L3] Diff匹配 (%s)", ", ".join(files[:3]))
                 sr = self._search_diff(commit_id, subject, diff_code, files, target_version)
                 if sr.found:
+                    sr.steps.insert(0, SearchStep("L1", "miss", "目标分支中不存在"))
+                    sr.steps.insert(1, l2_step)
+                    sr.steps.append(SearchStep("L3", "hit",
+                        f"{sr.target_commit[:12]} ({sr.confidence:.0%})", time.time() - t0))
                     return sr
+                sr.steps.insert(0, SearchStep("L1", "miss", "目标分支中不存在"))
+                sr.steps.insert(1, l2_step)
+                sr.steps.append(SearchStep("L3", "miss",
+                    f"{len(sr.candidates)} 个候选" if sr.candidates else "无匹配", time.time() - t0))
+                return sr
 
+        sr.steps.insert(0, SearchStep("L1", "miss", "目标分支中不存在"))
+        sr.steps.append(l2_step)
         return sr
 
     # ─── 详细搜索 (全策略，用于check-intro) ──────────────────────────
