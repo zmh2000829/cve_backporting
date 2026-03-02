@@ -14,7 +14,7 @@ from core.models import CommitInfo, SearchResult, SearchStep, StrategyResult, Mu
 from core.git_manager import GitRepoManager
 from core.matcher import (
     CommitMatcher, normalize_subject, extract_keywords,
-    extract_files_from_diff, subject_similarity,
+    extract_files_from_diff, subject_similarity, diff_containment,
 )
 
 logger = logging.getLogger(__name__)
@@ -149,7 +149,7 @@ class AnalysisAgent:
         s2.elapsed = time.time() - t0
         msr.strategies.append(s2)
 
-        # ── L3: Diff 代码匹配 ───────────────────────────────────────
+        # ── L3: Diff 代码匹配（含包含关系检测）──────────────────────
         t0 = time.time()
         s3 = StrategyResult(level="L3", name="Diff 代码匹配")
         files = modified_files or (extract_files_from_diff(diff_code) if diff_code else [])
@@ -161,11 +161,15 @@ class AnalysisAgent:
                 s3.confidence = sr3.confidence
                 s3.target_commit = sr3.target_commit
                 s3.target_subject = sr3.target_subject
-                s3.detail = f"置信度 {sr3.confidence:.0%}: {sr3.target_commit[:12]}"
+                ctype = sr3.strategy.split("(")[-1].rstrip(")") if "(" in sr3.strategy else ""
+                label = "包含度" if "containment" in ctype else "相似度"
+                s3.detail = f"{label} {sr3.confidence:.0%}: {sr3.target_commit[:12]}"
             elif sr3.candidates:
                 best = sr3.candidates[0]
                 conf = best.get("confidence", 0)
-                s3.detail = (f"最高置信度 {conf:.0%} (阈值70%): "
+                ct = best.get("containment")
+                extra = f", 包含度 {ct:.0%}" if ct and ct > 0 else ""
+                s3.detail = (f"最高置信度 {conf:.0%}{extra} (阈值70%): "
                              f"{best.get('commit_id', '')[:12]}")
             else:
                 s3.detail = "修改同文件的commit中无匹配"
@@ -239,10 +243,25 @@ class AnalysisAgent:
             sr.confidence = b.confidence
             sr.target_commit = b.target_commit
             sr.target_subject = b.details.get("target_subject", "")
-            sr.candidates = [{"commit_id": m.target_commit, "confidence": m.confidence,
-                              "type": m.match_type} for m in matches[:5]]
-            logger.info("  [L3] 命中: %s (%.0f%%)", b.target_commit[:12], b.confidence * 100)
+            sr.candidates = self._build_l3_candidates(matches[:5])
+            logger.info("  [L3] 命中: %s (%.0f%% via %s)",
+                        b.target_commit[:12], b.confidence * 100, b.match_type)
         else:
-            sr.candidates = [{"commit_id": m.target_commit, "confidence": m.confidence,
-                              "type": m.match_type} for m in (matches or [])[:5]]
+            sr.candidates = self._build_l3_candidates(matches[:5] if matches else [])
         return sr
+
+    @staticmethod
+    def _build_l3_candidates(matches) -> List[dict]:
+        out = []
+        for m in matches:
+            entry = {
+                "commit_id": m.target_commit,
+                "confidence": m.confidence,
+                "type": m.match_type,
+            }
+            if "diff_containment" in m.details:
+                entry["containment"] = m.details["diff_containment"]
+            if "diff_sim" in m.details:
+                entry["similarity"] = m.details["diff_sim"]
+            out.append(entry)
+        return out

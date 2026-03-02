@@ -58,20 +58,70 @@ get_commit_diff(commit_id, repo_version)      # Level 3
 build_commit_cache(repo_version, max_commits) # 缓存构建
 ```
 
-### matcher.py — 相似度算法
+### matcher.py — 相似度与包含度算法
 
 | 函数 | 算法 | 用途 |
 |------|------|------|
 | `subject_similarity` | SequenceMatcher (标准化后) | Level 2 匹配 |
-| `diff_similarity` | SequenceMatcher (仅+/-行) | Level 3 匹配 |
+| `diff_similarity` | SequenceMatcher (仅+/-行) | Level 3 双向相似度 |
+| `diff_containment` | Multiset 包含度 (单向) | Level 3 包含关系检测 |
 | `file_similarity` | Jaccard (文件名集合) | 过滤 + 评分 |
 | `normalize_subject` | 去除[backport]等前缀 | 预处理 |
 | `extract_keywords` | 去停用词 + 截断 | 关键词搜索 |
+| `extract_hunks_from_diff` | 解析 `@@` 行号范围 | 依赖分析 hunk 级重叠 |
+| `compute_hunk_overlap` | 行范围相交/相邻检测 | 依赖分析分级 |
+
+#### diff_containment — 包含度算法
+
+**设计背景：** 自维护内核仓库常见操作是将社区多个 patch 合并（squash）为一个 commit 提交。此时社区补丁的改动被完整**包含**在一个更大的本地 commit 中，双向相似度（`diff_similarity`）会因为分母包含大量无关行而显著偏低，但实际上该补丁已经被合入。
+
+**算法原理：**
+
+```
+Source (社区补丁)       Target (本地commit)
+┌──────────────┐       ┌──────────────────────┐
+│ +line_a      │       │ +unrelated_change_1  │
+│ +line_b      │  ───▶ │ +line_a   ✓ matched  │
+│ -line_c      │       │ +line_b   ✓ matched  │
+│              │       │ -line_c   ✓ matched  │
+│              │       │ +unrelated_change_2  │
+│              │       │ -unrelated_change_3  │
+└──────────────┘       └──────────────────────┘
+  3 lines total          3/3 matched → 包含度 100%
+                         diff_similarity 仅 ~40%
+```
+
+**实现步骤：**
+
+1. **提取变更行**：分别从 source 和 target diff 中提取 `+` 行（added）和 `-` 行（removed），去掉前缀，过滤 `len < 4` 的噪声行（`}`、`{`、`return;` 等）
+2. **分类匹配**：added 只与 added 匹配，removed 只与 removed 匹配，保证语义正确
+3. **Multiset 计数**：使用 `Counter` 作为多重集合，每条 target 行只能匹配一次，避免重复计数
+4. **计算包含度**：`containment = matched_count / total_source_lines`
+
+**与 diff_similarity 的协同：**
+
+`match_by_diff` 同时计算两个指标，取最优策略：
+
+| 条件 | 选择的策略 | 综合得分公式 |
+|------|-----------|-------------|
+| `containment ≥ similarity` | `diff_containment` | `file_sim × 0.3 + containment × 0.7` |
+| `containment < similarity` | `diff_similarity` | `file_sim × 0.4 + similarity × 0.6` |
+
+包含度策略下 `file_sim` 权重降低（0.3 vs 0.4），因为 squash commit 修改的文件通常多于社区原始补丁。
+
+**典型场景对比：**
+
+| 场景 | diff_similarity | diff_containment | 最终结果 |
+|------|----------------|-----------------|---------|
+| 社区补丁被 squash 到大 commit | 低 (~30%) | 高 (~95%) | 命中 (containment) |
+| 1:1 对应的 backport | 高 (~92%) | 高 (~95%) | 命中 (取较高者) |
+| 改了同文件但不相关 | 低 (~10%) | 低 (~5%) | 不命中 |
+| 部分 cherry-pick | 中 (~50%) | 中 (~60%) | 视阈值而定 |
 
 **CommitMatcher.match_comprehensive 流程：**
 1. ID精确比较 → confidence=1.0
 2. Subject相似度 ≥ 0.95 → 直接返回
-3. Diff相似度 (file×0.4 + diff×0.6) ≥ 0.70
+3. Diff匹配：同时计算 similarity 与 containment，取最优 ≥ 0.70
 4. 合并去重，按confidence降序
 
 ---
@@ -80,9 +130,8 @@ build_commit_cache(repo_version, max_commits) # 缓存构建
 
 ### Crawler Agent (`agents/crawler.py`)
 
-**数据源：**
+**CVE 数据源：**
 - MITRE CVE API: `https://cveawg.mitre.org/api/cve/{CVE_ID}`
-- Google Kernel Mirror: `kernel.googlesource.com/pub/scm/linux/kernel/git/stable/linux`
 
 **Mainline识别逻辑：**
 1. `affected[].versions[]` 中 `versionType="git"` 的条目提取 fix commits
@@ -90,9 +139,17 @@ build_commit_cache(repo_version, max_commits) # 缓存构建
 3. git commits 与 semver versions 一一映射
 4. 匹配 mainline 版本号的 commit 即为 mainline fix
 
-**Patch获取（双请求）：**
-1. `?format=JSON` → commit元数据（subject、author、tree_diff文件列表）
-2. `%5E%21?format=TEXT` → base64编码的diff
+**Patch获取（三级回退，使用完整 40 位 commit ID）：**
+
+| 优先级 | 数据源 | 方式 | 特点 |
+|--------|--------|------|------|
+| 1 | `git.kernel.org` | `/patch/?id={commit}` (format-patch) | 单请求获取全部信息，0.1-0.3s，最可靠 |
+| 2 | `kernel.googlesource.com` | JSON 元数据 + TEXT diff (两次请求) | 含 3 次重试，间歇 502/500 |
+| 3 | 本地 git 仓库 | `git show` / `git log` | commit 需存在于对象库中 |
+
+- `git.kernel.org` 返回标准 `git format-patch` 输出，一次请求包含 From / Subject / Author / Date / commit message / diff
+- 多个源的部分结果通过 `_merge_patch` 互补合并（如一个源拿到 subject，另一个拿到 diff）
+- 同时尝试 stable tree 和 torvalds tree，覆盖 mainline 与 stable backport 两种场景
 
 ### Analysis Agent (`agents/analysis.py`)
 
@@ -102,17 +159,29 @@ build_commit_cache(repo_version, max_commits) # 缓存构建
 |-------|------|------|--------|
 | L1 | Commit ID精确匹配 | `git cat-file -t` + `git merge-base --is-ancestor` | 100% |
 | L2 | Subject语义匹配 | `git log --grep` + SequenceMatcher ≥ 85% | 85-100% |
-| L3 | Code Diff匹配 | `git log -- <files>` + diff_similarity ≥ 70% | 70-100% |
+| L3 | Code Diff匹配 | `git log -- <files>` + max(similarity, containment) ≥ 70% | 70-100% |
 
 L2 两阶段搜索：先精确subject，再关键词OR搜索。
+
+L3 同时计算双向相似度和单向包含度，取最优。适配本地仓库将多个社区补丁 squash 为一个 commit 的常见场景。
 
 ### Dependency Agent (`agents/dependency.py`)
 
 **分析流程：**
-1. 提取 Fixes: 标签引用的commit
-2. 在目标仓库搜索修改同文件的近期commits
-3. 排除已找到的fix/introduced commits
-4. 对候选补丁做函数级重叠分析，标记强依赖
+1. 提取 `Fixes:` 标签引用的 commit，加入排除列表
+2. 根据引入 commit 时间戳确定时间窗口（`after_ts`），只分析引入后的 commit
+3. `search_by_files` 搜索修改同文件的 commit（排除 merge commits）
+4. 对每个候选 commit 执行 hunk 级重叠分析：
+   - 提取 fix patch 和候选 commit 的 hunk 列表（文件 + 行范围）
+   - 计算直接重叠（行范围相交）和相邻重叠（margin=50 行内）
+   - 计算函数级重叠
+5. 综合评分与分级：
+
+| 等级 | 条件 | 含义 |
+|------|------|------|
+| 强 (strong) | 直接 hunk 重叠 ≥ 1 | 修改了相同代码行，几乎必须先合入 |
+| 中 (medium) | 相邻 hunk 重叠 ≥ 1 或函数重叠 ≥ 1 | 修改了相邻区域，可能产生冲突 |
+| 弱 (weak) | 仅文件级重叠 | 修改了同文件的不同区域 |
 
 ### DryRun Agent (`agents/dryrun.py`)
 

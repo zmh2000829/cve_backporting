@@ -115,6 +115,54 @@ def diff_similarity(d1: str, d2: str) -> float:
     return difflib.SequenceMatcher(None, c1, c2).ratio()
 
 
+def _extract_change_lines(diff: str):
+    """提取 diff 中的 +/- 变更行，分别返回 added 和 removed（去前缀、去空白行、去短行噪声）"""
+    added, removed = [], []
+    for line in diff.split("\n"):
+        if line.startswith("+++") or line.startswith("---"):
+            continue
+        if line.startswith("+"):
+            s = line[1:].strip()
+            if len(s) >= 4:
+                added.append(s)
+        elif line.startswith("-"):
+            s = line[1:].strip()
+            if len(s) >= 4:
+                removed.append(s)
+    return added, removed
+
+
+def diff_containment(source_diff: str, target_diff: str) -> float:
+    """
+    计算 source_diff 的改动在 target_diff 中的包含度 (0.0~1.0)。
+    不对称：衡量 "target 包含了多少 source 的改动"。
+    适用于本地仓库把社区多个 patch 合并为一个 commit 的场景。
+    """
+    from collections import Counter
+
+    src_add, src_rem = _extract_change_lines(source_diff)
+    tgt_add, tgt_rem = _extract_change_lines(target_diff)
+
+    total = len(src_add) + len(src_rem)
+    if total == 0:
+        return 0.0
+
+    tgt_add_bag = Counter(tgt_add)
+    tgt_rem_bag = Counter(tgt_rem)
+
+    matched = 0
+    for line in src_add:
+        if tgt_add_bag[line] > 0:
+            matched += 1
+            tgt_add_bag[line] -= 1
+    for line in src_rem:
+        if tgt_rem_bag[line] > 0:
+            matched += 1
+            tgt_rem_bag[line] -= 1
+
+    return matched / total
+
+
 def file_similarity(f1: List[str], f2: List[str]) -> float:
     if not f1 or not f2:
         return 0.0
@@ -145,12 +193,23 @@ class CommitMatcher:
             fs = file_similarity(sf, tf)
             if fs < 0.3:
                 continue
+
             ds = diff_similarity(src.diff_code, t.diff_code)
-            combined = fs * 0.4 + ds * 0.6
-            if combined >= threshold:
-                res.append(MatchResult(target_commit=t.commit_id, source_commit=src.commit_id,
-                                       confidence=combined, match_type="diff_similarity",
-                                       details={"file_sim": fs, "diff_sim": ds}))
+            dc = diff_containment(src.diff_code, t.diff_code)
+
+            if dc >= ds:
+                score = fs * 0.3 + dc * 0.7
+                mtype = "diff_containment"
+            else:
+                score = fs * 0.4 + ds * 0.6
+                mtype = "diff_similarity"
+
+            if score >= threshold:
+                res.append(MatchResult(
+                    target_commit=t.commit_id, source_commit=src.commit_id,
+                    confidence=score, match_type=mtype,
+                    details={"file_sim": fs, "diff_sim": ds,
+                             "diff_containment": dc}))
         res.sort(key=lambda x: x.confidence, reverse=True)
         return res
 
