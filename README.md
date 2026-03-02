@@ -43,11 +43,12 @@ Crawler → Analysis → Dependency → DryRun
 
 **场景：** 对百万级 commit 仓库建立 SQLite + FTS5 缓存，加速后续搜索。
 
+- **增量更新（默认）：** 已有缓存时只拉取最新 commit 之后的增量，秒级完成日常同步
+- 全量重建：首次构建或 `--full` 强制重建
+- 自动检测缓存一致性：若最新缓存 commit 不在分支上（rebase），自动降级全量重建
 - 流式读取 git log，不将全量输出加载到内存
 - 50000 条批量写入 + WAL 模式 + PRAGMA 调优
-- 导入期间禁用 FTS 触发器，完成后重建索引
-- 大仓库 commit 计数支持三级回退（rev-list → 缓存数 → 采样），超时优雅降级
-- 适用于首次初始化、定期缓存刷新
+- 适用于首次初始化、定期缓存刷新、仓库代码更新后快速同步
 
 ### 5. Commit 搜索 (`search`)
 
@@ -98,10 +99,17 @@ pip install -r requirements.txt
 vim config.yaml
 ```
 
-### 构建缓存（百万级仓库首次使用前必须执行）
+### 构建缓存
 
 ```bash
+# 首次构建（全量）
 python cli.py build-cache --target 5.10-hulk
+
+# 日常同步（增量，默认行为，仅拉取新增 commit）
+python cli.py build-cache --target 5.10-hulk
+
+# 强制全量重建
+python cli.py build-cache --target 5.10-hulk --full
 ```
 
 ### CVE 全流程分析

@@ -184,6 +184,19 @@ class GitRepoManager:
 
     # ─── cache build (optimized for 10M+ commits) ─────────────────────
 
+    def get_latest_cached_commit(self, rv: str) -> Optional[str]:
+        """获取缓存中时间戳最大的 commit ID（即最新的缓存 commit）"""
+        try:
+            conn = sqlite3.connect(self.cache_db_path)
+            r = conn.execute(
+                "SELECT commit_id FROM commits "
+                "WHERE repo_version=? ORDER BY timestamp DESC LIMIT 1", (rv,)
+            ).fetchone()
+            conn.close()
+            return r[0] if r else None
+        except Exception:
+            return None
+
     def count_commits(self, rv: str, timeout: int = 600) -> int:
         """
         统计分支commit总数。
@@ -234,16 +247,15 @@ class GitRepoManager:
         return 0
 
     def build_commit_cache(self, rv: str, max_commits: int = None,
-                           progress_cb: ProgressCB = None):
+                           progress_cb: ProgressCB = None,
+                           incremental: bool = False):
         """
         构建commit缓存 (流式优化版)
 
-        优化要点 vs 旧版:
-        1. 流式读取 git stdout (Popen) → 不将GB级输出加载到内存
-        2. 每行一条记录 → 去掉 RECORD_SEP，直接按行解析
-        3. 批量50000条写入 (旧版5000)
-        4. 批量导入期间禁用FTS触发器，导入完成后重建FTS索引
-        5. PRAGMA page_size/cache_size/temp_store 全面调优
+        incremental=True 时：
+          - 查找缓存中最新commit, 只拉取其之后的新增commit
+          - 验证最新缓存commit仍在目标分支上（应对rebase）
+          - 若缓存为空或最新commit不在分支上，自动降级为全量构建
         """
         br = self._get_repo_branch(rv)
         rp = self._get_repo_path(rv)
@@ -251,14 +263,35 @@ class GitRepoManager:
             logger.error("仓库路径不可用: %s", rv)
             return
 
+        rev_range = None
+
+        if incremental:
+            latest = self.get_latest_cached_commit(rv)
+            if latest:
+                # 验证缓存中最新commit仍在分支上（防止rebase后脏数据）
+                chk = self.run_git_rc(
+                    ["git", "merge-base", "--is-ancestor", latest, br or "HEAD"],
+                    rv, timeout=30)
+                if chk == 0:
+                    rev_range = f"{latest}..{br or 'HEAD'}"
+                    logger.info("增量模式: %s (基于 %s)", rv, latest[:12])
+                else:
+                    logger.warning("缓存中最新commit %s 不在分支上，降级为全量构建", latest[:12])
+            else:
+                logger.info("缓存为空，执行全量构建")
+
         total = max_commits or 0
-        logger.info("构建缓存: %s (分支: %s, 预计: %s)", rv, br or "当前",
+        mode_str = "增量" if rev_range else "全量"
+        logger.info("构建缓存[%s]: %s (分支: %s, 预计: %s)", mode_str, rv, br or "当前",
                      f"{total:,}" if total else "未知")
 
         # git log 流式输出，每行一条记录
         fmt = f"%H{FIELD_SEP}%s{FIELD_SEP}%an{FIELD_SEP}%at"
-        cmd = ["git", "log"] + ([br] if br else [])
-        if max_commits and max_commits > 0:
+        if rev_range:
+            cmd = ["git", "log", rev_range]
+        else:
+            cmd = ["git", "log"] + ([br] if br else [])
+        if max_commits and max_commits > 0 and not rev_range:
             cmd.append(f"--max-count={max_commits}")
         cmd.append(f"--format={fmt}")
 
@@ -270,18 +303,18 @@ class GitRepoManager:
         )
 
         conn = sqlite3.connect(self.cache_db_path)
-        # SQLite批量导入优化
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=OFF")
-        conn.execute("PRAGMA cache_size=-512000")  # 512MB cache
+        conn.execute("PRAGMA cache_size=-512000")
         conn.execute("PRAGMA temp_store=MEMORY")
-        conn.execute("PRAGMA mmap_size=1073741824")  # 1GB mmap
+        conn.execute("PRAGMA mmap_size=1073741824")
 
-        # 禁用FTS触发器（批量导入后重建）
-        try:
-            conn.execute("DROP TRIGGER IF EXISTS commits_ai")
-        except Exception:
-            pass
+        # 增量模式下保留FTS触发器（新增量少），全量重建时禁用
+        if not rev_range:
+            try:
+                conn.execute("DROP TRIGGER IF EXISTS commits_ai")
+            except Exception:
+                pass
 
         batch = []
         count = 0
@@ -309,7 +342,6 @@ class GitRepoManager:
                 if progress_cb:
                     progress_cb(count, total)
 
-        # flush remaining
         if batch:
             conn.executemany(sql, batch)
             conn.commit()
@@ -318,12 +350,35 @@ class GitRepoManager:
 
         proc.wait()
 
-        # 重建FTS索引
-        logger.info("重建FTS索引...")
+        # FTS 处理：增量模式只插入新增部分，全量模式完整重建
+        if rev_range:
+            logger.info("增量更新FTS索引 (%d 条新commit)...", count)
+            # FTS触发器在增量模式下已保留，刚写入的commit会自动进入FTS
+            # 但 INSERT OR IGNORE 不触发 AFTER INSERT，需要手动补录
+            try:
+                conn.execute(
+                    "INSERT OR IGNORE INTO commits_fts(rowid, commit_id, subject) "
+                    "SELECT id, commit_id, subject FROM commits "
+                    "WHERE repo_version=? ORDER BY id DESC LIMIT ?",
+                    (rv, count))
+                conn.commit()
+            except sqlite3.OperationalError as e:
+                logger.warning("FTS增量更新失败: %s, 尝试全量重建", e)
+                self._rebuild_fts(conn, rv)
+        else:
+            logger.info("全量重建FTS索引...")
+            self._rebuild_fts(conn, rv)
+
         if progress_cb:
             progress_cb(count, total)
+
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.close()
+        logger.info("缓存完成[%s]: 新增 %d 条", mode_str, count)
+
+    def _rebuild_fts(self, conn: sqlite3.Connection, rv: str):
+        """完整重建 FTS 索引"""
         try:
-            # 安全重建：先删除再重建整个FTS表
             conn.execute("DROP TABLE IF EXISTS commits_fts")
             conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS commits_fts "
                          "USING fts5(commit_id,subject,content='commits',content_rowid='id')")
@@ -337,10 +392,6 @@ class GitRepoManager:
             conn.commit()
         except sqlite3.OperationalError as e:
             logger.warning("FTS重建失败(不影响核心功能): %s", e)
-
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.close()
-        logger.info("缓存完成: %d 条", count)
 
     # ─── internals ───────────────────────────────────────────────────
 
