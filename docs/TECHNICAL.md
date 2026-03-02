@@ -55,8 +55,34 @@ search_by_subject(subject, repo_version)      # Level 2
 search_by_keywords(keywords, repo_version)    # Level 2
 search_by_files(files, repo_version)          # Level 3 / Dependency
 get_commit_diff(commit_id, repo_version)      # Level 3
-build_commit_cache(repo_version, max_commits) # 缓存构建
+build_commit_cache(repo_version, max_commits, incremental) # 缓存构建
+get_latest_cached_commit(repo_version)        # 获取缓存中最新commit
 ```
+
+**增量缓存构建：**
+
+`build_commit_cache(incremental=True)` 时的工作流程：
+
+```
+┌─────────────────────────────────┐
+│ get_latest_cached_commit(rv)    │  查询 SQLite 中 timestamp 最大的 commit
+└──────────────┬──────────────────┘
+               ▼
+┌─────────────────────────────────┐
+│ merge-base --is-ancestor        │  验证该 commit 仍在目标分支上
+│ latest_commit  branch           │  (防止 rebase 后产生脏数据)
+└──────────┬──────────┬───────────┘
+       成功 ▼          ▼ 失败
+┌──────────────┐  ┌───────────────┐
+│ git log       │  │ 降级全量重建   │
+│ latest..branch│  │ (清除脏缓存)   │
+│ (仅新增commit)│  └───────────────┘
+└──────────────┘
+```
+
+- 增量模式下保留 FTS 触发器，仅补录新增记录到 FTS 索引
+- 全量模式下禁用 FTS 触发器，导入完成后通过 `_rebuild_fts()` 完整重建
+- CLI 默认行为：已有缓存 → 增量；无缓存 → 全量；`--full` → 强制全量
 
 ### matcher.py — 相似度、包含度与路径映射算法
 
@@ -146,6 +172,7 @@ Source (社区补丁)       Target (本地commit)
 | 修复 commit 搜索 | `False` | 仅双向相似度 | 修复补丁优先通过 L2 subject_match 定位 |
 | stable backport 搜索 | `False` | 仅双向相似度 | backport 通常有明确 subject |
 | check-intro 命令 | `True` | 包含度优先 | 判断引入代码是否存在 |
+| check-fix 命令 | `False` | 仅双向相似度 | 判断修复补丁是否已合入 |
 
 **`use_containment=True` 时的得分策略：**
 
@@ -219,6 +246,28 @@ L2 两阶段搜索：先精确subject，再关键词OR搜索。
 L3 策略因搜索场景不同而异：
 - **引入 commit 搜索**：启用包含度检测（`use_containment=True`），适配 squash 场景
 - **修复 commit 搜索**：仅用双向相似度，优先依赖 L2 subject_match
+
+**`search_detailed` 方法（用于 check-intro / check-fix）：**
+
+运行全部三级策略（不短路），通过 `use_containment` 参数区分搜索语义：
+- `search_detailed(..., use_containment=True)` — check-intro，L3 使用包含度优先
+- `search_detailed(..., use_containment=False)` — check-fix，L3 仅用双向相似度
+
+**check-fix 命令流程：**
+
+```
+输入: --cve CVE-xxx 或 --commit <fix_id>
+  │
+  ├─ CVE模式: fetch_cve → 提取 mainline_fix + version_commit_mapping
+  │           对 mainline fix 和匹配版本的 stable backport 逐一检测
+  │
+  └─ 对每个 fix commit:
+       1. fetch_patch 获取补丁信息
+       2. search_detailed(use_containment=False)
+       3. 三级策略独立展示结果
+  │
+  └─ 最终结论: 任一 commit 命中 → "已合入" / 全部未命中 → "需 backport"
+```
 
 ### Dependency Agent (`agents/dependency.py`)
 
