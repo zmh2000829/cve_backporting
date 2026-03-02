@@ -30,8 +30,13 @@ class AnalysisAgent:
     # ─── 快速搜索 (短路模式，用于Pipeline) ────────────────────────────
 
     def search(self, commit_id: str, subject: str, diff_code: str,
-               target_version: str) -> SearchResult:
-        """三级搜索（短路）：首个命中即返回，同时记录每级步骤"""
+               target_version: str,
+               use_containment: bool = False) -> SearchResult:
+        """
+        三级搜索（短路）：首个命中即返回，同时记录每级步骤。
+        use_containment=True:  引入commit搜索，L3启用包含度检测(适配squash场景)
+        use_containment=False: 修复commit搜索，L3仅用双向相似度
+        """
         sr = SearchResult()
 
         # Level 1
@@ -69,8 +74,10 @@ class AnalysisAgent:
             files = extract_files_from_diff(diff_code)
             if files:
                 t0 = time.time()
-                logger.info("  [L3] Diff匹配 (%s)", ", ".join(files[:3]))
-                sr = self._search_diff(commit_id, subject, diff_code, files, target_version)
+                mode_label = "Diff包含匹配" if use_containment else "Diff匹配"
+                logger.info("  [L3] %s (%s)", mode_label, ", ".join(files[:3]))
+                sr = self._search_diff(commit_id, subject, diff_code, files,
+                                       target_version, use_containment=use_containment)
                 if sr.found:
                     sr.steps.insert(0, SearchStep("L1", "miss", "目标分支中不存在"))
                     sr.steps.insert(1, l2_step)
@@ -149,12 +156,13 @@ class AnalysisAgent:
         s2.elapsed = time.time() - t0
         msr.strategies.append(s2)
 
-        # ── L3: Diff 代码匹配（含包含关系检测）──────────────────────
+        # ── L3: Diff 代码匹配（引入commit启用包含度检测）─────────────
         t0 = time.time()
-        s3 = StrategyResult(level="L3", name="Diff 代码匹配")
+        s3 = StrategyResult(level="L3", name="Diff 代码匹配 (含包含度)")
         files = modified_files or (extract_files_from_diff(diff_code) if diff_code else [])
         if diff_code and files:
-            sr3 = self._search_diff(commit_id, subject or "", diff_code, files, target_version)
+            sr3 = self._search_diff(commit_id, subject or "", diff_code, files,
+                                    target_version, use_containment=True)
             s3.candidates = sr3.candidates
             if sr3.found:
                 s3.found = True
@@ -218,7 +226,8 @@ class AnalysisAgent:
     # ─── Level 3 ─────────────────────────────────────────────────────
 
     def _search_diff(self, commit_id: str, subject: str, diff_code: str,
-                     files: List[str], tv: str) -> SearchResult:
+                     files: List[str], tv: str,
+                     use_containment: bool = False) -> SearchResult:
         sr = SearchResult()
         fc = self.git_mgr.search_by_files(files[:3], tv, limit=50)
         if not fc:
@@ -235,7 +244,8 @@ class AnalysisAgent:
                 modified_files=extract_files_from_diff(d or ""),
             ))
 
-        matches = self.matcher.match_comprehensive(source, targets)
+        matches = self.matcher.match_comprehensive(source, targets,
+                                                    use_containment=use_containment)
         if matches and matches[0].confidence >= 0.70:
             b = matches[0]
             sr.found = True

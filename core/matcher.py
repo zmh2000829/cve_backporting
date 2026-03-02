@@ -185,7 +185,12 @@ class CommitMatcher:
         return res
 
     def match_by_diff(self, src: CommitInfo, tgts: List[CommitInfo],
-                      threshold: float = 0.70) -> List[MatchResult]:
+                      threshold: float = 0.70,
+                      use_containment: bool = False) -> List[MatchResult]:
+        """
+        use_containment=True:  引入commit搜索模式，启用包含度检测 (squash场景)
+        use_containment=False: 修复commit搜索模式，仅用双向相似度
+        """
         res = []
         sf = src.modified_files or extract_files_from_diff(src.diff_code)
         for t in tgts:
@@ -195,25 +200,32 @@ class CommitMatcher:
                 continue
 
             ds = diff_similarity(src.diff_code, t.diff_code)
-            dc = diff_containment(src.diff_code, t.diff_code)
 
-            if dc >= ds:
-                score = fs * 0.3 + dc * 0.7
-                mtype = "diff_containment"
+            if use_containment:
+                dc = diff_containment(src.diff_code, t.diff_code)
+                if dc >= ds:
+                    score = fs * 0.3 + dc * 0.7
+                    mtype = "diff_containment"
+                else:
+                    score = fs * 0.4 + ds * 0.6
+                    mtype = "diff_similarity"
             else:
+                dc = 0.0
                 score = fs * 0.4 + ds * 0.6
                 mtype = "diff_similarity"
 
             if score >= threshold:
+                details = {"file_sim": fs, "diff_sim": ds}
+                if use_containment:
+                    details["diff_containment"] = dc
                 res.append(MatchResult(
                     target_commit=t.commit_id, source_commit=src.commit_id,
-                    confidence=score, match_type=mtype,
-                    details={"file_sim": fs, "diff_sim": ds,
-                             "diff_containment": dc}))
+                    confidence=score, match_type=mtype, details=details))
         res.sort(key=lambda x: x.confidence, reverse=True)
         return res
 
-    def match_comprehensive(self, src: CommitInfo, tgts: List[CommitInfo]) -> List[MatchResult]:
+    def match_comprehensive(self, src: CommitInfo, tgts: List[CommitInfo],
+                            use_containment: bool = False) -> List[MatchResult]:
         for t in tgts:
             if src.commit_id[:12] == t.commit_id[:12]:
                 return [MatchResult(target_commit=t.commit_id, source_commit=src.commit_id,
@@ -222,7 +234,7 @@ class CommitMatcher:
         subj = self.match_by_subject(src, tgts, 0.85)
         if subj and subj[0].confidence >= 0.95:
             return subj
-        diff = self.match_by_diff(src, tgts, 0.70)
+        diff = self.match_by_diff(src, tgts, 0.70, use_containment=use_containment)
         seen = {}
         for m in subj + diff:
             if m.target_commit not in seen or m.confidence > seen[m.target_commit].confidence:

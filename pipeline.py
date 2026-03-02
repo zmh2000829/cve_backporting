@@ -73,7 +73,7 @@ class Pipeline:
         _cb("crawler_patch", "success",
             f"{fix_patch.subject[:50]}  ({len(fix_patch.modified_files)} files)")
 
-        # ── Step 3: Analysis - 引入commit ────────────────────────────
+        # ── Step 3: Analysis - 引入commit (启用包含度匹配) ─────────────
         if cve_info.introduced_commit_id:
             _cb("analysis_intro", "running")
             intro_patch = self.crawler.fetch_patch(cve_info.introduced_commit_id, target_version)
@@ -82,6 +82,7 @@ class Pipeline:
                 intro_patch.subject if intro_patch else "",
                 intro_patch.diff_code if intro_patch else "",
                 target_version,
+                use_containment=True,
             )
             result.is_vulnerable = result.introduced_search.found
             if result.is_vulnerable:
