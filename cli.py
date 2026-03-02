@@ -6,6 +6,8 @@ CVE补丁回溯分析 - 命令行工具
   python cli.py analyze --cve CVE-2024-26633 --target 5.10-hulk
   python cli.py check-intro --commit <introduced_commit_id> --target 5.10-hulk
   python cli.py check-intro --cve CVE-2024-26633 --target 5.10-hulk
+  python cli.py check-fix --commit <fix_commit_id> --target 5.10-hulk
+  python cli.py check-fix --cve CVE-2024-26633 --target 5.10-hulk
   python cli.py build-cache --target 5.10-hulk
   python cli.py search --commit abc123 --target 5.10-hulk
 """
@@ -267,6 +269,163 @@ def cmd_check_intro(args, config):
         console.print(f"[dim]结果已保存: {fp}[/]")
 
 
+# ─── check-fix ───────────────────────────────────────────────────────
+
+def cmd_check_fix(args, config):
+    """
+    检测漏洞修复commit是否已合入目标仓库。
+    支持两种输入：
+      --commit <id>   直接指定修复 commit ID
+      --cve <id>      从 CVE 信息自动提取 mainline fix + stable backport
+    """
+    from agents.crawler import CrawlerAgent
+    from agents.analysis import AnalysisAgent
+    from core.matcher import PathMapper
+    from rich.table import Table
+
+    git_mgr = _make_git_mgr(config, args.target_version)
+    crawler = CrawlerAgent(git_mgr=git_mgr)
+    analysis = AnalysisAgent(git_mgr, path_mapper=PathMapper(config.path_mappings))
+    tv = args.target_version
+
+    check_list = []  # [(commit_id, label)]
+
+    if args.cve_id:
+        console.print(Panel(
+            f"[bold]CVE:[/] {args.cve_id}  [bold]目标:[/] {tv}",
+            title="[bold green]漏洞修复检测 (CVE模式)[/]",
+            border_style="green", padding=(0, 2),
+        ))
+        with console.status("[cyan]获取CVE信息..."):
+            cve = crawler.fetch_cve(args.cve_id)
+        if not cve:
+            console.print("[red]无法获取CVE信息[/]")
+            return
+
+        t = Table(box=box.SIMPLE, show_header=False, padding=(0, 1), expand=True, show_edge=False)
+        t.add_column("k", style="bold", width=16)
+        t.add_column("v")
+        t.add_row("CVE", cve.cve_id)
+        t.add_row("描述", (cve.description[:120] + "...") if len(cve.description) > 120 else cve.description)
+        t.add_row("严重程度", cve.severity)
+
+        if cve.mainline_fix_commit:
+            ml = cve.mainline_fix_commit[:12]
+            t.add_row("Mainline Fix", f"[cyan]{ml}[/] ({cve.mainline_version or 'N/A'})")
+            check_list.append((cve.mainline_fix_commit, f"Mainline ({cve.mainline_version or 'N/A'})"))
+
+        if cve.version_commit_mapping:
+            ver_lines = []
+            for ver, cid in cve.version_commit_mapping.items():
+                ver_lines.append(f"{ver}: {cid[:12]}")
+                if cid != cve.mainline_fix_commit and ver.startswith("5.10"):
+                    check_list.append((cid, f"Stable backport ({ver})"))
+            t.add_row("版本映射", "\n".join(ver_lines))
+
+        if cve.introduced_commit_id:
+            t.add_row("引入 Commit", f"[yellow]{cve.introduced_commit_id[:12]}[/]")
+
+        console.print(t)
+        console.print()
+
+        if not check_list:
+            console.print("[yellow]该CVE没有修复commit信息[/]")
+            return
+
+    elif args.commit_id:
+        check_list = [(args.commit_id, "指定commit")]
+        console.print(Panel(
+            f"[bold]Commit:[/] {args.commit_id}  [bold]目标:[/] {tv}",
+            title="[bold green]漏洞修复检测 (Commit模式)[/]",
+            border_style="green", padding=(0, 2),
+        ))
+    else:
+        console.print("[red]请指定 --commit 或 --cve[/]")
+        return
+
+    any_fixed = False
+
+    for cid, label in check_list:
+        console.print(f"\n[bold]检测修复commit:[/] [cyan]{cid[:12]}[/] [dim]({label})[/]")
+
+        with console.status("[cyan]获取commit补丁信息..."):
+            patch = crawler.fetch_patch(cid, tv)
+
+        subject = patch.subject if patch else ""
+        diff_code = patch.diff_code if patch else ""
+        files = patch.modified_files if patch else []
+        author = patch.author if patch else ""
+
+        if patch and subject:
+            console.print(f"[dim]  Subject: {subject[:80]}[/]")
+            console.print(f"[dim]  Files: {', '.join(files[:5])}[/]")
+            console.print()
+
+        stages = [
+            ("l1", "L1 │ ID 精确匹配"),
+            ("l2", "L2 │ Subject 语义匹配"),
+            ("l3", "L3 │ Diff 代码匹配"),
+        ]
+        tracker = StageTracker(stages)
+
+        def _layout():
+            return tracker.render()
+
+        with Live(_layout(), console=console, refresh_per_second=8) as live:
+            def _refresh():
+                live.update(_layout())
+
+            tracker.start("l1")
+            _refresh()
+
+            msr = analysis.search_detailed(
+                cid, subject, diff_code, files, author, tv,
+                use_containment=False)
+
+            for s in msr.strategies:
+                key = {"L1": "l1", "L2": "l2", "L3": "l3"}[s.level]
+                if s.found:
+                    tracker.done(key, "success", f"{s.target_commit[:12]} ({s.confidence:.0%})")
+                else:
+                    tracker.done(key, "fail", s.detail[:60])
+                _refresh()
+
+        console.print()
+        console.print(render_multi_strategy(msr))
+
+        if msr.is_present:
+            any_fixed = True
+
+    # 汇总
+    console.print()
+    if any_fixed:
+        console.print(Panel(
+            "[green bold]结论: 修复补丁已合入目标仓库[/]",
+            border_style="green", padding=(0, 2),
+        ))
+    else:
+        console.print(Panel(
+            "[red bold]结论: 修复补丁未合入目标仓库，需要 backport[/]",
+            border_style="red", padding=(0, 2),
+        ))
+
+    out_dir = config.output.output_dir
+    os.makedirs(out_dir, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    fp = os.path.join(out_dir, f"check_fix_{args.cve_id or check_list[0][0][:12]}_{tv}_{ts}.json")
+    with open(fp, "w", encoding="utf-8") as f:
+        json.dump({
+            "cve_id": args.cve_id or "",
+            "target_version": tv,
+            "is_fixed": any_fixed,
+            "checked_commits": [
+                {"commit_id": cid, "label": label}
+                for cid, label in check_list
+            ],
+        }, f, indent=2, ensure_ascii=False, default=str)
+    console.print(f"[dim]结果已保存: {fp}[/]")
+
+
 # ─── build-cache ─────────────────────────────────────────────────────
 
 def cmd_build_cache(args, config):
@@ -365,6 +524,11 @@ def main():
     ip.add_argument("--cve", dest="cve_id", help="CVE ID (自动提取引入commit)")
     ip.add_argument("--target", dest="target_version", required=True)
 
+    fp = sub.add_parser("check-fix", help="检测修复补丁是否已合入", parents=[parent])
+    fp.add_argument("--commit", dest="commit_id", help="修复commit ID")
+    fp.add_argument("--cve", dest="cve_id", help="CVE ID (自动提取修复commit)")
+    fp.add_argument("--target", dest="target_version", required=True)
+
     cp = sub.add_parser("build-cache", help="构建commit缓存", parents=[parent])
     cp.add_argument("--target", dest="target_version", required=True)
 
@@ -383,6 +547,7 @@ def main():
     dispatch = {
         "analyze": cmd_analyze,
         "check-intro": cmd_check_intro,
+        "check-fix": cmd_check_fix,
         "build-cache": cmd_build_cache,
         "search": cmd_search,
     }

@@ -28,7 +28,18 @@ Crawler → Analysis → Dependency → DryRun
 - L1 精确匹配区分"不存在"/"存在但不在目标分支"/"在目标分支"三种状态
 - 适用于快速确认单个漏洞的影响面、mainline commit 溯源
 
-### 3. Commit 缓存构建 (`build-cache`)
+### 3. 修复补丁检测 (`check-fix`)
+
+**场景：** 判断某个 CVE 的修复补丁是否已合入目标仓库，用于快速确认漏洞修复状态。
+
+- 支持两种输入：直接指定修复 commit ID，或通过 CVE ID 自动提取 mainline fix + stable backport
+- CVE 模式下自动检测 mainline fix 和匹配版本的 stable backport commit
+- 三级策略全部执行（不短路），展示每个策略的独立结果
+- L3 使用相似度（而非包含度）匹配，适合精确的修复补丁匹配
+- 最终给出"已合入/需 backport"的结论
+- 适用于安全审计、合规检查、CVE 修复状态批量确认
+
+### 4. Commit 缓存构建 (`build-cache`)
 
 **场景：** 对百万级 commit 仓库建立 SQLite + FTS5 缓存，加速后续搜索。
 
@@ -38,7 +49,7 @@ Crawler → Analysis → Dependency → DryRun
 - 大仓库 commit 计数支持三级回退（rev-list → 缓存数 → 采样），超时优雅降级
 - 适用于首次初始化、定期缓存刷新
 
-### 4. Commit 搜索 (`search`)
+### 5. Commit 搜索 (`search`)
 
 **场景：** 快速查询某个 commit ID 是否存在于目标仓库的指定分支上。
 
@@ -114,6 +125,16 @@ python cli.py check-intro --commit d375b98e0248 --target 5.10-hulk
 
 # 通过 CVE ID 自动提取引入 commit
 python cli.py check-intro --cve CVE-2024-26633 --target 5.10-hulk
+```
+
+### 修复补丁检测
+
+```bash
+# 直接指定修复 commit ID
+python cli.py check-fix --commit abc123def456 --target 5.10-hulk
+
+# 通过 CVE ID 自动提取修复 commit（含 stable backport）
+python cli.py check-fix --cve CVE-2024-26633 --target 5.10-hulk
 ```
 
 ### Commit 搜索

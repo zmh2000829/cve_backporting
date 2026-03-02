@@ -103,10 +103,12 @@ class AnalysisAgent:
 
     def search_detailed(self, commit_id: str, subject: str, diff_code: str,
                         modified_files: List[str], author: str,
-                        target_version: str) -> MultiStrategyResult:
+                        target_version: str,
+                        use_containment: bool = True) -> MultiStrategyResult:
         """
         运行全部三级策略，不短路，返回每个策略的独立结果。
-        用于 check-intro 命令的多策略展示。
+        use_containment=True:  引入commit检测 (check-intro)
+        use_containment=False: 修复commit检测 (check-fix)
         """
         msr = MultiStrategyResult(
             commit_id=commit_id,
@@ -161,9 +163,10 @@ class AnalysisAgent:
         s2.elapsed = time.time() - t0
         msr.strategies.append(s2)
 
-        # ── L3: Diff 代码匹配（引入commit启用包含度检测）─────────────
+        # ── L3: Diff 代码匹配 ────────────────────────────────────────
         t0 = time.time()
-        s3 = StrategyResult(level="L3", name="Diff 代码匹配 (含包含度)")
+        l3_label = "Diff 代码匹配 (含包含度)" if use_containment else "Diff 代码匹配"
+        s3 = StrategyResult(level="L3", name=l3_label)
         files = modified_files or (extract_files_from_diff(diff_code) if diff_code else [])
         if diff_code and files:
             if self.path_mapper.has_rules:
@@ -171,7 +174,7 @@ class AnalysisAgent:
                 if len(expanded) > len(files):
                     s3.detail = f"路径映射: +{len(expanded) - len(files)} 等价路径"
             sr3 = self._search_diff(commit_id, subject or "", diff_code, files,
-                                    target_version, use_containment=True)
+                                    target_version, use_containment=use_containment)
             s3.candidates = sr3.candidates
             if sr3.found:
                 s3.found = True
