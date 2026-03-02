@@ -9,6 +9,7 @@ from typing import Optional, Callable
 
 from core.models import AnalysisResult
 from core.git_manager import GitRepoManager
+from core.matcher import PathMapper
 from agents.crawler import CrawlerAgent
 from agents.analysis import AnalysisAgent
 from agents.dependency import DependencyAgent
@@ -33,10 +34,12 @@ STAGES = [
 class Pipeline:
     """CVE补丁回溯分析流水线"""
 
-    def __init__(self, git_mgr: GitRepoManager, api_timeout: int = 30):
+    def __init__(self, git_mgr: GitRepoManager, api_timeout: int = 30,
+                 path_mappings: list = None):
+        pm = PathMapper(path_mappings) if path_mappings else PathMapper()
         self.crawler = CrawlerAgent(api_timeout=api_timeout, git_mgr=git_mgr)
-        self.analysis = AnalysisAgent(git_mgr)
-        self.dependency = DependencyAgent(git_mgr)
+        self.analysis = AnalysisAgent(git_mgr, path_mapper=pm)
+        self.dependency = DependencyAgent(git_mgr, path_mapper=pm)
         self.dryrun = DryRunAgent(git_mgr)
         self.git_mgr = git_mgr
 

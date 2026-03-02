@@ -60,7 +60,7 @@ def _make_git_mgr(config, tv: str) -> GitRepoManager:
 
 def cmd_analyze(args, config):
     git_mgr = _make_git_mgr(config, args.target_version)
-    pipe = Pipeline(git_mgr)
+    pipe = Pipeline(git_mgr, path_mappings=config.path_mappings)
 
     cves = [args.cve_id] if args.cve_id else []
     if args.batch_file:
@@ -133,7 +133,8 @@ def cmd_check_intro(args, config):
 
     git_mgr = _make_git_mgr(config, args.target_version)
     crawler = CrawlerAgent(git_mgr=git_mgr)
-    analysis = AnalysisAgent(git_mgr)
+    from core.matcher import PathMapper
+    analysis = AnalysisAgent(git_mgr, path_mapper=PathMapper(config.path_mappings))
     tv = args.target_version
 
     commit_ids = []

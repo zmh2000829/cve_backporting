@@ -13,7 +13,7 @@ from typing import List
 from core.models import CommitInfo, SearchResult, SearchStep, StrategyResult, MultiStrategyResult
 from core.git_manager import GitRepoManager
 from core.matcher import (
-    CommitMatcher, normalize_subject, extract_keywords,
+    CommitMatcher, PathMapper, normalize_subject, extract_keywords,
     extract_files_from_diff, subject_similarity, diff_containment,
 )
 
@@ -23,9 +23,10 @@ logger = logging.getLogger(__name__)
 class AnalysisAgent:
     """目标仓库commit定位Agent"""
 
-    def __init__(self, git_mgr: GitRepoManager):
+    def __init__(self, git_mgr: GitRepoManager, path_mapper: PathMapper = None):
         self.git_mgr = git_mgr
-        self.matcher = CommitMatcher()
+        self.path_mapper = path_mapper or PathMapper()
+        self.matcher = CommitMatcher(path_mapper=self.path_mapper)
 
     # ─── 快速搜索 (短路模式，用于Pipeline) ────────────────────────────
 
@@ -73,6 +74,10 @@ class AnalysisAgent:
         if diff_code:
             files = extract_files_from_diff(diff_code)
             if files:
+                search_files = self.path_mapper.expand_files(files) if self.path_mapper.has_rules else files
+                if len(search_files) > len(files):
+                    logger.info("  [L3] 路径映射: %s → +%d 等价路径",
+                                ", ".join(files[:2]), len(search_files) - len(files))
                 t0 = time.time()
                 mode_label = "Diff包含匹配" if use_containment else "Diff匹配"
                 logger.info("  [L3] %s (%s)", mode_label, ", ".join(files[:3]))
@@ -161,6 +166,10 @@ class AnalysisAgent:
         s3 = StrategyResult(level="L3", name="Diff 代码匹配 (含包含度)")
         files = modified_files or (extract_files_from_diff(diff_code) if diff_code else [])
         if diff_code and files:
+            if self.path_mapper.has_rules:
+                expanded = self.path_mapper.expand_files(files)
+                if len(expanded) > len(files):
+                    s3.detail = f"路径映射: +{len(expanded) - len(files)} 等价路径"
             sr3 = self._search_diff(commit_id, subject or "", diff_code, files,
                                     target_version, use_containment=True)
             s3.candidates = sr3.candidates
@@ -229,7 +238,8 @@ class AnalysisAgent:
                      files: List[str], tv: str,
                      use_containment: bool = False) -> SearchResult:
         sr = SearchResult()
-        fc = self.git_mgr.search_by_files(files[:3], tv, limit=50)
+        search_files = self.path_mapper.expand_files(files) if self.path_mapper.has_rules else files
+        fc = self.git_mgr.search_by_files(search_files[:6], tv, limit=50)
         if not fc:
             return sr
 

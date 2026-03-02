@@ -1,14 +1,69 @@
-"""相似度匹配与依赖图算法"""
+"""相似度匹配、路径映射与依赖图算法"""
 
 import re
 import difflib
 import logging
-from typing import Dict, List, Set
+from typing import Dict, List, Set, Optional
 from dataclasses import field
 from collections import defaultdict, deque
 from core.models import CommitInfo, MatchResult
 
 logger = logging.getLogger(__name__)
+
+
+class PathMapper:
+    """
+    内核版本间的路径双向映射。
+    社区高版本补丁路径 (upstream) ↔ 本地低版本路径 (local)。
+    """
+
+    def __init__(self, mappings: Optional[list] = None):
+        self._rules: List[tuple] = []
+        if mappings:
+            for m in mappings:
+                up = m.get("upstream", "")
+                lo = m.get("local", "")
+                if up and lo and up != lo:
+                    self._rules.append((up, lo))
+
+    @property
+    def has_rules(self) -> bool:
+        return len(self._rules) > 0
+
+    def translate(self, filepath: str) -> List[str]:
+        """
+        给定一个文件路径，返回所有可能的等价路径（含原始路径）。
+        双向翻译：upstream→local 和 local→upstream。
+        """
+        result = [filepath]
+        for up, lo in self._rules:
+            if filepath.startswith(up):
+                result.append(lo + filepath[len(up):])
+            elif filepath.startswith(lo):
+                result.append(up + filepath[len(lo):])
+        return result
+
+    def expand_files(self, files: List[str]) -> List[str]:
+        """扩展文件列表，加入所有可能的映射路径（去重保序）"""
+        seen = set()
+        expanded = []
+        for f in files:
+            for t in self.translate(f):
+                if t not in seen:
+                    seen.add(t)
+                    expanded.append(t)
+        return expanded
+
+    def normalize_for_compare(self, filepath: str) -> str:
+        """将路径规范化到 upstream 形式，用于跨版本比较"""
+        for up, lo in self._rules:
+            if filepath.startswith(lo):
+                return up + filepath[len(lo):]
+        return filepath
+
+    def normalize_files(self, files: List[str]) -> List[str]:
+        """将文件列表统一规范化到 upstream 形式"""
+        return [self.normalize_for_compare(f) for f in files]
 
 _BACKPORT_PREFIXES = [
     "[backport]", "[stable]", "backport:", "stable:",
@@ -163,15 +218,25 @@ def diff_containment(source_diff: str, target_diff: str) -> float:
     return matched / total
 
 
-def file_similarity(f1: List[str], f2: List[str]) -> float:
+def file_similarity(f1: List[str], f2: List[str],
+                    path_mapper: Optional[PathMapper] = None) -> float:
     if not f1 or not f2:
         return 0.0
+    if path_mapper and path_mapper.has_rules:
+        n1 = {path_mapper.normalize_for_compare(f) for f in f1}
+        n2 = {path_mapper.normalize_for_compare(f) for f in f2}
+        full_sim = len(n1 & n2) / len(n1 | n2) if (n1 | n2) else 0.0
+        if full_sim > 0:
+            return full_sim
     n1 = {f.split("/")[-1] for f in f1}
     n2 = {f.split("/")[-1] for f in f2}
     return len(n1 & n2) / len(n1 | n2) if (n1 | n2) else 0.0
 
 
 class CommitMatcher:
+    def __init__(self, path_mapper: Optional[PathMapper] = None):
+        self.path_mapper = path_mapper
+
     def match_by_subject(self, src: CommitInfo, tgts: List[CommitInfo],
                          threshold: float = 0.85) -> List[MatchResult]:
         res = []
@@ -195,7 +260,7 @@ class CommitMatcher:
         sf = src.modified_files or extract_files_from_diff(src.diff_code)
         for t in tgts:
             tf = t.modified_files or extract_files_from_diff(t.diff_code)
-            fs = file_similarity(sf, tf)
+            fs = file_similarity(sf, tf, path_mapper=self.path_mapper)
             if fs < 0.3:
                 continue
 

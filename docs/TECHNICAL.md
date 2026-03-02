@@ -58,18 +58,56 @@ get_commit_diff(commit_id, repo_version)      # Level 3
 build_commit_cache(repo_version, max_commits) # 缓存构建
 ```
 
-### matcher.py — 相似度与包含度算法
+### matcher.py — 相似度、包含度与路径映射算法
 
-| 函数 | 算法 | 用途 |
-|------|------|------|
+| 函数/类 | 算法 | 用途 |
+|---------|------|------|
+| `PathMapper` | 前缀替换 (双向) | 跨版本路径翻译 |
 | `subject_similarity` | SequenceMatcher (标准化后) | Level 2 匹配 |
 | `diff_similarity` | SequenceMatcher (仅+/-行) | Level 3 双向相似度 |
 | `diff_containment` | Multiset 包含度 (单向) | Level 3 包含关系检测 |
-| `file_similarity` | Jaccard (文件名集合) | 过滤 + 评分 |
+| `file_similarity` | Jaccard + PathMapper 规范化 | 过滤 + 评分 |
 | `normalize_subject` | 去除[backport]等前缀 | 预处理 |
 | `extract_keywords` | 去停用词 + 截断 | 关键词搜索 |
 | `extract_hunks_from_diff` | 解析 `@@` 行号范围 | 依赖分析 hunk 级重叠 |
 | `compute_hunk_overlap` | 行范围相交/相邻检测 | 依赖分析分级 |
+
+#### PathMapper — 跨版本路径映射
+
+**设计背景：** Linux 内核在版本演进中会重组子系统目录结构。例如 6.2 将 `fs/cifs/` 迁移为 `fs/smb/client/`。当社区补丁修改 `fs/smb/client/file.c` 时，5.10 仓库中的对应文件是 `fs/cifs/file.c`，若不做路径翻译，L3 的 `search_by_files` 和 `file_similarity` 都会找不到匹配。
+
+**工作原理：**
+
+```
+社区补丁 (mainline 7.x)              本地仓库 (5.10)
+fs/smb/client/connect.c    ──映射──►  fs/cifs/connect.c
+fs/smb/server/smb2pdu.c    ──映射──►  fs/ksmbd/smb2pdu.c
+drivers/gpu/drm/i915/      ──映射──►  drivers/gpu/drm/i915/
+  display/intel_dp.c                    intel_dp.c
+```
+
+**关键方法：**
+
+| 方法 | 作用 | 调用位置 |
+|------|------|---------|
+| `translate(path)` | 返回路径的所有等价形式（含原始） | 内部使用 |
+| `expand_files(files)` | 扩展文件列表，加入所有映射路径 | L3 搜索 / 依赖分析前 |
+| `normalize_for_compare(path)` | 统一规范到 upstream 形式 | `file_similarity` 比较时 |
+
+**内置默认映射规则：**
+
+| 高版本路径 (upstream) | 低版本路径 (local) | 起始版本 |
+|----------------------|-------------------|---------|
+| `fs/smb/client/` | `fs/cifs/` | 6.2 |
+| `fs/smb/server/` | `fs/ksmbd/` | 6.2 |
+| `fs/smb/common/` | `fs/smbfs_common/` | 6.2 |
+| `drivers/gpu/drm/amd/display/dc/link/` | `drivers/gpu/drm/amd/display/dc/core/` | 6.2 |
+| `drivers/gpu/drm/i915/display/` | `drivers/gpu/drm/i915/` | 5.18 |
+| `drivers/net/wireless/realtek/rtw89/` | `drivers/staging/rtw89/` | 5.16 |
+| `drivers/net/wireless/ath/ath12k/` | `drivers/staging/ath12k/` | 6.5 |
+| `fs/netfs/` | `fs/fscache/` | 6.1 |
+
+映射规则可通过 `config.yaml` 的 `path_mappings` 字段自定义或覆盖（见 `config.yaml.example`）。
 
 #### diff_containment — 包含度算法
 
@@ -98,9 +136,20 @@ Source (社区补丁)       Target (本地commit)
 3. **Multiset 计数**：使用 `Counter` 作为多重集合，每条 target 行只能匹配一次，避免重复计数
 4. **计算包含度**：`containment = matched_count / total_source_lines`
 
-**与 diff_similarity 的协同：**
+**适用场景区分（`use_containment` 参数）：**
 
-`match_by_diff` 同时计算两个指标，取最优策略：
+包含度检测**仅在引入 commit 搜索时启用**，修复 commit 搜索仅使用双向相似度：
+
+| 搜索场景 | `use_containment` | L3 策略 | 原因 |
+|----------|-------------------|---------|------|
+| 引入 commit 搜索 | `True` | 包含度优先 | 本地仓库常将社区多 patch squash 为一个 commit |
+| 修复 commit 搜索 | `False` | 仅双向相似度 | 修复补丁优先通过 L2 subject_match 定位 |
+| stable backport 搜索 | `False` | 仅双向相似度 | backport 通常有明确 subject |
+| check-intro 命令 | `True` | 包含度优先 | 判断引入代码是否存在 |
+
+**`use_containment=True` 时的得分策略：**
+
+`match_by_diff` 同时计算两个指标，取最优：
 
 | 条件 | 选择的策略 | 综合得分公式 |
 |------|-----------|-------------|
@@ -109,19 +158,23 @@ Source (社区补丁)       Target (本地commit)
 
 包含度策略下 `file_sim` 权重降低（0.3 vs 0.4），因为 squash commit 修改的文件通常多于社区原始补丁。
 
+**`use_containment=False` 时（修复搜索）：**
+
+仅计算 `diff_similarity`，得分 = `file_sim × 0.4 + similarity × 0.6`，不计算包含度。
+
 **典型场景对比：**
 
 | 场景 | diff_similarity | diff_containment | 最终结果 |
 |------|----------------|-----------------|---------|
-| 社区补丁被 squash 到大 commit | 低 (~30%) | 高 (~95%) | 命中 (containment) |
-| 1:1 对应的 backport | 高 (~92%) | 高 (~95%) | 命中 (取较高者) |
+| 社区补丁被 squash 到大 commit | 低 (~30%) | 高 (~95%) | 命中 (containment, 仅引入搜索) |
+| 1:1 对应的 backport | 高 (~92%) | 高 (~95%) | 命中 (两种模式均可) |
 | 改了同文件但不相关 | 低 (~10%) | 低 (~5%) | 不命中 |
 | 部分 cherry-pick | 中 (~50%) | 中 (~60%) | 视阈值而定 |
 
 **CommitMatcher.match_comprehensive 流程：**
 1. ID精确比较 → confidence=1.0
 2. Subject相似度 ≥ 0.95 → 直接返回
-3. Diff匹配：同时计算 similarity 与 containment，取最优 ≥ 0.70
+3. Diff匹配（受 `use_containment` 控制）≥ 0.70
 4. 合并去重，按confidence降序
 
 ---
@@ -159,11 +212,13 @@ Source (社区补丁)       Target (本地commit)
 |-------|------|------|--------|
 | L1 | Commit ID精确匹配 | `git cat-file -t` + `git merge-base --is-ancestor` | 100% |
 | L2 | Subject语义匹配 | `git log --grep` + SequenceMatcher ≥ 85% | 85-100% |
-| L3 | Code Diff匹配 | `git log -- <files>` + max(similarity, containment) ≥ 70% | 70-100% |
+| L3 | Code Diff匹配 | `git log -- <files>` + diff score ≥ 70% | 70-100% |
 
 L2 两阶段搜索：先精确subject，再关键词OR搜索。
 
-L3 同时计算双向相似度和单向包含度，取最优。适配本地仓库将多个社区补丁 squash 为一个 commit 的常见场景。
+L3 策略因搜索场景不同而异：
+- **引入 commit 搜索**：启用包含度检测（`use_containment=True`），适配 squash 场景
+- **修复 commit 搜索**：仅用双向相似度，优先依赖 L2 subject_match
 
 ### Dependency Agent (`agents/dependency.py`)
 

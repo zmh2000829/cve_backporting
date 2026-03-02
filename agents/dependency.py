@@ -14,7 +14,7 @@ from typing import Dict, List, Optional
 from core.models import PatchInfo, CveInfo, SearchResult, PrerequisitePatch
 from core.git_manager import GitRepoManager
 from core.matcher import (
-    extract_files_from_diff, extract_functions_from_diff,
+    PathMapper, extract_files_from_diff, extract_functions_from_diff,
     extract_hunks_from_diff, compute_hunk_overlap,
 )
 
@@ -26,8 +26,9 @@ ADJACENT_MARGIN = 50
 class DependencyAgent:
     """前置依赖分析Agent"""
 
-    def __init__(self, git_mgr: GitRepoManager):
+    def __init__(self, git_mgr: GitRepoManager, path_mapper: PathMapper = None):
         self.git_mgr = git_mgr
+        self.path_mapper = path_mapper or PathMapper()
 
     def analyze(self, fix_patch: PatchInfo, cve_info: CveInfo,
                 target_version: str,
@@ -44,6 +45,11 @@ class DependencyAgent:
         if not files:
             result["recommendations"].append("补丁无文件修改信息, 无法分析依赖")
             return result
+
+        search_files = self.path_mapper.expand_files(files) if self.path_mapper.has_rules else files
+        if len(search_files) > len(files):
+            logger.info("[Dependency] 路径映射: %s → +%d 等价路径",
+                        ", ".join(files[:3]), len(search_files) - len(files))
 
         logger.info("[Dependency] 分析修改文件: %s", ", ".join(files[:5]))
         result["conflict_files"] = files
@@ -63,9 +69,9 @@ class DependencyAgent:
                 after_ts = info["timestamp"]
                 logger.info("[Dependency] 时间窗口: 从引入commit时间 %d 开始", after_ts)
 
-        # 查找修改同文件的 commit (排除 merge, 限定时间窗口)
+        # 查找修改同文件的 commit (排除 merge, 限定时间窗口, 含路径映射)
         intervening = self.git_mgr.search_by_files(
-            files[:5], target_version, limit=50,
+            search_files[:8], target_version, limit=50,
             after_ts=after_ts, no_merges=True,
         )
 
