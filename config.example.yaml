@@ -1,145 +1,75 @@
-# CVE补丁回合系统配置文件示例
-# 复制此文件为 config.yaml 并填入实际配置
+# CVE 补丁回溯分析工具 — 配置文件
+# 复制为 config.yaml 后按需修改
 
-# Git仓库配置
+# ─── Git 仓库 ────────────────────────────────────────────────
 repositories:
-  # 格式: 版本名称: 仓库绝对路径
   "5.10-hulk":
-    path: "/data/zhangmh/Associated_Patch_Analysis/5.10/kernel"
-    branch: "5.10.0-60.18.0.50.oe2203"
-    description: "华为5.10内核维护版本"
+    path: "/path/to/linux"
+    branch: "linux-5.10.y"
+  # 可配置多个目标仓库:
+  # "5.15-custom":
+  #   path: "/path/to/another/linux"
+  #   branch: "linux-5.15.y"
 
-# 缓存配置
+# ─── 缓存 ────────────────────────────────────────────────────
 cache:
   enabled: true
   database_path: "./commit_cache.db"
-  max_cached_commits: 10000  # 每个仓库缓存的最大commit数
-  cache_expiry_days: 30      # 缓存过期时间（天）
+  max_cached_commits: 10000000    # 最大缓存commit数 (千万级仓库设为 10000000)
 
-# 匹配策略配置
-matching:
-  # Subject相似度阈值
-  subject_similarity_threshold: 0.85
-  
-  # Diff相似度阈值
-  diff_similarity_threshold: 0.70
-  
-  # 文件相似度阈值
-  file_similarity_threshold: 0.30
-  
-  # 返回的最大候选匹配数
-  max_candidates: 5
-  
-  # 自动处理高置信度匹配的阈值
-  auto_accept_threshold: 0.95
-
-# 依赖分析配置
-dependency:
-  # 依赖强度阈值（低于此值不认为有依赖）
-  dependency_threshold: 0.30
-  
-  # 强依赖阈值（高于此值认为是强依赖，必须先合入）
-  strong_dependency_threshold: 0.60
-  
-  # 最大回溯的时间窗口（天）
-  max_time_window_days: 180
-  
-  # 最大依赖深度（防止无限递归）
-  max_dependency_depth: 10
-
-# CVE信息源配置
-cve_sources:
-  # MITRE CVE API
-  mitre_api:
-    enabled: true
-    base_url: "https://cveawg.mitre.org/api/cve/"
-    timeout: 30
-  
-  # kernel.org git
-  kernel_git:
-    enabled: true
-    mainline_url: "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git"
-    stable_url: "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git"
-
-# AI分析配置
-ai_analysis:
-  enabled: true
-  provider: "openai"  # 或 "azure", "local"
-  
-  # OpenAI配置
-  openai:
-    api_key: "your-api-key-here"
-    model: "gpt-4"
-    max_tokens: 2000
-    temperature: 0.3
-  
-  # 本地模型配置（可选）
-  local:
-    model_path: "/path/to/local/model"
-    device: "cuda"  # or "cpu"
-
-# 性能优化配置
-performance:
-  # 并行处理线程数
-  max_workers: 4
-  
-  # 搜索超时时间（秒）
-  search_timeout: 300
-  
-  # Git命令超时时间（秒）
-  git_timeout: 60
-  
-  # 使用Bloom Filter加速
-  use_bloom_filter: true
-
-# 输出配置
+# ─── 输出 ────────────────────────────────────────────────────
 output:
-  # 结果保存目录
   output_dir: "./analysis_results"
-  
-  # 生成报告格式
-  report_formats:
-    - "json"
-    - "markdown"
-    - "html"
-  
-  # 日志级别: DEBUG, INFO, WARNING, ERROR
-  log_level: "INFO"
-  
-  # 日志文件路径
+  log_level: "INFO"               # DEBUG / INFO / WARNING / ERROR
   log_file: "./cve_analysis.log"
 
-# 告警配置
-alerts:
-  # 当发现未合入的高危CVE时发送告警
-  enabled: false
-  
-  # 告警方式: email, webhook, slack
-  methods:
-    - "email"
-  
-  email:
-    smtp_server: "smtp.example.com"
-    smtp_port: 587
-    sender: "cve-bot@example.com"
-    recipients:
-      - "security-team@example.com"
-  
-  webhook:
-    url: "https://your-webhook-url.com/alerts"
-    headers:
-      Authorization: "Bearer your-token"
+# ─── 路径映射 ────────────────────────────────────────────────
+# 内核版本演进中目录结构会发生变化，导致社区补丁的文件路径
+# 在低版本仓库中不存在。配置映射规则后工具会自动双向翻译：
+#   社区: fs/smb/client/foo.c  →  本地搜索: fs/cifs/foo.c
+#   本地: fs/cifs/foo.c        →  比较时等价: fs/smb/client/foo.c
+#
+# upstream: 社区高版本路径前缀
+# local:    本地低版本路径前缀
+# since:    发生迁移的内核版本 (仅供参考)
+path_mappings:
+  # ── 6.2: CIFS/SMB 子系统重组 ──
+  - upstream: "fs/smb/client/"
+    local: "fs/cifs/"
+    since: "6.2"
+  - upstream: "fs/smb/server/"
+    local: "fs/ksmbd/"
+    since: "6.2"
+  - upstream: "fs/smb/common/"
+    local: "fs/smbfs_common/"
+    since: "6.2"
 
-# 高级选项
-advanced:
-  # 是否在分析前更新所有仓库
-  auto_update_repos: false
-  
-  # 是否自动构建/更新缓存
-  auto_build_cache: true
-  
-  # 是否使用机器学习增强匹配（需要额外依赖）
-  use_ml_matching: false
-  
-  # 调试模式
-  debug_mode: false
+  # ── 6.2: DRM AMD display link 重构 ──
+  - upstream: "drivers/gpu/drm/amd/display/dc/link/"
+    local: "drivers/gpu/drm/amd/display/dc/core/"
+    since: "6.2"
+
+  # ── 5.18: i915 display 拆分 ──
+  - upstream: "drivers/gpu/drm/i915/display/"
+    local: "drivers/gpu/drm/i915/"
+    since: "5.18"
+
+  # ── 5.16: rtw89 从 staging 毕业 ──
+  - upstream: "drivers/net/wireless/realtek/rtw89/"
+    local: "drivers/staging/rtw89/"
+    since: "5.16"
+
+  # ── 6.5: ath12k 从 staging 毕业 ──
+  - upstream: "drivers/net/wireless/ath/ath12k/"
+    local: "drivers/staging/ath12k/"
+    since: "6.5"
+
+  # ── 6.1: fscache → netfs 重组 ──
+  - upstream: "fs/netfs/"
+    local: "fs/fscache/"
+    since: "6.1"
+
+  # ── 自定义映射 (按需添加) ──
+  # - upstream: "path/in/newer/kernel/"
+  #   local: "path/in/your/kernel/"
+  #   since: "x.y"
