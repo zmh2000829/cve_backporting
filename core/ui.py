@@ -308,8 +308,11 @@ def render_recommendations(result) -> Panel:
     return Panel(text, title="[bold]行动建议[/]", border_style="blue", padding=(0, 2))
 
 
-def render_multi_strategy(msr) -> Panel:
-    """渲染多策略搜索结果面板"""
+def render_multi_strategy(msr, mode: str = "intro") -> Panel:
+    """
+    渲染多策略搜索结果面板。
+    mode: "intro" — 漏洞引入检测, "fix" — 修复补丁检测
+    """
     from core.models import MultiStrategyResult
     r: MultiStrategyResult = msr
 
@@ -374,17 +377,30 @@ def render_multi_strategy(msr) -> Panel:
                 ct.add_row(c.get("commit_id", "")[:12], f"[{sim_style}]{sim:.0%}[/]", subj)
             cand_tables.append(ct)
 
-    # 综合判定
-    if r.is_present:
-        b = r.best
-        verdict_text = Text()
-        verdict_text.append("  漏洞已引入  ", style="bold white on red")
-        verdict_text.append(f"  最佳匹配: {b.target_commit[:12]} via {b.level} ({b.confidence:.0%})",
-                            style="bold")
+    # 综合判定（根据 mode 区分文案）
+    verdict_text = Text()
+    if mode == "fix":
+        if r.is_present:
+            b = r.best
+            verdict_text.append("  修复已合入  ", style="bold white on green")
+            verdict_text.append(f"  最佳匹配: {b.target_commit[:12]} via {b.level} ({b.confidence:.0%})",
+                                style="bold")
+        else:
+            verdict_text.append("  修复未合入  ", style="bold white on red")
+            verdict_text.append("  目标仓库中未找到该修复commit的对应提交", style="dim")
+        panel_title = "[bold]修复补丁检测[/]"
+        border = "green" if r.is_present else "red"
     else:
-        verdict_text = Text()
-        verdict_text.append("  未发现引入  ", style="bold white on green")
-        verdict_text.append("  目标仓库中未找到该commit的对应提交", style="dim")
+        if r.is_present:
+            b = r.best
+            verdict_text.append("  漏洞已引入  ", style="bold white on red")
+            verdict_text.append(f"  最佳匹配: {b.target_commit[:12]} via {b.level} ({b.confidence:.0%})",
+                                style="bold")
+        else:
+            verdict_text.append("  未发现引入  ", style="bold white on green")
+            verdict_text.append("  目标仓库中未找到该commit的对应提交", style="dim")
+        panel_title = "[bold]漏洞引入 Commit 检测[/]"
+        border = "red" if r.is_present else "green"
 
     # 组装
     from rich.console import Group
@@ -393,9 +409,8 @@ def render_multi_strategy(msr) -> Panel:
         parts.append(Text(""))
         parts.append(ct)
 
-    border = "red" if r.is_present else "green"
     return Panel(Group(*parts),
-                 title="[bold]漏洞引入 Commit 检测[/]",
+                 title=panel_title,
                  border_style=border, padding=(1, 2))
 
 

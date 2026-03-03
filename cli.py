@@ -391,7 +391,7 @@ def cmd_check_fix(args, config):
                 _refresh()
 
         console.print()
-        console.print(render_multi_strategy(msr))
+        console.print(render_multi_strategy(msr, mode="fix"))
 
         if msr.is_present:
             any_fixed = True
