@@ -37,6 +37,10 @@
 | `CommitInfo` | 匹配用commit详情（含diff、函数列表） |
 | `MatchResult` | 匹配结果：target_commit、confidence、match_type |
 | `SearchResult` | 搜索结果：found、strategy、candidates |
+| `SearchStep` | 搜索过程单级记录：level、status(hit/miss/skip)、detail、elapsed |
+| `PrerequisitePatch` | 前置依赖补丁：commit_id、grade(strong/medium/weak)、score、overlap_hunks/funcs |
+| `StrategyResult` | check-intro/fix 单级策略结果：level、found、confidence、candidates |
+| `MultiStrategyResult` | 三级策略聚合结果：strategies、is_present、verdict |
 | `DryRunResult` | 试应用结果：applies_cleanly、conflicting_files |
 | `AnalysisResult` | 完整分析结果（聚合以上所有） |
 
@@ -46,7 +50,7 @@
 - `git merge-base --is-ancestor` 替代 `git branch --contains`（毫秒级 vs 分钟级）
 - `\x1e`/`\x1f` 作为字段/记录分隔符，避免commit message中的`|`冲突
 - SQLite + FTS5 全文索引加速subject搜索
-- 批量缓存构建：WAL模式 + 5000条批写入
+- 批量缓存构建：WAL模式 + 50000条批写入 + mmap 1GB
 
 **关键API：**
 ```python
@@ -253,6 +257,22 @@ L3 策略因搜索场景不同而异：
 - `search_detailed(..., use_containment=True)` — check-intro，L3 使用包含度优先
 - `search_detailed(..., use_containment=False)` — check-fix，L3 仅用双向相似度
 
+**check-intro 命令流程：**
+
+```
+输入: --cve CVE-xxx 或 --commit <intro_id>
+  │
+  ├─ CVE模式: fetch_cve → 提取 introduced_commit_id
+  │
+  └─ 对每个引入 commit:
+       1. fetch_patch 获取补丁信息
+       2. search_detailed(use_containment=True)
+       3. L1 区分 on_branch / not_on_branch / not_found
+       4. L3 启用包含度算法，适配 squash 场景
+  │
+  └─ 结论: is_present → 漏洞已引入 / 未引入
+```
+
 **check-fix 命令流程：**
 
 ```
@@ -271,21 +291,141 @@ L3 策略因搜索场景不同而异：
 
 ### Dependency Agent (`agents/dependency.py`)
 
-**分析流程：**
-1. 提取 `Fixes:` 标签引用的 commit，加入排除列表
-2. 根据引入 commit 时间戳确定时间窗口（`after_ts`），只分析引入后的 commit
-3. `search_by_files` 搜索修改同文件的 commit（排除 merge commits）
-4. 对每个候选 commit 执行 hunk 级重叠分析：
-   - 提取 fix patch 和候选 commit 的 hunk 列表（文件 + 行范围）
-   - 计算直接重叠（行范围相交）和相邻重叠（margin=50 行内）
-   - 计算函数级重叠
-5. 综合评分与分级：
+**核心问题：** 当社区修复补丁无法直接 cherry-pick 到目标仓库时，需要识别哪些中间 commit 必须先合入（前置依赖）。本质上是回答：*"从漏洞引入到现在，有哪些 commit 修改了相同的代码区域，导致修复补丁无法干净应用？"*
 
-| 等级 | 条件 | 含义 |
-|------|------|------|
-| 强 (strong) | 直接 hunk 重叠 ≥ 1 | 修改了相同代码行，几乎必须先合入 |
-| 中 (medium) | 相邻 hunk 重叠 ≥ 1 或函数重叠 ≥ 1 | 修改了相邻区域，可能产生冲突 |
-| 弱 (weak) | 仅文件级重叠 | 修改了同文件的不同区域 |
+#### 完整分析流程
+
+```
+fix_patch (社区修复补丁)
+  │
+  ▼
+Step 1: 提取 Fixes: 标签链
+  │  正则提取 commit_msg 中 "Fixes: <commit_id>" 引用
+  │  加入 skip_ids 排除列表，避免与 fix 本身混淆
+  │
+  ▼
+Step 2: 确定时间窗口
+  │  若有引入 commit 的搜索结果 (intro_search.target_commit)
+  │  → 查询其 timestamp 作为 after_ts
+  │  → 只分析「引入 commit → HEAD」这段区间
+  │  若无引入信息 → after_ts=0，搜索全量
+  │
+  ▼
+Step 3: 候选 commit 检索
+  │  fix_patch.modified_files → PathMapper.expand_files()
+  │  → git log --no-merges --after=@{after_ts} -- <files>
+  │  → 返回最多 50 个候选 (search_by_files)
+  │  → 排除 skip_ids (fix commit / intro commit / Fixes 引用)
+  │
+  ▼
+Step 4: 逐候选 Hunk 级重叠分析
+  │  对每个候选:
+  │    ├─ git show <commit> 获取 diff
+  │    ├─ 大重构过滤: 修改文件数 > 20 → 跳过
+  │    ├─ extract_hunks_from_diff → 提取 hunk 列表 (file, start, end)
+  │    ├─ extract_functions_from_diff → 提取函数名集合
+  │    ├─ compute_hunk_overlap(fix_hunks, candidate_hunks, margin=50)
+  │    │    ├─ direct: 行范围直接相交 (a_start ≤ b_end && b_start ≤ a_end)
+  │    │    └─ adjacent: 行范围在 ±50 行内相邻
+  │    └─ func_overlap = fix_funcs ∩ candidate_funcs
+  │
+  ▼
+Step 5: 评分 + 分级 + 排序
+  │  score 公式 + 三级分类 (见下方)
+  │  排序: grade 优先 (strong > medium > weak), 同级按 score 降序
+  │
+  ▼
+输出: List[PrerequisitePatch]
+  含 commit_id, subject, author, grade, score,
+  overlap_hunks, adjacent_hunks, overlap_funcs
+```
+
+#### Hunk 重叠检测算法
+
+`extract_hunks_from_diff` 从 diff 文本中解析每个代码块的精确位置：
+
+```
+diff --git a/net/ipv6/ip6_tunnel.c b/net/ipv6/ip6_tunnel.c     ← 当前文件
+@@ -1234,8 +1234,10 @@ static int ip6_tnl_xmit(...)            ← hunk 起始
+│   old_start=1234  old_end=1242  (旧文件行范围)
+│   new_start=1234  new_end=1244  (新文件行范围)
+│
+@@ -1500,6 +1502,9 @@ static void ip6_tnl_link_config(...)    ← 另一个 hunk
+    old_start=1500  old_end=1506
+    new_start=1502  new_end=1511
+```
+
+`compute_hunk_overlap(hunks_a, hunks_b, margin=50)` 对两组 hunk 做两两比较：
+
+```
+fix_patch hunk          candidate hunk          判定
+─────────────────       ────────────────        ──────────────
+file: ip6_tunnel.c      file: ip6_tunnel.c
+lines: 1234-1244        lines: 1230-1240        → direct (相交)
+
+file: ip6_tunnel.c      file: ip6_tunnel.c
+lines: 1234-1244        lines: 1260-1280        → adjacent (间距<50)
+
+file: ip6_tunnel.c      file: ip6_tunnel.c
+lines: 1234-1244        lines: 1500-1510        → 无关 (间距>50)
+
+file: ip6_tunnel.c      file: route.c
+lines: 1234-1244        lines: 1234-1244        → 无关 (不同文件)
+```
+
+- **直接重叠 (direct)：** `a_start ≤ b_end && b_start ≤ a_end`（同文件、行范围相交）
+- **相邻重叠 (adjacent)：** 行范围不相交，但间距在 `margin`(50) 行内
+
+#### 函数级重叠
+
+`extract_functions_from_diff` 从 `@@ ... @@ function_name` 行中提取函数名。Git diff 的 `@@` 行会自动标注所在函数，取交集即可得到修复补丁和候选 commit 共同修改的函数。
+
+```python
+fix_funcs    = {"ip6_tnl_xmit", "ip6_tnl_link_config"}
+cand_funcs   = {"ip6_tnl_xmit", "ip6_tnl_create2"}
+func_overlap = {"ip6_tnl_xmit"}  # 交集
+```
+
+#### 评分公式
+
+```python
+score  = min(direct_overlaps × 0.3, 0.6)     # 直接重叠: 单个 0.3, 上限 0.6
+       + min(adjacent_overlaps × 0.1, 0.2)   # 相邻重叠: 单个 0.1, 上限 0.2
+       + min(len(func_overlap) × 0.15, 0.3)  # 函数重叠: 单个 0.15, 上限 0.3
+                                              # 理论最大值: 1.1 (实际被分级规则覆盖)
+```
+
+**噪声过滤：** `score < 0.05 && 无函数重叠 && direct_overlaps == 0` → 丢弃
+
+#### 三级分级规则
+
+| 等级 | 条件 | 含义 | 典型场景 |
+|------|------|------|---------|
+| **强 (strong)** | `(direct > 0 && func_overlap) \|\| score ≥ 0.5` | 修改了相同代码行和相同函数，几乎必须先合入 | 候选 commit 重构了 fix 补丁要修改的同一个函数 |
+| **中 (medium)** | `direct > 0 \|\| adjacent > 0 \|\| score ≥ 0.2` | 修改了相邻区域或同函数，大概率产生 cherry-pick 冲突 | 候选 commit 在 fix 修改的上下 50 行内有改动 |
+| **弱 (weak)** | 其余（仅文件级重叠） | 修改了同文件的不相关区域，通常不影响合入 | 同文件中的无关 bug fix |
+
+#### 路径映射集成
+
+`analyze` 方法在调用 `search_by_files` 前，先通过 `PathMapper.expand_files` 将修复补丁的文件列表扩展为包含所有等价路径的集合。例如修复补丁修改 `fs/smb/client/file.c`，扩展后搜索 `fs/smb/client/file.c` + `fs/cifs/file.c`，确保在 5.10 仓库中能找到历史修改记录。
+
+#### 输出数据结构
+
+```python
+@dataclass
+class PrerequisitePatch:
+    commit_id: str
+    subject: str
+    author: str = ""
+    timestamp: int = 0
+    grade: str = "weak"         # "strong" / "medium" / "weak"
+    score: float = 0.0
+    overlap_funcs: List[str] = field(default_factory=list)   # 重叠函数名列表
+    overlap_hunks: int = 0      # 直接重叠 hunk 数
+    adjacent_hunks: int = 0     # 相邻重叠 hunk 数
+```
+
+最终输出按 `grade` 优先排序（strong > medium > weak），同级按 `score` 降序。
 
 ### DryRun Agent (`agents/dryrun.py`)
 
