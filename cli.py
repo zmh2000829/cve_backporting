@@ -606,19 +606,29 @@ def _diagnose_root_cause(diff_cmp: dict, dryrun_detail: dict,
     comm_only = diff_cmp.get("community_only_files", [])
     local_only = diff_cmp.get("local_only_files", [])
     applies = dryrun_detail.get("applies_cleanly", None) if dryrun_detail else None
+    method = dryrun_detail.get("apply_method", "") if dryrun_detail else ""
 
     if sim >= 0.90:
         causes.append(
             f"社区补丁与本地修复代码高度一致 (相似度 {sim:.0%})，"
             "核心修复逻辑相同")
-        if applies is False:
+        if applies and method and method != "strict":
+            method_desc = {
+                "context-C1": "原始补丁的 context lines 有偏移 (中间 commit 修改了"
+                              "相邻行), 已通过放宽 context 匹配 (-C1) 成功适配",
+                "3way": "原始补丁 context 偏移, 已通过 3-way merge 成功适配",
+                "regenerated": "原始补丁 context 严重偏移, 已从目标文件重新生成 "
+                               "context lines, 核心 +/- 改动行完全不变",
+            }.get(method, f"通过 {method} 适配成功")
+            causes.append(f"上下文适配: {method_desc}")
+        elif applies is False:
             causes.append(
-                "代码一致但 DryRun 报告冲突 → 根因是上下文偏移: "
-                "社区补丁与本地修复之间的中间 commit 修改了相邻代码行, "
-                "导致 patch 的 context lines 不匹配")
-        elif applies is True and known_prereqs:
+                "代码一致但所有 DryRun 策略均失败 (strict → -C1 → 3way → 重生成) → "
+                "根因可能是: 中间 commit 不仅修改了相邻行, 还修改了补丁涉及的"
+                "同一行代码 (真正的代码冲突, 需要人工介入)")
+        elif applies is True and method == "strict" and known_prereqs:
             causes.append(
-                "代码一致且可干净应用，但实际修复时仍需前置补丁 → "
+                "代码一致且 strict 可干净应用，但实际修复时仍需前置补丁 → "
                 "前置补丁提供的是编译/运行时依赖 (数据结构定义、API 声明等), "
                 "而非文本层面的冲突")
     elif sim >= 0.60:
@@ -773,23 +783,12 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
             applies = dr.applies_cleanly
             dryrun_detail = {
                 "applies_cleanly": applies,
+                "apply_method": dr.apply_method,
                 "conflicting_files": dr.conflicting_files,
                 "error_output": dr.error_output[:800] if dr.error_output else "",
                 "stat_output": dr.stat_output[:500] if dr.stat_output else "",
+                "has_adapted_patch": bool(dr.adapted_patch),
             }
-            if applies and known_prereqs:
-                dryrun_detail["mismatch_reason"] = (
-                    "DryRun 判定补丁可干净应用, 但实际修复时需要先合入 "
-                    f"{len(known_prereqs)} 个前置补丁。可能原因: "
-                    "1) 前置补丁修改的是不同代码区域, 形式上不冲突但语义上有依赖; "
-                    "2) 3-way merge 掩盖了实际冲突; "
-                    "3) 前置补丁提供了编译/运行时依赖(数据结构/API变更)而非文本冲突")
-            elif not applies and not known_prereqs:
-                dryrun_detail["mismatch_reason"] = (
-                    "DryRun 判定补丁有冲突, 但实际修复时无需前置补丁即可合入。"
-                    "可能原因: 1) 本地仓库有独立修改使形式冲突但可手动解决; "
-                    "2) 实际合入使用了 3-way merge 或手动 resolve; "
-                    "3) 实际合入的补丁内容与社区版本有微调")
 
         # 获取 known_fix 的完整信息(stat + diff)
         known_fix_detail = {}

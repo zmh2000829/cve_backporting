@@ -160,25 +160,34 @@ class Pipeline:
         else:
             _cb("dependency", "warn", "无前置依赖")
 
-        # ── Step 6: DryRun ───────────────────────────────────────────
+        # ── Step 6: DryRun (多级自适应) ──────────────────────────────
         if enable_dryrun:
             _cb("dryrun", "running")
-            result.dry_run = self.dryrun.check(fix_patch, target_version)
-            if result.dry_run.applies_cleanly:
-                _cb("dryrun", "success", "可以干净应用")
-                result.recommendations.append("Dry-run: 补丁可以干净应用")
-            else:
-                nc = len(result.dry_run.conflicting_files)
-                cf = ", ".join(result.dry_run.conflicting_files[:3])
-                # 尝试3-way
-                dr3 = self.dryrun.check_with_3way(fix_patch, target_version)
-                if dr3.applies_cleanly:
-                    result.dry_run = dr3
-                    _cb("dryrun", "success", "3-way merge成功")
-                    result.recommendations.append("Dry-run: 3-way merge可以成功应用")
+            result.dry_run = self.dryrun.check_adaptive(
+                fix_patch, target_version)
+            dr = result.dry_run
+            if dr.applies_cleanly:
+                method_labels = {
+                    "strict": "可以干净应用",
+                    "context-C1": "上下文偏移已适配 (-C1)",
+                    "3way": "3-way merge成功",
+                    "regenerated": "上下文重生成成功",
+                }
+                label = method_labels.get(dr.apply_method, dr.apply_method)
+                if dr.apply_method == "strict":
+                    _cb("dryrun", "success", label)
                 else:
-                    _cb("dryrun", "fail", f"{nc} 个文件冲突: {cf}")
-                    result.recommendations.append(f"Dry-run: 补丁无法直接应用, {nc} 个文件冲突")
+                    _cb("dryrun", "success", f"{label}")
+                result.recommendations.append(f"Dry-run: {label}")
+                if dr.adapted_patch:
+                    result.recommendations.append(
+                        "已生成适配后的补丁 (原始改动不变, 仅更新 context lines)")
+            else:
+                nc = len(dr.conflicting_files)
+                cf = ", ".join(dr.conflicting_files[:3])
+                _cb("dryrun", "fail", f"{nc} 个文件冲突: {cf}")
+                result.recommendations.append(
+                    f"Dry-run: 补丁无法直接应用, {nc} 个文件冲突")
         else:
             _cb("dryrun", "skip", "已跳过")
 

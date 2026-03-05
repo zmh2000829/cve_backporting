@@ -156,11 +156,13 @@ class PrerequisitePatch:
 class DryRunResult:
     """Dry-run 试应用结果"""
     applies_cleanly: bool = False
+    apply_method: str = ""          # "strict" / "context-C1" / "3way" / "regenerated" / ""
     conflicting_files: List[str] = field(default_factory=list)
     conflict_details: List[Dict] = field(default_factory=list)
     error_output: str = ""
     stat_output: str = ""
     patch_file: str = ""
+    adapted_patch: str = ""         # 上下文重生成后的补丁内容
 
 
 @dataclass

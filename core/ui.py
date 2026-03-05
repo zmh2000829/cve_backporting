@@ -704,13 +704,34 @@ def render_validate_report(result: dict):
     dr_detail = result.get("dryrun_detail", {})
     if dr_detail:
         applies = dr_detail.get("applies_cleanly", None)
+        method = dr_detail.get("apply_method", "")
         dr_tbl = Table(box=box.SIMPLE_HEAVY, show_header=False, padding=(0, 1),
-                       expand=True, title="[bold]DryRun 详情[/]")
+                       expand=True, title="[bold]DryRun 详情 (多级自适应)[/]")
         dr_tbl.add_column("K", width=16, style="bold")
         dr_tbl.add_column("V", ratio=1)
-        status_text = ("[green]可干净应用[/]" if applies
-                       else "[red]有冲突[/]")
+
+        if applies:
+            method_labels = {
+                "strict": "[green]strict — 原始补丁可直接应用[/]",
+                "context-C1": "[cyan]context-C1 — 上下文偏移已适配 (仅需1行context)[/]",
+                "3way": "[cyan]3-way merge — 三方合并成功[/]",
+                "regenerated": "[bold cyan]regenerated — 上下文已重新生成[/]",
+            }
+            status_text = method_labels.get(method, f"[green]可应用 ({method})[/]")
+        else:
+            status_text = "[red]所有策略均失败[/]"
         dr_tbl.add_row("应用结果", status_text)
+
+        if method and applies:
+            levels = ["strict", "context-C1", "3way", "regenerated"]
+            level_display = []
+            for lvl in levels:
+                if lvl == method:
+                    level_display.append(f"[green]✔ {lvl}[/]")
+                    break
+                else:
+                    level_display.append(f"[red]✘ {lvl}[/]")
+            dr_tbl.add_row("尝试路径", " → ".join(level_display))
 
         conf_files = dr_detail.get("conflicting_files", [])
         if conf_files:
@@ -720,10 +741,10 @@ def render_validate_report(result: dict):
 
         err = dr_detail.get("error_output", "")
         if err:
-            err_lines = err.strip().split("\n")[:8]
-            dr_tbl.add_row("错误输出", "")
+            err_lines = err.strip().split("\n")[:6]
+            dr_tbl.add_row("详情", "")
             for el in err_lines:
-                dr_tbl.add_row("", f"[dim red]{el}[/]")
+                dr_tbl.add_row("", f"[dim]{el}[/]")
 
         stat = dr_detail.get("stat_output", "")
         if stat:
@@ -731,6 +752,13 @@ def render_validate_report(result: dict):
             dr_tbl.add_row("补丁统计", "")
             for sl in stat_lines:
                 dr_tbl.add_row("", f"[dim]{sl}[/]")
+
+        has_adapted = dr_detail.get("has_adapted_patch", False)
+        if has_adapted:
+            dr_tbl.add_row("", "")
+            dr_tbl.add_row("[bold cyan]适配补丁[/]",
+                           "[bold cyan]已生成可直接应用的补丁 "
+                           "(核心 +/- 改动不变, context lines 已从目标文件更新)[/]")
 
         sections.append(dr_tbl)
         sections.append(Text(""))
