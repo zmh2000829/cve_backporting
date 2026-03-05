@@ -606,7 +606,101 @@ def render_validate_report(result: dict):
         sections.append(kf_tbl)
         sections.append(Text(""))
 
-    # ── 5) DryRun 详细分析 ───────────────────────────
+    # ── 5) 代码差异对比 (核心诊断) ──────────────────
+    diff_cmp = result.get("diff_comparison", {})
+    if diff_cmp and diff_cmp.get("overall_similarity", -1) >= 0:
+        sim = diff_cmp["overall_similarity"]
+        if sim >= 0.9:
+            sim_style = "bold green"
+            sim_label = "高度一致"
+        elif sim >= 0.6:
+            sim_style = "bold yellow"
+            sim_label = "部分一致"
+        elif sim > 0:
+            sim_style = "bold red"
+            sim_label = "差异较大"
+        else:
+            sim_style = "dim"
+            sim_label = "无数据"
+
+        diff_tbl = Table(box=box.HEAVY, show_header=False, padding=(0, 1),
+                         expand=True,
+                         title="[bold]代码差异对比 — 社区补丁 vs 本地修复[/]")
+        diff_tbl.add_column("K", width=16, style="bold")
+        diff_tbl.add_column("V", ratio=1)
+
+        bar_len = int(sim * 20)
+        bar = "█" * bar_len + "░" * (20 - bar_len)
+        diff_tbl.add_row("总体相似度",
+                         f"[{sim_style}]{sim:.0%} {sim_label}[/]  [{sim_style}]{bar}[/]")
+
+        comm_only = diff_cmp.get("community_only_files", [])
+        local_only = diff_cmp.get("local_only_files", [])
+        if comm_only:
+            diff_tbl.add_row("[yellow]社区独有文件[/]",
+                             f"[yellow]{', '.join(comm_only[:5])}[/]")
+        if local_only:
+            diff_tbl.add_row("[cyan]本地独有文件[/]",
+                             f"[cyan]{', '.join(local_only[:5])}[/]")
+
+        per_file = diff_cmp.get("per_file", [])
+        if per_file:
+            pf_tbl = Table(box=box.SIMPLE, show_header=True, padding=(0, 1),
+                           expand=True)
+            pf_tbl.add_column("文件", ratio=1, style="dim")
+            pf_tbl.add_column("相似度", width=8)
+            pf_tbl.add_column("社区行", width=7)
+            pf_tbl.add_column("本地行", width=7)
+            for pf in per_file[:10]:
+                fs = pf["similarity"]
+                fstyle = "green" if fs >= 0.9 else ("yellow" if fs >= 0.6 else "red")
+                pf_tbl.add_row(
+                    pf["file"],
+                    f"[{fstyle}]{fs:.0%}[/]",
+                    str(pf["community_lines"]),
+                    str(pf["local_lines"]),
+                )
+            diff_tbl.add_row("", "")
+            sections.append(diff_tbl)
+            sections.append(pf_tbl)
+        else:
+            sections.append(diff_tbl)
+
+        # 关键差异代码片段
+        key_diffs = diff_cmp.get("key_differences", [])
+        if key_diffs:
+            for kd in key_diffs[:3]:
+                f = kd["file"]
+                fsim = kd["similarity"]
+                snippet = Text()
+                snippet.append(f"  {f}", style="bold")
+                snippet.append(f" (相似度 {fsim:.0%})\n", style="dim")
+
+                ce = kd.get("community_extra", [])
+                le = kd.get("local_extra", [])
+                if ce:
+                    snippet.append("  社区补丁独有:\n", style="yellow")
+                    for line in ce[:4]:
+                        snippet.append(f"    {line}\n", style="yellow dim")
+                if le:
+                    snippet.append("  本地修复独有:\n", style="cyan")
+                    for line in le[:4]:
+                        snippet.append(f"    {line}\n", style="cyan dim")
+                sections.append(snippet)
+            sections.append(Text(""))
+
+    # ── 6) 根因诊断 ──────────────────────────────────
+    root_cause = result.get("root_cause", [])
+    if root_cause:
+        rc_text = Text()
+        for i, rc in enumerate(root_cause, 1):
+            rc_text.append(f"  {i}. ", style="bold")
+            rc_text.append(f"{rc}\n", style="")
+        sections.append(Panel(rc_text, title="[bold yellow]根因诊断[/]",
+                              border_style="yellow", padding=(0, 2)))
+        sections.append(Text(""))
+
+    # ── 7) DryRun 详细分析 ───────────────────────────
     dr_detail = result.get("dryrun_detail", {})
     if dr_detail:
         applies = dr_detail.get("applies_cleanly", None)
@@ -637,11 +731,6 @@ def render_validate_report(result: dict):
             dr_tbl.add_row("补丁统计", "")
             for sl in stat_lines:
                 dr_tbl.add_row("", f"[dim]{sl}[/]")
-
-        mismatch = dr_detail.get("mismatch_reason", "")
-        if mismatch:
-            dr_tbl.add_row("", "")
-            dr_tbl.add_row("[yellow]不一致原因[/]", f"[yellow]{mismatch}[/]")
 
         sections.append(dr_tbl)
         sections.append(Text(""))
@@ -715,15 +804,20 @@ def render_validate_report(result: dict):
             sections.append(match_tbl)
             sections.append(Text(""))
 
-    # ── 7) LLM 分析 ─────────────────────────────────
+    # ── 9) LLM 分析 ─────────────────────────────────
     llm = result.get("llm_analysis", "")
+    llm_status = result.get("llm_status", "")
     if llm:
         sections.append(Panel(
             Markdown(llm),
-            title="[bold magenta]LLM 差异分析[/]",
+            title="[bold magenta]LLM 智能分析[/]",
             border_style="magenta", padding=(1, 2),
         ))
         sections.append(Text(""))
+    elif llm_status and not overall:
+        llm_hint = Text()
+        llm_hint.append(f"  LLM: {llm_status}\n", style="dim")
+        sections.append(llm_hint)
 
     # ── 8) 工具建议 ──────────────────────────────────
     recs = result.get("recommendations", [])

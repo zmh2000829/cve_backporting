@@ -493,6 +493,169 @@ def _compare_prereqs(recommended, known_ids, git_mgr, rv):
     }
 
 
+def _parse_diff_by_file(diff_text: str) -> dict:
+    """将 unified diff 按文件拆分，返回 {filepath: diff_content}"""
+    import re
+    files = {}
+    current_file = None
+    current_lines = []
+    for line in diff_text.split("\n"):
+        if line.startswith("diff --git"):
+            if current_file:
+                files[current_file] = "\n".join(current_lines)
+            m = re.search(r"b/(.*)", line)
+            current_file = m.group(1) if m else None
+            current_lines = [line]
+        elif current_file is not None:
+            current_lines.append(line)
+    if current_file:
+        files[current_file] = "\n".join(current_lines)
+    return files
+
+
+def _extract_key_changes(diff_text: str, max_lines: int = 15) -> list:
+    """提取 diff 中最有意义的变更行 (去除 context、header)"""
+    changes = []
+    for line in diff_text.split("\n"):
+        if line.startswith("+++") or line.startswith("---"):
+            continue
+        if line.startswith("+") or line.startswith("-"):
+            stripped = line[1:].strip()
+            if stripped and len(stripped) >= 4:
+                changes.append(line)
+        if len(changes) >= max_lines:
+            break
+    return changes
+
+
+def _compare_patch_code(community_diff: str, local_diff: str) -> dict:
+    """
+    逐文件对比社区修复补丁和本地真实修复的代码差异。
+    返回结构化对比结果:
+    - overall_similarity: 总体相似度 0.0~1.0
+    - per_file: 每个文件的对比详情
+    - community_only_files / local_only_files: 仅一方有的文件
+    - key_differences: 关键差异代码片段
+    """
+    from core.matcher import diff_similarity
+
+    if not community_diff or not local_diff:
+        return {"overall_similarity": 0.0, "per_file": [],
+                "community_only_files": [], "local_only_files": [],
+                "key_differences": [], "diagnosis": "缺少diff数据，无法对比"}
+
+    comm_files = _parse_diff_by_file(community_diff)
+    local_files = _parse_diff_by_file(local_diff)
+
+    comm_set = set(comm_files.keys())
+    local_set = set(local_files.keys())
+    common = comm_set & local_set
+    comm_only = sorted(comm_set - local_set)
+    local_only = sorted(local_set - comm_set)
+
+    per_file = []
+    similarities = []
+    key_diffs = []
+
+    for fpath in sorted(common):
+        sim = diff_similarity(comm_files[fpath], local_files[fpath])
+        similarities.append(sim)
+
+        comm_changes = _extract_key_changes(comm_files[fpath], 20)
+        local_changes = _extract_key_changes(local_files[fpath], 20)
+        comm_change_set = set(l[1:].strip() for l in comm_changes)
+        local_change_set = set(l[1:].strip() for l in local_changes)
+        only_in_community = [l for l in comm_changes
+                             if l[1:].strip() not in local_change_set]
+        only_in_local = [l for l in local_changes
+                         if l[1:].strip() not in comm_change_set]
+
+        per_file.append({
+            "file": fpath,
+            "similarity": round(sim, 3),
+            "community_lines": len(comm_changes),
+            "local_lines": len(local_changes),
+            "only_in_community": only_in_community[:5],
+            "only_in_local": only_in_local[:5],
+        })
+
+        if only_in_community or only_in_local:
+            key_diffs.append({
+                "file": fpath,
+                "similarity": round(sim, 3),
+                "community_extra": only_in_community[:3],
+                "local_extra": only_in_local[:3],
+            })
+
+    overall = sum(similarities) / len(similarities) if similarities else 0.0
+
+    return {
+        "overall_similarity": round(overall, 3),
+        "per_file": per_file,
+        "community_only_files": comm_only,
+        "local_only_files": local_only,
+        "key_differences": key_diffs,
+    }
+
+
+def _diagnose_root_cause(diff_cmp: dict, dryrun_detail: dict,
+                         known_prereqs: list, dry_run) -> list:
+    """基于代码对比和 DryRun 结果生成根因诊断"""
+    causes = []
+    sim = diff_cmp.get("overall_similarity", 0)
+    comm_only = diff_cmp.get("community_only_files", [])
+    local_only = diff_cmp.get("local_only_files", [])
+    applies = dryrun_detail.get("applies_cleanly", None) if dryrun_detail else None
+
+    if sim >= 0.90:
+        causes.append(
+            f"社区补丁与本地修复代码高度一致 (相似度 {sim:.0%})，"
+            "核心修复逻辑相同")
+        if applies is False:
+            causes.append(
+                "代码一致但 DryRun 报告冲突 → 根因是上下文偏移: "
+                "社区补丁与本地修复之间的中间 commit 修改了相邻代码行, "
+                "导致 patch 的 context lines 不匹配")
+        elif applies is True and known_prereqs:
+            causes.append(
+                "代码一致且可干净应用，但实际修复时仍需前置补丁 → "
+                "前置补丁提供的是编译/运行时依赖 (数据结构定义、API 声明等), "
+                "而非文本层面的冲突")
+    elif sim >= 0.60:
+        causes.append(
+            f"社区补丁与本地修复部分一致 (相似度 {sim:.0%})，"
+            "本地修复可能包含额外适配改动")
+        if comm_only:
+            causes.append(
+                f"社区补丁修改了本地修复未涉及的文件: "
+                f"{', '.join(comm_only[:3])}")
+        if local_only:
+            causes.append(
+                f"本地修复包含社区补丁没有的文件: "
+                f"{', '.join(local_only[:3])}")
+    elif sim > 0:
+        causes.append(
+            f"社区补丁与本地修复差异较大 (相似度仅 {sim:.0%})，"
+            "本地修复很可能是完全重写或重新适配的版本")
+    else:
+        causes.append("无法获取代码进行对比")
+
+    key_diffs = diff_cmp.get("key_differences", [])
+    for kd in key_diffs[:2]:
+        f = kd["file"]
+        ce = kd.get("community_extra", [])
+        le = kd.get("local_extra", [])
+        if ce or le:
+            detail = f"文件 {f} (相似度 {kd['similarity']:.0%}) 的关键差异: "
+            if ce:
+                detail += f"社区有而本地无: {ce[0][:60]}"
+            if le:
+                detail += f" | 本地有而社区无: {le[0][:60]}"
+            causes.append(detail)
+
+    return causes
+
+
 def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
                          git_mgr=None, show_stages=True):
     """执行单个 CVE 的回退验证，返回结果 dict"""
@@ -591,15 +754,17 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
             issues.append("DryRun预测不准")
 
         # ── 收集丰富的诊断数据 ──────────────────────────────
+        community_diff = ""
         fix_patch_detail = {}
         if result.fix_patch:
             fp = result.fix_patch
+            community_diff = fp.diff_code or ""
             fix_patch_detail = {
                 "commit_id": fp.commit_id[:12],
                 "subject": fp.subject,
                 "author": fp.author,
                 "modified_files": fp.modified_files,
-                "diff_lines": len(fp.diff_code.splitlines()) if fp.diff_code else 0,
+                "diff_lines": len(community_diff.splitlines()),
             }
 
         dryrun_detail = {}
@@ -626,12 +791,14 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
                     "2) 实际合入使用了 3-way merge 或手动 resolve; "
                     "3) 实际合入的补丁内容与社区版本有微调")
 
+        # 获取 known_fix 的完整信息(stat + diff)
         known_fix_detail = {}
-        kf_diff = git_mgr.run_git(
+        local_diff = ""
+        kf_meta = git_mgr.run_git(
             ["git", "show", "--stat", "--format=%H%n%s%n%an", known_fix],
             tv, timeout=30)
-        if kf_diff:
-            lines = kf_diff.strip().split("\n")
+        if kf_meta:
+            lines = kf_meta.strip().split("\n")
             if len(lines) >= 3:
                 known_fix_detail = {
                     "commit_id": lines[0][:12],
@@ -639,6 +806,17 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
                     "author": lines[2],
                     "stat": "\n".join(lines[3:])[:500],
                 }
+        kf_raw = git_mgr.run_git(
+            ["git", "show", "--format=", known_fix], tv, timeout=30)
+        if kf_raw:
+            local_diff = kf_raw.strip()
+
+        # ── 核心: 代码差异对比 ───────────────────────────
+        diff_comparison = _compare_patch_code(community_diff, local_diff)
+
+        # 根因诊断
+        root_cause = _diagnose_root_cause(diff_comparison, dryrun_detail,
+                                          known_prereqs, result.dry_run)
 
         tool_prereqs_detail = [
             {"commit_id": p.commit_id[:12], "subject": p.subject,
@@ -677,6 +855,8 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
             "fix_patch_detail": fix_patch_detail,
             "dryrun_detail": dryrun_detail,
             "known_fix_detail": known_fix_detail,
+            "diff_comparison": diff_comparison,
+            "root_cause": root_cause,
             "tool_prereqs": tool_prereqs_detail,
             "known_prereqs_detail": known_prereqs_detail,
             "recommendations": recommendations,
@@ -705,44 +885,73 @@ def cmd_validate(args, config):
         config, args.cve_id, tv, args.known_fix, known_prereqs,
         git_mgr=git_mgr, show_stages=True)
 
-    # LLM 智能分析 (如果启用且有 FAIL 项)
-    llm_analysis = None
-    if not result.get("overall_pass") and config.llm.enabled:
-        from core.llm_analyzer import LLMAnalyzer
-        analyzer = LLMAnalyzer(config.llm)
-        fp_detail = result.get("fix_patch_detail", {})
-        dr_detail = result.get("dryrun_detail", {})
-        llm_ctx = {
-            "cve_id": args.cve_id,
-            "fix_patch_summary": (
-                f"Subject: {fp_detail.get('subject', 'N/A')}\n"
-                f"Files: {', '.join(fp_detail.get('modified_files', []))}\n"
-                f"Diff: {fp_detail.get('diff_lines', 0)} lines"
-            ) if fp_detail else "",
-            "dryrun_detail": (
-                f"applies_cleanly: {dr_detail.get('applies_cleanly')}\n"
-                f"conflicting_files: {dr_detail.get('conflicting_files', [])}\n"
-                f"error: {dr_detail.get('error_output', '')[:400]}"
-            ) if dr_detail else "",
-            "tool_prereqs": "\n".join(
-                f"- [{p['grade']}] {p['commit_id']} {p['subject'][:60]} "
-                f"(score={p['score']}, hunks={p.get('overlap_hunks',0)})"
-                for p in result.get("tool_prereqs", [])
-            ),
-            "known_prereqs_info": "\n".join(
-                f"- {p['commit_id']} {p['subject']}"
-                for p in result.get("known_prereqs_detail", [])
-            ) if result.get("known_prereqs_detail") else "无已知前置依赖",
-            "known_fix_diff_summary": (
-                f"Subject: {result.get('known_fix_detail', {}).get('subject', '')}\n"
-                f"{result.get('known_fix_detail', {}).get('stat', '')}"
-            ),
-            "issues": result.get("issues", []),
-        }
-        with console.status("[cyan]LLM 正在分析验证差异..."):
-            llm_analysis = analyzer.analyze_validate_diff(llm_ctx)
-        if llm_analysis:
-            result["llm_analysis"] = llm_analysis
+    # LLM 智能分析
+    if not result.get("overall_pass"):
+        if config.llm.enabled:
+            from core.llm_analyzer import LLMAnalyzer
+            analyzer = LLMAnalyzer(config.llm)
+            if analyzer.enabled:
+                diff_cmp = result.get("diff_comparison", {})
+                fp_detail = result.get("fix_patch_detail", {})
+                dr_detail = result.get("dryrun_detail", {})
+                # 构建含实际代码差异的上下文
+                code_diff_ctx = ""
+                for kd in diff_cmp.get("key_differences", [])[:3]:
+                    code_diff_ctx += f"\n### {kd['file']} (相似度 {kd['similarity']:.0%})\n"
+                    ce = kd.get("community_extra", [])
+                    le = kd.get("local_extra", [])
+                    if ce:
+                        code_diff_ctx += "社区补丁独有:\n" + "\n".join(
+                            f"  {l}" for l in ce[:5]) + "\n"
+                    if le:
+                        code_diff_ctx += "本地修复独有:\n" + "\n".join(
+                            f"  {l}" for l in le[:5]) + "\n"
+
+                llm_ctx = {
+                    "cve_id": args.cve_id,
+                    "fix_patch_summary": (
+                        f"Subject: {fp_detail.get('subject', 'N/A')}\n"
+                        f"Files: {', '.join(fp_detail.get('modified_files', []))}\n"
+                        f"Diff: {fp_detail.get('diff_lines', 0)} lines"
+                    ) if fp_detail else "",
+                    "code_diff_comparison": (
+                        f"总体相似度: {diff_cmp.get('overall_similarity', 0):.0%}\n"
+                        f"社区独有文件: {diff_cmp.get('community_only_files', [])}\n"
+                        f"本地独有文件: {diff_cmp.get('local_only_files', [])}\n"
+                        f"{code_diff_ctx}"
+                    ),
+                    "root_cause_diagnosis": "\n".join(
+                        result.get("root_cause", [])),
+                    "dryrun_detail": (
+                        f"applies_cleanly: {dr_detail.get('applies_cleanly')}\n"
+                        f"conflicting_files: {dr_detail.get('conflicting_files', [])}\n"
+                        f"error: {dr_detail.get('error_output', '')[:400]}"
+                    ) if dr_detail else "",
+                    "tool_prereqs": "\n".join(
+                        f"- [{p['grade']}] {p['commit_id']} {p['subject'][:60]} "
+                        f"(score={p['score']}, hunks={p.get('overlap_hunks',0)})"
+                        for p in result.get("tool_prereqs", [])
+                    ),
+                    "known_prereqs_info": "\n".join(
+                        f"- {p['commit_id']} {p['subject']}"
+                        for p in result.get("known_prereqs_detail", [])
+                    ) if result.get("known_prereqs_detail") else "无已知前置依赖",
+                    "known_fix_diff_summary": (
+                        f"Subject: {result.get('known_fix_detail', {}).get('subject', '')}\n"
+                        f"{result.get('known_fix_detail', {}).get('stat', '')}"
+                    ),
+                    "issues": result.get("issues", []),
+                }
+                with console.status("[cyan]LLM 正在分析验证差异..."):
+                    llm_analysis = analyzer.analyze_validate_diff(llm_ctx)
+                if llm_analysis:
+                    result["llm_analysis"] = llm_analysis
+                else:
+                    result["llm_status"] = "LLM 调用失败，请检查日志"
+            else:
+                result["llm_status"] = "LLM api_key 未配置"
+        else:
+            result["llm_status"] = "LLM 未启用 (config.yaml → llm.enabled: true)"
 
     console.print()
     render_validate_report(result)

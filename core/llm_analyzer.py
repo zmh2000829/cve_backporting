@@ -47,8 +47,9 @@ class LLMAnalyzer:
 
     def _build_prompt(self, ctx: dict) -> str:
         parts = [
-            "你是一位 Linux 内核安全补丁回溯专家。以下是一个 CVE 补丁验证的详细结果。"
-            "请分析工具输出与真实合入记录之间的差异，解释不一致的原因，并给出改进建议。",
+            "你是一位 Linux 内核安全补丁回溯专家。以下是一个 CVE 补丁验证的详细结果，"
+            "包含社区修复补丁与本地真实修复的代码级对比。"
+            "请深入分析差异的根因，并给出可执行的改进建议。",
             "",
             f"## CVE: {ctx.get('cve_id', 'N/A')}",
             "",
@@ -58,6 +59,18 @@ class LLMAnalyzer:
         if fix_summary:
             parts.append("## 社区修复补丁摘要")
             parts.append(fix_summary)
+            parts.append("")
+
+        code_diff = ctx.get("code_diff_comparison", "")
+        if code_diff:
+            parts.append("## 代码差异对比 (社区补丁 vs 本地修复)")
+            parts.append(code_diff)
+            parts.append("")
+
+        root_cause = ctx.get("root_cause_diagnosis", "")
+        if root_cause:
+            parts.append("## 工具生成的根因诊断")
+            parts.append(root_cause)
             parts.append("")
 
         dr = ctx.get("dryrun_detail", "")
@@ -91,13 +104,14 @@ class LLMAnalyzer:
                 parts.append(f"- {issue}")
             parts.append("")
 
-        parts.append("## 请分析")
-        parts.append("1. 逐项分析每个验证失败点的根因")
-        parts.append("2. 工具推荐的前置依赖与真实情况的差异原因")
-        parts.append("3. DryRun 预测不准确的可能原因 (如有)")
-        parts.append("4. 具体的改进建议")
+        parts.append("## 请分析 (重点关注代码差异)")
+        parts.append("1. 社区补丁与本地修复的代码差异是本质性的还是适配性的？")
+        parts.append("2. 如果代码高度一致但 DryRun 失败，上下文偏移的具体原因是什么？")
+        parts.append("3. 工具推荐的前置依赖与真实情况的差异原因")
+        parts.append("4. 是否存在非文本层面的依赖 (数据结构/API/宏定义变更)？")
+        parts.append("5. 具体可执行的改进建议")
         parts.append("")
-        parts.append("请用中文回答，条理清晰，控制在 500 字以内。")
+        parts.append("请用中文回答，条理清晰，控制在 600 字以内。")
 
         return "\n".join(parts)
 
