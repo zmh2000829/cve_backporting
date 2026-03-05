@@ -33,6 +33,8 @@
 
 **多源补丁获取与容错** — `git.kernel.org`（主）→ `kernel.googlesource.com`（备，含重试）→ 本地 Git 对象库（兜底），三级回退 + 部分结果互补合并，单一数据源故障不影响分析流程。
 
+**闭环验证框架** — 基于 `git worktree` 的非破坏性回退验证：选取已修复 CVE，自动创建修复前快照，运行完整 Pipeline，与真实合入记录对比并量化 Precision / Recall / F1，支持批量基准测试汇总工具整体置信度。
+
 ---
 
 ## 核心能力
@@ -75,7 +77,23 @@ Crawler → Analysis → Dependency → DryRun
 - 自动检测缓存一致性：分支 rebase 后自动降级全量重建
 - `--full` 强制全量重建
 
-### 5. Commit 搜索 (`search`)
+### 5. 工具准确度验证 (`validate`)
+
+选取已修复的 CVE，通过 `git worktree` 回退到修复前状态，运行完整 Pipeline，与真实合入记录进行对比。
+
+- 自动计算回滚点（`known_fix~1` 或最早 prereq 前）
+- 验证修复检测、引入检测、DryRun 预测、前置依赖 Precision/Recall/F1
+- worktree 共享 `.git` 对象库，秒级创建/清理，不影响主仓库
+
+### 6. 批量基准测试 (`benchmark`)
+
+从 YAML 文件批量加载已修复 CVE 集合，逐一执行回退验证，汇总工具整体准确度。
+
+- 汇总引入/修复检测准确率、前置依赖 F1、DryRun 准确率、搜索策略分布
+- CVE 数据不完整时自动标记，不影响其他 CVE 的统计
+- 适用于持续集成中的回归测试和工具调优效果评估
+
+### 7. Commit 搜索 (`search`)
 
 快速查询某个 commit ID 是否存在于目标仓库的指定分支上，先查缓存再查 Git 对象库。
 
@@ -95,8 +113,9 @@ cve_backporting/
 │   ├── dependency.py         #   Dependency Agent — 前置依赖分析
 │   └── dryrun.py             #   DryRun Agent — git apply 试应用
 ├── pipeline.py               # Pipeline 编排器 (串联四个 Agent)
-├── cli.py                    # CLI 入口 (Rich 交互界面)
+├── cli.py                    # CLI 入口 (analyze/check-intro/check-fix/validate/benchmark)
 ├── config.yaml               # 配置文件
+├── benchmarks.example.yaml   # 基准测试集示例
 ├── requirements.txt
 ├── tests/
 │   └── test_agents.py        # 测试套件
@@ -166,6 +185,37 @@ python cli.py check-fix --commit abc123def456 --target 5.10-hulk
 # 通过 CVE ID 自动提取修复 commit（含 stable backport）
 python cli.py check-fix --cve CVE-2024-26633 --target 5.10-hulk
 ```
+
+### 工具准确度验证 (`validate`)
+
+选取已修复的 CVE，自动创建 `git worktree` 回退到修复前状态，运行完整分析流水线，将工具输出与真实合入记录进行对比。
+
+```bash
+# 单个 CVE 验证（无前置依赖）
+python cli.py validate \
+  --cve CVE-2024-26633 \
+  --target 5.10-hulk \
+  --known-fix da23bd709b46
+
+# 单个 CVE 验证（含已知前置依赖）
+python cli.py validate \
+  --cve CVE-2024-26633 \
+  --target 5.10-hulk \
+  --known-fix da23bd709b46 \
+  --known-prereqs "commit1,commit2"
+```
+
+验证项：修复检测（应为未合入）、引入检测（应为已引入）、DryRun 预测、前置依赖 Precision / Recall / F1。
+
+### 批量基准测试 (`benchmark`)
+
+从 YAML 文件批量加载已修复 CVE，逐一执行回退验证，计算工具整体准确度指标。
+
+```bash
+python cli.py benchmark --file benchmarks.yaml --target 5.10-hulk
+```
+
+基准数据集格式见 `benchmarks.example.yaml`。
 
 ### Commit 搜索
 

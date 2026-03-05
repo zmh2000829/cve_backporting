@@ -508,6 +508,180 @@ def render_multi_strategy(msr, mode: str = "intro") -> Panel:
                  border_style=border, padding=(1, 2))
 
 
+def render_validate_report(result: dict):
+    """渲染单个 CVE 验证报告"""
+    cve = result.get("cve_id", "N/A")
+    known_fix = result.get("known_fix", "N/A")
+
+    t = Table(box=box.SIMPLE, show_header=False, padding=(0, 1), expand=True)
+    t.add_column("K", width=20, style="bold")
+    t.add_column("V", ratio=1)
+    t.add_row("CVE", f"[cyan]{cve}[/]")
+    t.add_row("Known Fix", f"[cyan]{known_fix[:12]}[/]")
+    t.add_row("目标分支", result.get("target", "N/A"))
+    t.add_row("Worktree Commit", f"[dim]{result.get('worktree_commit', 'N/A')[:16]}[/]")
+
+    checks = result.get("checks", {})
+    rows = []
+
+    fix_absent = checks.get("fix_correctly_absent")
+    if fix_absent is not None:
+        icon = "[green]✔[/]" if fix_absent else "[red]✘[/]"
+        rows.append(("修复检测 (应为未合入)", icon))
+
+    intro_correct = checks.get("intro_detected")
+    if intro_correct is not None:
+        icon = "[green]✔[/]" if intro_correct else "[yellow]⊘[/]"
+        rows.append(("引入检测 (应为已引入)", icon))
+
+    intro_strategy = checks.get("intro_strategy", "")
+    if intro_strategy:
+        rows.append(("引入命中策略", f"[cyan]{intro_strategy}[/]"))
+
+    fix_strategy = checks.get("fix_strategy", "")
+    if fix_strategy:
+        rows.append(("修复命中策略", f"[cyan]{fix_strategy}[/]"))
+
+    prereq = checks.get("prereq_metrics")
+    if prereq:
+        p, r, f1 = prereq["precision"], prereq["recall"], prereq["f1"]
+        p_style = "green" if p >= 0.8 else ("yellow" if p >= 0.5 else "red")
+        r_style = "green" if r >= 0.8 else ("yellow" if r >= 0.5 else "red")
+        rows.append(("前置依赖 精确率", f"[{p_style}]{p:.1%}[/]"))
+        rows.append(("前置依赖 召回率", f"[{r_style}]{r:.1%}[/]"))
+        rows.append(("前置依赖 F1", f"[bold]{f1:.1%}[/]"))
+        tp = prereq.get("true_positives", [])
+        fp = prereq.get("false_positives", [])
+        fn = prereq.get("false_negatives", [])
+        if tp:
+            rows.append(("  正确推荐 (TP)", f"[green]{len(tp)}[/]: " + ", ".join(s[:12] for s in tp[:5])))
+        if fp:
+            rows.append(("  误报 (FP)", f"[red]{len(fp)}[/]: " + ", ".join(s[:12] for s in fp[:5])))
+        if fn:
+            rows.append(("  漏报 (FN)", f"[yellow]{len(fn)}[/]: " + ", ".join(s[:12] for s in fn[:5])))
+
+    dryrun = checks.get("dryrun_accurate")
+    if dryrun is not None:
+        icon = "[green]✔[/]" if dryrun else "[red]✘[/]"
+        rows.append(("DryRun 预测", icon))
+
+    ct = Table(box=box.ROUNDED, show_header=True, padding=(0, 1), expand=True)
+    ct.add_column("检查项", width=26, style="bold")
+    ct.add_column("结果", ratio=1)
+    for k, v in rows:
+        ct.add_row(k, v)
+
+    overall = result.get("overall_pass", False)
+    verdict = Text()
+    if overall:
+        verdict.append("  ✔ PASS  ", style="bold white on green")
+    else:
+        verdict.append("  ✘ FAIL  ", style="bold white on red")
+    verdict.append(f"  {result.get('summary', '')}", style="dim")
+
+    from rich.console import Group
+    p = Panel(
+        Group(t, Text(""), ct, Text(""), verdict),
+        title=f"[bold]验证报告 — {cve}[/]",
+        border_style="green" if overall else "red",
+        padding=(1, 2),
+    )
+    console.print(p)
+
+
+def render_benchmark_report(results: list, target: str):
+    """渲染批量基准测试汇总报告"""
+    total = len(results)
+    if total == 0:
+        console.print("[yellow]无验证结果[/]")
+        return
+
+    intro_ok = sum(1 for r in results if r.get("checks", {}).get("intro_detected", False))
+    fix_ok = sum(1 for r in results if r.get("checks", {}).get("fix_correctly_absent", False))
+
+    prec_vals, recall_vals, f1_vals = [], [], []
+    dryrun_ok, dryrun_total = 0, 0
+    strategy_dist = {"L1": 0, "L2": 0, "L3": 0, "未命中": 0}
+
+    for r in results:
+        checks = r.get("checks", {})
+        pm = checks.get("prereq_metrics")
+        if pm:
+            prec_vals.append(pm["precision"])
+            recall_vals.append(pm["recall"])
+            f1_vals.append(pm["f1"])
+        dr = checks.get("dryrun_accurate")
+        if dr is not None:
+            dryrun_total += 1
+            if dr:
+                dryrun_ok += 1
+        intro_s = checks.get("intro_strategy", "")
+        if intro_s in ("exact_id", "L1"):
+            strategy_dist["L1"] += 1
+        elif intro_s in ("subject_match", "L2") or intro_s.startswith("subject"):
+            strategy_dist["L2"] += 1
+        elif intro_s.startswith("diff") or intro_s.startswith("L3"):
+            strategy_dist["L3"] += 1
+        elif intro_s:
+            strategy_dist["L1"] += 1
+        else:
+            strategy_dist["未命中"] += 1
+
+    avg_prec = sum(prec_vals) / len(prec_vals) if prec_vals else 0
+    avg_recall = sum(recall_vals) / len(recall_vals) if recall_vals else 0
+    avg_f1 = sum(f1_vals) / len(f1_vals) if f1_vals else 0
+
+    summary = Table(box=box.SIMPLE, show_header=False, padding=(0, 1), expand=True)
+    summary.add_column("指标", width=24, style="bold")
+    summary.add_column("值", ratio=1)
+    summary.add_row("基准集规模", f"[cyan]{total}[/] 个 CVE")
+    summary.add_row("目标分支", f"[cyan]{target}[/]")
+    summary.add_row("", "")
+    summary.add_row("引入检测准确率", f"[bold]{intro_ok}/{total}  ({intro_ok/total:.1%})[/]")
+    summary.add_row("修复检测准确率", f"[bold]{fix_ok}/{total}  ({fix_ok/total:.1%})[/]")
+    if prec_vals:
+        summary.add_row("前置依赖 平均精确率", f"[bold]{avg_prec:.1%}[/]")
+        summary.add_row("前置依赖 平均召回率", f"[bold]{avg_recall:.1%}[/]")
+        summary.add_row("前置依赖 平均F1", f"[bold]{avg_f1:.1%}[/]")
+    if dryrun_total:
+        summary.add_row("DryRun 准确率", f"[bold]{dryrun_ok}/{dryrun_total}  ({dryrun_ok/dryrun_total:.1%})[/]")
+
+    sd_parts = [f"{k}: {v} ({v/total:.0%})" for k, v in strategy_dist.items() if v]
+    summary.add_row("", "")
+    summary.add_row("搜索策略分布", "  ".join(sd_parts))
+
+    detail = Table(box=box.ROUNDED, show_header=True, padding=(0, 1), expand=True)
+    detail.add_column("#", width=3, justify="right", style="dim")
+    detail.add_column("CVE", width=20, style="cyan")
+    detail.add_column("引入", width=6, justify="center")
+    detail.add_column("修复", width=6, justify="center")
+    detail.add_column("精确率", width=8, justify="right")
+    detail.add_column("召回率", width=8, justify="right")
+    detail.add_column("DryRun", width=8, justify="center")
+    detail.add_column("结果", width=6, justify="center")
+
+    for i, r in enumerate(results, 1):
+        checks = r.get("checks", {})
+        intro = "[green]✔[/]" if checks.get("intro_detected") else "[red]✘[/]"
+        fix = "[green]✔[/]" if checks.get("fix_correctly_absent") else "[red]✘[/]"
+        pm = checks.get("prereq_metrics")
+        prec = f"{pm['precision']:.0%}" if pm else "-"
+        rec = f"{pm['recall']:.0%}" if pm else "-"
+        dr = checks.get("dryrun_accurate")
+        drs = "[green]✔[/]" if dr else ("[red]✘[/]" if dr is not None else "-")
+        overall = "[green]✔[/]" if r.get("overall_pass") else "[red]✘[/]"
+        detail.add_row(str(i), r.get("cve_id", "?"), intro, fix, prec, rec, drs, overall)
+
+    from rich.console import Group
+    p = Panel(
+        Group(summary, Text(""), detail),
+        title="[bold]Benchmark Report[/]",
+        border_style="cyan",
+        padding=(1, 2),
+    )
+    console.print(p)
+
+
 def make_cache_progress(known_total: bool = True) -> Progress:
     if known_total:
         return Progress(

@@ -8,6 +8,8 @@ CVE补丁回溯分析 - 命令行工具
   python cli.py check-intro --cve CVE-2024-26633 --target 5.10-hulk
   python cli.py check-fix --commit <fix_commit_id> --target 5.10-hulk
   python cli.py check-fix --cve CVE-2024-26633 --target 5.10-hulk
+  python cli.py validate --cve CVE-xxx --target 5.10-hulk --known-fix <commit>
+  python cli.py benchmark --file benchmarks.yaml --target 5.10-hulk
   python cli.py build-cache --target 5.10-hulk
   python cli.py search --commit abc123 --target 5.10-hulk
 """
@@ -17,6 +19,7 @@ import json
 import sys
 import os
 import logging
+import tempfile
 from datetime import datetime
 
 from rich.console import Console, Group
@@ -30,6 +33,7 @@ from core.git_manager import GitRepoManager
 from core.ui import (
     console, StageTracker, make_header, render_report,
     render_recommendations, render_multi_strategy, make_cache_progress,
+    render_validate_report, render_benchmark_report,
 )
 from pipeline import Pipeline, STAGES
 
@@ -426,6 +430,279 @@ def cmd_check_fix(args, config):
     console.print(f"[dim]结果已保存: {fp}[/]")
 
 
+# ─── validate / benchmark ────────────────────────────────────────────
+
+def _find_rollback_commit(git_mgr, rv, known_fix, known_prereqs):
+    """计算回滚目标：如果有 known_prereqs 则回滚到最早的 prereq 之前，否则回滚到 fix 之前"""
+    if not known_prereqs:
+        return f"{known_fix}~1"
+    all_commits = list(known_prereqs) + [known_fix]
+    earliest = all_commits[0]
+    for c in all_commits[1:]:
+        rc = git_mgr.run_git_rc(
+            ["git", "merge-base", "--is-ancestor", c, earliest], rv)
+        if rc == 0:
+            earliest = c
+    return f"{earliest}~1"
+
+
+def _compare_prereqs(recommended, known_ids, git_mgr, rv):
+    """
+    对比工具推荐的前置依赖与真实合入记录。
+    同时使用 ID 前缀匹配和 Subject 相似度匹配。
+    """
+    from core.matcher import subject_similarity
+
+    rec_map = {p.commit_id[:12]: p.subject for p in recommended}
+    act_map = {}
+    for kid in known_ids:
+        info = git_mgr.run_git(
+            ["git", "log", "-1", "--format=%H\x1e%s", kid], rv, timeout=10)
+        if info:
+            parts = info.strip().split("\x1e")
+            act_map[parts[0][:12]] = parts[1] if len(parts) > 1 else ""
+        else:
+            act_map[kid[:12]] = ""
+
+    tp, fp, fn = set(), set(rec_map.keys()), set(act_map.keys())
+
+    for rid, rsubj in rec_map.items():
+        if rid in act_map:
+            tp.add(rid)
+            fp.discard(rid)
+            fn.discard(rid)
+            continue
+        for aid, asubj in act_map.items():
+            if aid not in fn:
+                continue
+            if asubj and rsubj and subject_similarity(rsubj, asubj) >= 0.80:
+                tp.add(aid)
+                fp.discard(rid)
+                fn.discard(aid)
+                break
+
+    precision = len(tp) / len(rec_map) if rec_map else 1.0
+    recall = len(tp) / len(act_map) if act_map else 1.0
+    f1 = (2 * precision * recall / (precision + recall)
+          if (precision + recall) > 0 else 0.0)
+    return {
+        "precision": precision, "recall": recall, "f1": f1,
+        "true_positives": sorted(tp),
+        "false_positives": sorted(fp),
+        "false_negatives": sorted(fn),
+    }
+
+
+def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
+                         git_mgr=None, show_stages=True):
+    """执行单个 CVE 的回退验证，返回结果 dict"""
+    if git_mgr is None:
+        git_mgr = _make_git_mgr(config, tv)
+
+    status, _ = git_mgr.check_commit_existence(known_fix, tv)
+    if status != "on_branch":
+        msg = f"known_fix {known_fix[:12]} 不在目标分支 (status={status})"
+        console.print(f"[red]{msg}[/]")
+        return {"cve_id": cve_id, "known_fix": known_fix, "target": tv,
+                "worktree_commit": "", "checks": {},
+                "overall_pass": False, "summary": msg}
+
+    rollback = _find_rollback_commit(git_mgr, tv, known_fix, known_prereqs)
+    resolved = git_mgr.run_git(["git", "rev-parse", rollback], tv, timeout=10)
+    rollback_hash = resolved.strip() if resolved else rollback
+
+    wt_dir = tempfile.mkdtemp(prefix="cve_validate_")
+    if not git_mgr.create_worktree(tv, rollback, wt_dir):
+        console.print(f"[red]创建 worktree 失败 @ {rollback}[/]")
+        return {"cve_id": cve_id, "known_fix": known_fix, "target": tv,
+                "worktree_commit": rollback, "checks": {},
+                "overall_pass": False, "summary": "创建worktree失败"}
+
+    try:
+        wt_mgr = GitRepoManager(
+            {tv: {"path": wt_dir, "branch": "HEAD"}},
+            use_cache=False,
+        )
+        pipe = Pipeline(wt_mgr, path_mappings=config.path_mappings)
+
+        if show_stages:
+            tracker = StageTracker(STAGES)
+            header = Panel(
+                f"[bold]CVE:[/] {cve_id}  [bold]目标:[/] {tv}\n"
+                f"[bold]回滚至:[/] {rollback_hash[:16]}  [dim](known_fix~)[/]",
+                title="[bold magenta]验证模式 — 回退分析[/]",
+                border_style="magenta", padding=(0, 2),
+            )
+
+            def on_stage(key, st, detail=""):
+                tracker.start(key) if st == "running" else tracker.done(key, st, detail)
+
+            def _layout():
+                return Group(header, tracker.render())
+
+            with Live(_layout(), console=console, refresh_per_second=8) as live:
+                def _update(key, st, detail=""):
+                    on_stage(key, st, detail)
+                    live.update(_layout())
+                result = pipe.analyze(cve_id, tv, enable_dryrun=True,
+                                      on_stage=_update)
+        else:
+            result = pipe.analyze(cve_id, tv, enable_dryrun=True)
+
+        if result.cve_info is None or not result.cve_info.fix_commit_id:
+            return {
+                "cve_id": cve_id, "known_fix": known_fix, "target": tv,
+                "worktree_commit": rollback_hash[:16] if rollback_hash else rollback,
+                "checks": {}, "overall_pass": False,
+                "summary": "CVE上游数据不完整(MITRE无fix commit), 无法验证",
+            }
+
+        checks = {}
+        checks["fix_correctly_absent"] = not result.is_fixed
+        checks["intro_detected"] = result.is_vulnerable
+
+        intro_s = ""
+        if result.introduced_search and result.introduced_search.found:
+            intro_s = result.introduced_search.strategy
+        checks["intro_strategy"] = intro_s
+
+        fix_s = ""
+        if result.fix_search and result.fix_search.found:
+            fix_s = result.fix_search.strategy
+        checks["fix_strategy"] = fix_s
+
+        if known_prereqs:
+            checks["prereq_metrics"] = _compare_prereqs(
+                result.prerequisite_patches, known_prereqs, git_mgr, tv)
+
+        if result.dry_run:
+            if known_prereqs:
+                checks["dryrun_accurate"] = not result.dry_run.applies_cleanly
+            else:
+                checks["dryrun_accurate"] = result.dry_run.applies_cleanly
+
+        overall = checks.get("fix_correctly_absent", False)
+        issues = []
+        if not checks["fix_correctly_absent"]:
+            issues.append("修复检测异常(应为未合入)")
+        if not checks.get("intro_detected", True):
+            issues.append("引入检测未命中")
+        if checks.get("dryrun_accurate") is False:
+            issues.append("DryRun预测不准")
+
+        return {
+            "cve_id": cve_id, "known_fix": known_fix, "target": tv,
+            "worktree_commit": rollback_hash[:16] if rollback_hash else rollback,
+            "checks": checks,
+            "overall_pass": overall and not issues,
+            "summary": "; ".join(issues) if issues else "验证通过",
+            "tool_prereqs": [
+                {"commit_id": p.commit_id[:12], "subject": p.subject[:60],
+                 "grade": p.grade, "score": round(p.score, 2)}
+                for p in (result.prerequisite_patches or [])
+            ],
+        }
+
+    finally:
+        git_mgr.remove_worktree(tv, wt_dir)
+
+
+def cmd_validate(args, config):
+    """基于已修复 CVE 回退验证工具准确度"""
+    tv = args.target_version
+    git_mgr = _make_git_mgr(config, tv)
+    known_prereqs = [p.strip() for p in args.known_prereqs.split(",")
+                     if p.strip()] if args.known_prereqs else []
+
+    console.print(Panel(
+        f"[bold]CVE:[/] {args.cve_id}  [bold]目标:[/] {tv}\n"
+        f"[bold]Known Fix:[/] {args.known_fix[:12]}\n"
+        f"[bold]Known Prereqs:[/] {len(known_prereqs)} 个",
+        title="[bold magenta]验证框架 — 单CVE回退验证[/]",
+        border_style="magenta", padding=(0, 2),
+    ))
+
+    result = _run_single_validate(
+        config, args.cve_id, tv, args.known_fix, known_prereqs,
+        git_mgr=git_mgr, show_stages=True)
+
+    console.print()
+    render_validate_report(result)
+
+    out_dir = config.output.output_dir
+    os.makedirs(out_dir, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    fp = os.path.join(out_dir, f"validate_{args.cve_id}_{tv}_{ts}.json")
+    with open(fp, "w", encoding="utf-8") as f:
+        json.dump(result, f, indent=2, ensure_ascii=False, default=str)
+    console.print(f"[dim]验证报告已保存: {fp}[/]")
+
+
+def cmd_benchmark(args, config):
+    """批量基准测试 — 从 YAML 文件加载已修复 CVE 列表并逐一验证"""
+    import yaml
+
+    with open(args.file, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+
+    entries = data.get("benchmarks", [])
+    if not entries:
+        console.print("[red]YAML 文件中无 benchmarks 条目[/]")
+        return
+
+    tv = args.target_version
+    git_mgr = _make_git_mgr(config, tv)
+
+    console.print(Panel(
+        f"[bold]基准集:[/] {len(entries)} 个 CVE  [bold]目标:[/] {tv}\n"
+        f"[bold]文件:[/] {args.file}",
+        title="[bold cyan]Benchmark — 批量准确度度量[/]",
+        border_style="cyan", padding=(0, 2),
+    ))
+
+    results = []
+    for i, entry in enumerate(entries, 1):
+        cve_id = entry.get("cve_id", "N/A")
+        known_fix = entry.get("known_fix_commit", "")
+        known_prereqs = entry.get("known_prereqs", []) or []
+        notes = entry.get("notes", "")
+
+        console.print(f"\n{'━' * 60}")
+        console.print(
+            f"[bold cyan][{i}/{len(entries)}][/]  {cve_id}  "
+            f"[dim]fix={known_fix[:12]}  prereqs={len(known_prereqs)}[/]"
+            + (f"  [dim italic]{notes}[/]" if notes else ""))
+
+        if not known_fix:
+            console.print("[yellow]  跳过: 缺少 known_fix_commit[/]")
+            results.append({
+                "cve_id": cve_id, "known_fix": "", "target": tv,
+                "worktree_commit": "", "checks": {},
+                "overall_pass": False, "summary": "缺少known_fix_commit",
+            })
+            continue
+
+        r = _run_single_validate(
+            config, cve_id, tv, known_fix, known_prereqs,
+            git_mgr=git_mgr, show_stages=True)
+        results.append(r)
+
+        icon = "[green]✔ PASS[/]" if r.get("overall_pass") else "[red]✘ FAIL[/]"
+        console.print(f"  {icon}  {r.get('summary', '')}")
+
+    console.print(f"\n{'━' * 60}\n")
+    render_benchmark_report(results, tv)
+
+    out_dir = config.output.output_dir
+    os.makedirs(out_dir, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    fp = os.path.join(out_dir, f"benchmark_{tv}_{ts}.json")
+    with open(fp, "w", encoding="utf-8") as f:
+        json.dump({"target": tv, "total": len(results), "results": results},
+                  f, indent=2, ensure_ascii=False, default=str)
+    console.print(f"[dim]基准测试报告已保存: {fp}[/]")
+
+
 # ─── build-cache ─────────────────────────────────────────────────────
 
 def cmd_build_cache(args, config):
@@ -561,6 +838,17 @@ def main():
     fp.add_argument("--cve", dest="cve_id", help="CVE ID (自动提取修复commit)")
     fp.add_argument("--target", dest="target_version", required=True)
 
+    vp = sub.add_parser("validate", help="基于已修复CVE验证工具准确度", parents=[parent])
+    vp.add_argument("--cve", dest="cve_id", required=True)
+    vp.add_argument("--target", dest="target_version", required=True)
+    vp.add_argument("--known-fix", required=True, help="本地仓库中真实修复的commit ID")
+    vp.add_argument("--known-prereqs", default="",
+                    help="实际先合入的前置commit列表 (逗号分隔)")
+
+    bmp = sub.add_parser("benchmark", help="批量准确度基准测试", parents=[parent])
+    bmp.add_argument("--file", required=True, help="基准测试YAML文件 (benchmarks.yaml)")
+    bmp.add_argument("--target", dest="target_version", required=True)
+
     cp = sub.add_parser("build-cache", help="构建commit缓存", parents=[parent])
     cp.add_argument("--target", dest="target_version", required=True)
     cp.add_argument("--full", action="store_true", help="强制全量重建缓存（默认增量）")
@@ -581,6 +869,8 @@ def main():
         "analyze": cmd_analyze,
         "check-intro": cmd_check_intro,
         "check-fix": cmd_check_fix,
+        "validate": cmd_validate,
+        "benchmark": cmd_benchmark,
         "build-cache": cmd_build_cache,
         "search": cmd_search,
     }

@@ -1,0 +1,28 @@
+# CVE 验证基准集示例
+# 用法: python cli.py benchmark --file benchmarks.yaml --target 5.10-hulk
+#
+# 每个条目表示一个已修复的 CVE:
+#   cve_id:           CVE 编号
+#   known_fix_commit: 本地仓库中真实修复的 commit ID (必须在目标分支上)
+#   known_prereqs:    可选, 实际先合入的前置 commit ID 列表
+#   notes:            可选, 备注说明
+
+benchmarks:
+  # 示例 1: 无前置依赖, 直接 cherry-pick
+  - cve_id: CVE-2024-26633
+    known_fix_commit: "替换为本地仓库中的实际commit ID"
+    known_prereqs: []
+    notes: "ip6_tunnel 漏洞, 可直接合入"
+
+  # 示例 2: 有前置依赖
+  - cve_id: CVE-2024-50154
+    known_fix_commit: "替换为本地仓库中的实际commit ID"
+    known_prereqs:
+      - "prereq_commit_id_1"
+      - "prereq_commit_id_2"
+    notes: "需要先合入 2 个前置补丁"
+
+  # 示例 3: 只验证搜索准确度, 不验证依赖
+  - cve_id: CVE-2025-21700
+    known_fix_commit: "替换为本地仓库中的实际commit ID"
+    notes: "仅验证引入/修复检测"

@@ -44,6 +44,245 @@
 
 ---
 
+## P0 — 验证框架与准确度度量 ✅ 已完成
+
+### 核心问题
+
+工具对"未修复 CVE"给出的前置依赖推荐**无法验证准确性**，因为只有已修复的 CVE 才有分析人员真实合入的 patch 作为真值。需要一套机制：**利用已修复 CVE 反向验证工具输出，量化工具的置信度。**
+
+### 实现状态
+
+**已完成（方案 A: git worktree）**，验证通过：
+
+- `validate` 命令：基于 `git worktree add --detach` 创建修复前工作区，运行完整 Pipeline，对比修复检测/引入检测/DryRun/前置依赖
+- `benchmark` 命令：从 YAML 文件批量验证，汇总 Precision/Recall/F1/搜索策略分布
+- `render_validate_report` / `render_benchmark_report` Rich 面板渲染
+- 前置依赖比较支持 ID 精确匹配 + Subject 相似度匹配（80% 阈值）
+- CVE 数据不完整时正确识别并报告 "CVE上游数据不完整"
+- **实测验证**：CVE-2024-26633 (ip6_tunnel) 全部检查项 PASS（修复检测 ✔、引入检测 L1 ✔、DryRun ✔）
+
+---
+
+### P0.1 — `validate` 命令：基于已修复 CVE 的回退验证
+
+**场景：** 选取一个已修复的 CVE，将仓库回退到修复前状态，运行工具分析，将工具推荐的结果与**真实合入记录**进行对比。
+
+#### 核心设计
+
+```
+输入:
+  --cve CVE-2024-26633
+  --target 5.10-hulk
+  --known-fix <本地仓库中实际合入修复的 commit ID>
+  --known-prereqs <实际先合入的前置 commit 列表> (可选, 逗号分隔)
+
+执行流程:
+  ┌────────────────────────────────────────────────┐
+  │ Step 1: 验证 known-fix 存在于目标分支           │
+  │         git merge-base --is-ancestor            │
+  └──────────────┬─────────────────────────────────┘
+                 ▼
+  ┌────────────────────────────────────────────────┐
+  │ Step 2: 创建回退工作区                          │
+  │   方案A: git worktree add /tmp/validate-xxx     │
+  │          known_fix~1                            │
+  │   方案B: 虚拟HEAD (修改搜索范围为 known_fix~1)   │
+  └──────────────┬─────────────────────────────────┘
+                 ▼
+  ┌────────────────────────────────────────────────┐
+  │ Step 3: 在"修复前"状态运行完整分析              │
+  │   Crawler → Analysis → Dependency → DryRun      │
+  │   预期:                                         │
+  │     - 修复搜索应返回"未合入"                    │
+  │     - 引入搜索应返回"已引入"(如有引入commit)    │
+  │     - Dependency 给出前置依赖列表               │
+  │     - DryRun 检测补丁是否可干净应用             │
+  └──────────────┬─────────────────────────────────┘
+                 ▼
+  ┌────────────────────────────────────────────────┐
+  │ Step 4: 对比工具输出 vs 真实合入记录            │
+  │   对比项见下方"度量指标"                       │
+  └──────────────┬─────────────────────────────────┘
+                 ▼
+  ┌────────────────────────────────────────────────┐
+  │ Step 5: 清理 worktree / 恢复状态               │
+  └────────────────────────────────────────────────┘
+```
+
+#### 实现方案对比
+
+| 方案 | 原理 | 优点 | 缺点 |
+|------|------|------|------|
+| **A: git worktree (推荐)** | `git worktree add` 在 `known_fix~1` 创建轻量工作区，指向修复前状态 | 非破坏性、可并行、现有代码无需改动（仅改 config 路径） | 需要额外磁盘空间（但 worktree 共享 .git 对象库，开销小）；缓存需为 worktree 单独构建 |
+| **B: 虚拟HEAD** | `GitRepoManager` 增加 `effective_head` 参数，所有 `git log branch` 替换为 `git log known_fix~1` | 无额外磁盘、无需新缓存 | 侵入性强，需修改 `search_by_subject`/`search_by_files`/`find_commit_by_id` 等所有搜索方法；缓存含修复后 commit 需过滤 |
+| **C: checkout 回退** | `git checkout known_fix~1` 后运行，结束后 `checkout` 回来 | 最简单 | 破坏性操作、不能并行、中断后需手动恢复 |
+
+**推荐方案 A（git worktree）**，理由：
+- 现有 Pipeline / Agent 代码完全不需要改动
+- 只需要在 `validate` 命令中：创建 worktree → 构造新 config 指向 worktree 路径 → 调用现有 Pipeline → 比对结果 → 清理
+- worktree 共享 `.git` 对象库，创建和删除都是秒级
+
+#### CLI 设计
+
+```bash
+# 单个 CVE 验证
+python cli.py validate \
+  --cve CVE-2024-26633 \
+  --target 5.10-hulk \
+  --known-fix abc123def456 \
+  --known-prereqs "commit1,commit2,commit3"
+
+# 批量验证（从 YAML 文件）
+python cli.py benchmark \
+  --file benchmarks.yaml \
+  --target 5.10-hulk
+```
+
+---
+
+### P0.2 — `benchmark` 命令：批量准确度度量
+
+**场景：** 收集 N 个已修复 CVE 的真实合入记录，批量运行回退验证，计算工具整体准确度。
+
+#### 基准数据集格式 (`benchmarks.yaml`)
+
+```yaml
+benchmarks:
+  - cve_id: CVE-2024-26633
+    known_fix_commit: abc123def456       # 本地仓库中真实修复的 commit
+    known_prereqs:                       # 可选: 真实先合入的前置 commit
+      - 111222333444
+      - 555666777888
+    notes: "ip6_tunnel 漏洞, 分析人员实际合入了2个前置补丁"
+
+  - cve_id: CVE-2024-50154
+    known_fix_commit: def456789012
+    known_prereqs: []                    # 空列表 = 直接合入无前置
+    notes: "可直接 cherry-pick, 无冲突"
+
+  - cve_id: CVE-2025-71235
+    known_fix_commit: 789012abc345
+    # 不提供 known_prereqs = 只验证搜索准确性, 不验证依赖
+```
+
+#### 度量指标体系
+
+```
+单个 CVE 验证指标:
+┌─────────────────────────────────────────────────────────────┐
+│ 1. 引入检测                                                 │
+│    intro_correct: 工具是否正确识别"漏洞已引入"               │
+│    intro_commit_match: 引入commit定位是否匹配(L1/L2/L3命中)  │
+│                                                             │
+│ 2. 修复检测 (回退后)                                        │
+│    fix_correctly_absent: 在修复前状态是否正确返回"未合入"    │
+│    (这一项应该100%正确, 否则说明回退机制有bug)               │
+│                                                             │
+│ 3. 前置依赖 (需提供 known_prereqs)                          │
+│    precision = |推荐 ∩ 真实| / |推荐|  (推荐中有多少是对的) │
+│    recall    = |推荐 ∩ 真实| / |真实|  (真实的有多少被找到)  │
+│    grade_accuracy: 强依赖是否确实是真实需要的                 │
+│    false_positives: 工具推荐但实际不需要的 commit 列表       │
+│    false_negatives: 实际需要但工具未推荐的 commit 列表       │
+│                                                             │
+│ 4. DryRun 准确性                                            │
+│    conflict_prediction: 在修复前状态,                        │
+│      若DryRun报告冲突 → 验证是否确实需要前置补丁             │
+│      若DryRun报告干净 → 验证是否确实可以直接合入             │
+└─────────────────────────────────────────────────────────────┘
+
+批量汇总指标:
+┌─────────────────────────────────────────────────────────────┐
+│ 引入检测准确率 = 正确识别引入的CVE数 / 总CVE数              │
+│ 修复检测准确率 = 正确返回"未合入"的CVE数 / 总CVE数          │
+│ 前置依赖平均精确率 (Avg Precision)                          │
+│ 前置依赖平均召回率 (Avg Recall)                             │
+│ 前置依赖 F1-Score = 2 × P × R / (P + R)                    │
+│ DryRun 预测准确率                                           │
+│ 各级搜索命中率分布 (L1/L2/L3/未命中)                       │
+└─────────────────────────────────────────────────────────────┘
+```
+
+#### CLI 输出设计
+
+```
+╭──────────────────── Benchmark Report ────────────────────╮
+│                                                          │
+│  基准集: 12 个 CVE, 目标: 5.10-hulk                      │
+│                                                          │
+│  引入检测准确率:      11/12  (91.7%)                     │
+│  修复检测准确率:      12/12 (100.0%)                     │
+│  前置依赖精确率:       8/10  (80.0%)                     │
+│  前置依赖召回率:       7/10  (70.0%)                     │
+│  前置依赖 F1:                (74.4%)                     │
+│  DryRun 预测准确率:    9/12  (75.0%)                     │
+│                                                          │
+│  搜索策略分布:                                           │
+│    L1 命中: 3 (25%)  L2 命中: 7 (58%)                    │
+│    L3 命中: 1 (8%)   未命中: 1 (8%)                      │
+│                                                          │
+╰──────────────────────────────────────────────────────────╯
+
+╭─ Per-CVE Detail ─────────────────────────────────────────╮
+│ # │ CVE              │ Intro │ Fix │ Prec │ Recall│ DryRun│
+│ 1 │ CVE-2024-26633   │  ✔    │  ✔  │ 100% │  67%  │  ✔   │
+│ 2 │ CVE-2024-50154   │  ✔    │  ✔  │ 100% │ 100%  │  ✔   │
+│ 3 │ CVE-2025-71235   │  ✘    │  ✔  │  -   │   -   │  ✘   │
+│ ...                                                      │
+╰──────────────────────────────────────────────────────────╯
+```
+
+#### 对比逻辑核心算法
+
+```python
+def compare_prereqs(recommended: List[str], actual: List[str]) -> dict:
+    """
+    recommended: 工具推荐的前置 commit ID 列表
+    actual:      真实合入的前置 commit ID 列表
+    比较时使用 short_id (前12位) 匹配
+    """
+    rec_set = {c[:12] for c in recommended}
+    act_set = {c[:12] for c in actual}
+
+    tp = rec_set & act_set          # 正确推荐
+    fp = rec_set - act_set          # 误报 (推荐了但实际不需要)
+    fn = act_set - rec_set          # 漏报 (需要但未推荐)
+
+    precision = len(tp) / len(rec_set) if rec_set else 1.0
+    recall = len(tp) / len(act_set) if act_set else 1.0
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+
+    return {
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "true_positives": sorted(tp),
+        "false_positives": sorted(fp),
+        "false_negatives": sorted(fn),
+    }
+```
+
+#### 实现步骤拆解
+
+| 步骤 | 内容 | 状态 |
+|------|------|------|
+| 0.1 | `GitRepoManager` 增加 `create_worktree` / `remove_worktree` 方法 | ✅ 完成 |
+| 0.2 | `cli.py` 新增 `validate` 命令，单 CVE 回退验证 + 对比报告 | ✅ 完成 |
+| 0.3 | `cli.py` 新增 `benchmark` 命令，批量验证 + 汇总统计 | ✅ 完成 |
+| 0.4 | `core/ui.py` 新增 `render_validate_report` / `render_benchmark_report` | ✅ 完成 |
+| 0.5 | 提供 `benchmarks.example.yaml` 示例 + 文档更新 | ✅ 完成 |
+| 0.6 | 收集首批 5-10 个已修复 CVE 构建初始基准集 | 需业务配合 |
+
+#### 已验证的技术决策
+
+1. **worktree 缓存策略**：worktree 使用 `use_cache=False`，避免缓存污染。单次验证约 30-40s，性能可接受
+2. **分支指定**：worktree 内 `branch="HEAD"` 确保 `git merge-base --is-ancestor` 正确排除修复后 commit
+3. **回滚点计算**：无 prereqs 时用 `known_fix~1`；有 prereqs 时自动找最早 prereq 的父节点
+4. **前置依赖比较**：同时使用 ID 前缀匹配 (12 chars) 和 Subject 相似度匹配 (≥80%)，覆盖 cherry-pick ID 偏移场景
+5. **CVE 数据缺失处理**：MITRE API 无 fix commit 时标记 "CVE上游数据不完整" 而非误报 FAIL
+
+---
+
 ## 当前遗留问题
 
 ### 1. `normalize_subject` 前缀处理不够灵活
@@ -135,13 +374,21 @@
 ## 建议执行路径
 
 ```
-近期 (P2, 1-2 周):
+最高优先 (P0, 1-2 周):
+  ├─ 0.1 GitRepoManager 增加 worktree 管理方法 (半天)
+  ├─ 0.2 validate 命令: 单 CVE 回退验证 + 对比报告 (2天)
+  ├─ 0.3 benchmark 命令: 批量验证 + 汇总统计 (1天)
+  ├─ 0.4 render_benchmark_report UI 渲染 (半天)
+  ├─ 0.5 benchmarks.example.yaml + 文档 (半天)
+  └─ 0.6 收集首批 5-10 个已修复 CVE 构建基准集 (需业务配合)
+
+近期 (P2, 2-3 周):
   ├─ 2.1 normalize_subject 正则化 (半天)
   ├─ 2.4 diff LRU 缓存 (半天)
   ├─ 3.1 Stable backport 版本自动匹配 (半天)
   └─ 4.1 + 4.2 verify 可配置 + 阈值配置化 (半天)
 
-中期 (P2-P3, 2-4 周):
+中期 (P2-P3, 3-5 周):
   ├─ 2.2 FTS5 搜索改 OR + 权重
   ├─ 2.3 L3 延迟 diff 获取
   ├─ 3.2 引入 commit 缺失降级策略

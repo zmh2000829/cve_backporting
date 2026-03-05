@@ -457,6 +457,119 @@ Step 5: DryRun.check (试应用)
 
 ---
 
+## 验证框架 (validate / benchmark)
+
+### 设计目标
+
+工具对"未修复 CVE"给出的前置依赖推荐**无法直接验证准确性**。验证框架通过**利用已修复 CVE 反向验证**：将仓库回退到修复前状态，运行完整分析流水线，将工具输出与真实合入记录进行对比，量化工具的置信度。
+
+### 核心技术：git worktree 回退
+
+采用 `git worktree add --detach` 方案，在 `known_fix~1`（或最早 prereq 之前）创建轻量工作区：
+
+```
+主仓库 (.git 对象库)
+  │
+  ├─ linux-5.10.y 分支 (完整历史, 包含修复)
+  │
+  └─ /tmp/cve_validate_xxx  (worktree, HEAD = known_fix~1)
+       └─ 共享 .git 对象库, 秒级创建/清理
+       └─ branch = "HEAD" → 所有 git log 自动限定到修复前
+```
+
+**技术优势：**
+
+| 方案 | 原理 | 优缺点 |
+|------|------|--------|
+| **git worktree (采用)** | 在 `known_fix~1` 创建 detached HEAD 工作区 | 非破坏性、可并行、现有 Pipeline 无需改动 |
+| 虚拟 HEAD | 修改所有搜索方法加 `effective_head` 参数 | 侵入性强、缓存需过滤 |
+| git checkout | 直接 checkout 到旧版本 | 破坏性、不可并行、中断需恢复 |
+
+**关键实现细节：**
+
+- worktree 内 GitRepoManager 配置 `branch="HEAD"`，确保 `git merge-base --is-ancestor commit_id HEAD` 正确排除修复后 commit
+- worktree 使用 `use_cache=False`，避免缓存污染（搜索直接走 `git log`）
+- 回滚点计算：无 `known_prereqs` 时用 `known_fix~1`；有时自动找最早 prereq 的父节点
+
+### validate 命令流程
+
+```
+输入: --cve CVE-xxx --target 5.10-hulk --known-fix <commit> [--known-prereqs "a,b,c"]
+  │
+  ├─ Step 1: 验证 known_fix 在目标分支上 (merge-base --is-ancestor)
+  │
+  ├─ Step 2: 计算回滚点
+  │   └─ 无 prereqs → known_fix~1
+  │   └─ 有 prereqs → 最早 prereq 的父节点 (merge-base 两两比较)
+  │
+  ├─ Step 3: git worktree add --detach /tmp/validate-xxx <rollback>
+  │
+  ├─ Step 4: 创建 worktree GitRepoManager (branch=HEAD, use_cache=False)
+  │          → Pipeline.analyze(cve_id, target) 运行完整分析
+  │
+  ├─ Step 5: 对比检查
+  │   ├─ fix_correctly_absent:  result.is_fixed == False
+  │   ├─ intro_detected:        result.is_vulnerable == True
+  │   ├─ dryrun_accurate:       冲突预测是否匹配 prereqs 需求
+  │   └─ prereq_metrics:        Precision / Recall / F1 (ID + Subject 匹配)
+  │
+  └─ Step 6: git worktree remove, 渲染报告
+```
+
+### 前置依赖比较算法
+
+```python
+def _compare_prereqs(recommended, known_ids, git_mgr, rv):
+    # 1. 获取 known_prereqs 的 subject 信息
+    # 2. 尝试 ID 前缀匹配 (前 12 字符)
+    # 3. 回退到 Subject 相似度匹配 (≥80%)，覆盖 cherry-pick ID 偏移
+    # 4. 计算 Precision = |TP| / |推荐|, Recall = |TP| / |真实|
+    #    F1 = 2PR / (P+R)
+```
+
+双重匹配策略解决了本地仓库 commit ID 与社区不同的问题：即使 cherry-pick 后 ID 完全变化，只要 subject 保持一致（>80% 相似度），仍可正确匹配。
+
+### benchmark 命令
+
+从 YAML 文件批量加载 CVE 基准集，逐一执行 validate，计算汇总指标：
+
+```yaml
+# benchmarks.yaml
+benchmarks:
+  - cve_id: CVE-2024-26633
+    known_fix_commit: "da23bd709b46"
+    known_prereqs: []
+    notes: "ip6_tunnel 漏洞"
+```
+
+**汇总指标体系：**
+
+| 指标 | 计算方式 |
+|------|---------|
+| 引入检测准确率 | 正确识别引入的 CVE 数 / 总数 |
+| 修复检测准确率 | 正确返回"未合入"的 CVE 数 / 总数 |
+| 前置依赖平均精确率 | Avg(Precision) |
+| 前置依赖平均召回率 | Avg(Recall) |
+| 前置依赖 F1-Score | Avg(F1) |
+| DryRun 预测准确率 | 预测正确的 CVE 数 / 有 DryRun 的总数 |
+| 搜索策略分布 | L1/L2/L3/未命中 各占比 |
+
+**CVE 数据不完整处理：** 当 MITRE API 无 fix commit 数据时，标记为"CVE上游数据不完整"而非误报 FAIL。
+
+### GitRepoManager worktree API
+
+```python
+create_worktree(rv, commit, worktree_path) -> bool
+    # git worktree add --detach <path> <commit>
+    # 在指定 commit 创建 detached HEAD 工作区
+
+remove_worktree(rv, worktree_path)
+    # git worktree remove --force <path>
+    # 清理工作区 (共享对象库不受影响)
+```
+
+---
+
 ## 已验证测试用例
 
 | CVE | 状态 | 验证点 |
@@ -464,6 +577,7 @@ Step 5: DryRun.check (试应用)
 | CVE-2024-26633 | 已修复 | L1找到引入commit, L2找到修复backport |
 | CVE-2025-40198 | N/A | Mainline识别准确性 (7个版本映射全部正确) |
 | CVE-2024-50154 | 已修复 | L1引入 + L2修复 + DryRun冲突检测 |
+| CVE-2024-26633 | validate PASS | worktree回退验证: 修复检测✔ 引入检测L1✔ DryRun✔ |
 
 ## 已知限制
 
@@ -471,3 +585,4 @@ Step 5: DryRun.check (试应用)
 2. 依赖分析基于文件/函数重叠，无法捕获数据结构变更等间接依赖
 3. DryRun只检测形式冲突，不检测语义冲突（编译/逻辑错误）
 4. MITRE API对部分老旧CVE可能缺少structured affected数据
+5. 验证框架的前置依赖比较依赖 ID/Subject 匹配，无法覆盖纯代码语义等价的情况

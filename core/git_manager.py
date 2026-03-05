@@ -182,6 +182,41 @@ class GitRepoManager:
         except Exception:
             return 0
 
+    # ─── worktree management ────────────────────────────────────────────
+
+    def create_worktree(self, rv: str, commit: str, worktree_path: str) -> bool:
+        """在指定 commit 创建 git worktree，返回是否成功"""
+        rp = self._get_repo_path(rv)
+        if not rp:
+            return False
+        try:
+            subprocess.run(
+                ["git", "worktree", "add", "--detach", worktree_path, commit],
+                cwd=rp, capture_output=True, text=True, timeout=60, check=True,
+            )
+            logger.info("创建 worktree: %s @ %s", worktree_path, commit[:12])
+            return True
+        except subprocess.CalledProcessError as e:
+            logger.error("创建 worktree 失败: %s", e.stderr.strip()[:200])
+            return False
+        except Exception as e:
+            logger.error("创建 worktree 异常: %s", e)
+            return False
+
+    def remove_worktree(self, rv: str, worktree_path: str):
+        """清理 git worktree"""
+        rp = self._get_repo_path(rv)
+        if not rp:
+            return
+        try:
+            subprocess.run(
+                ["git", "worktree", "remove", "--force", worktree_path],
+                cwd=rp, capture_output=True, text=True, timeout=30,
+            )
+            logger.info("清理 worktree: %s", worktree_path)
+        except Exception as e:
+            logger.warning("清理 worktree 失败: %s (可手动删除 %s)", e, worktree_path)
+
     # ─── cache build (optimized for 10M+ commits) ─────────────────────
 
     def get_latest_cached_commit(self, rv: str) -> Optional[str]:
