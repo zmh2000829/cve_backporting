@@ -113,7 +113,12 @@ def render_report(result) -> Panel:
 
     if r.fix_patch:
         grid.add_row("补丁 Subject", r.fix_patch.subject[:80])
-        grid.add_row("修改文件", ", ".join(r.fix_patch.modified_files[:5]))
+        if r.fix_patch.author:
+            grid.add_row("补丁 Author", r.fix_patch.author)
+        files_str = ", ".join(r.fix_patch.modified_files[:5])
+        if len(r.fix_patch.modified_files) > 5:
+            files_str += f" (+{len(r.fix_patch.modified_files)-5})"
+        grid.add_row("修改文件", files_str)
 
     grid.add_row("", "")
 
@@ -166,11 +171,11 @@ def render_report(result) -> Panel:
 
     report_parts = [grid]
 
-    # 搜索步骤
-    for label, sr in [("引入搜索", r.introduced_search), ("修复搜索", r.fix_search)]:
-        if sr and sr.steps:
+    # 搜索过程详情（含候选列表，供人工参考）
+    for label, sr in [("引入 Commit 搜索", r.introduced_search), ("修复 Commit 搜索", r.fix_search)]:
+        if sr and (sr.steps or sr.candidates):
             report_parts.append(Text(""))
-            report_parts.append(_render_search_steps(label, sr))
+            report_parts.append(_render_search_detail(label, sr))
 
     # 版本映射
     if r.cve_info and r.cve_info.version_commit_mapping:
@@ -180,7 +185,9 @@ def render_report(result) -> Panel:
     # 前置依赖详情表
     if r.prerequisite_patches:
         report_parts.append(Text(""))
-        report_parts.append(_render_prereq_table(r.prerequisite_patches))
+        report_parts.append(_render_prereq_table(r.prerequisite_patches,
+                                                  fix_files=r.fix_patch.modified_files if r.fix_patch else [],
+                                                  conflict_files=r.conflict_files))
 
     # DryRun 详情
     if r.dry_run and not r.dry_run.applies_cleanly and r.dry_run.error_output:
@@ -192,10 +199,15 @@ def render_report(result) -> Panel:
                  border_style=border, padding=(1, 2))
 
 
-def _render_search_steps(label: str, sr) -> Table:
-    """渲染搜索步骤 (L1/L2/L3)"""
+def _render_search_detail(label: str, sr) -> Panel:
+    """渲染搜索过程详情：步骤 + 候选列表"""
+    from rich.console import Group
+
+    parts = []
+
+    # 步骤表
     t = Table(box=box.SIMPLE, show_header=False, padding=(0, 1),
-              title=f"[dim]{label}[/]", expand=True, show_edge=False)
+              expand=True, show_edge=False)
     t.add_column("", width=3)
     t.add_column("级别", width=5)
     t.add_column("详情", ratio=4)
@@ -209,8 +221,43 @@ def _render_search_steps(label: str, sr) -> Table:
         else:
             icon = "[dim]⊘[/]"
         elapsed = f"[dim]{step.elapsed:.1f}s[/]" if step.elapsed > 0 else ""
-        t.add_row(icon, f"[bold]{step.level}[/]", step.detail[:60], elapsed)
-    return t
+        t.add_row(icon, f"[bold]{step.level}[/]", step.detail[:80], elapsed)
+    parts.append(t)
+
+    # 候选列表（人工参考核心数据）
+    if sr.candidates:
+        parts.append(Text(""))
+        ct = Table(box=box.SIMPLE, show_header=True, padding=(0, 1),
+                   expand=True, show_edge=False)
+        ct.add_column("#", width=3, justify="right", style="dim")
+        ct.add_column("Commit", width=14, style="cyan")
+        ct.add_column("相似度", width=8, justify="right")
+        ct.add_column("包含度", width=8, justify="right")
+        ct.add_column("匹配方式", width=12)
+        ct.add_column("Subject", ratio=3)
+
+        for i, c in enumerate(sr.candidates[:5], 1):
+            sim = c.get("similarity", c.get("confidence", 0))
+            sim_style = "green" if sim >= 0.85 else ("yellow" if sim >= 0.7 else "dim")
+            sim_str = f"[{sim_style}]{sim:.0%}[/]"
+
+            cont = c.get("containment")
+            if cont and cont > 0:
+                cont_style = "green" if cont >= 0.85 else ("yellow" if cont >= 0.7 else "dim")
+                cont_str = f"[{cont_style}]{cont:.0%}[/]"
+            else:
+                cont_str = "[dim]-[/]"
+
+            mtype = c.get("type", "subject")
+            subj = c.get("subject", "")[:55]
+            ct.add_row(str(i), c.get("commit_id", "")[:12], sim_str, cont_str, mtype, subj)
+        parts.append(ct)
+
+    border = "green" if sr.found else "dim"
+    status = "[green]命中[/]" if sr.found else "[yellow]未命中[/]"
+    return Panel(Group(*parts),
+                 title=f"[bold]{label}[/]  {status}",
+                 border_style=border, padding=(0, 2))
 
 
 def _render_version_map(cve_info) -> Table:
@@ -228,20 +275,45 @@ def _render_version_map(cve_info) -> Table:
     return t
 
 
-def _render_prereq_table(patches) -> Table:
-    """渲染前置依赖详情表"""
+def _render_prereq_table(patches, fix_files: list = None,
+                         conflict_files: list = None) -> Panel:
+    """渲染前置依赖详情面板（含分析上下文）"""
+    from rich.console import Group
     from core.models import PrerequisitePatch
+
+    parts = []
+
+    # 分析上下文信息
+    if fix_files or conflict_files:
+        ctx = Table(box=None, show_header=False, padding=(0, 1), expand=True, show_edge=False)
+        ctx.add_column("k", style="bold", width=14)
+        ctx.add_column("v")
+        if fix_files:
+            ctx.add_row("分析文件", ", ".join(fix_files[:6])
+                        + (f" (+{len(fix_files)-6})" if len(fix_files) > 6 else ""))
+        n_s = sum(1 for p in patches if p.grade == "strong")
+        n_m = sum(1 for p in patches if p.grade == "medium")
+        n_w = sum(1 for p in patches if p.grade == "weak")
+        summary_parts = []
+        if n_s:
+            summary_parts.append(f"[red bold]{n_s}强[/]")
+        if n_m:
+            summary_parts.append(f"[yellow]{n_m}中[/]")
+        if n_w:
+            summary_parts.append(f"[dim]{n_w}弱[/]")
+        ctx.add_row("依赖统计", " / ".join(summary_parts) + f"  (共 {len(patches)} 个)")
+        parts.append(ctx)
+        parts.append(Text(""))
 
     grade_icons = {"strong": "[red bold]强[/]", "medium": "[yellow]中[/]", "weak": "[dim]弱[/]"}
 
-    t = Table(box=box.ROUNDED, expand=True, border_style="yellow",
-              title="[bold]前置依赖[/]", title_style="bold", padding=(0, 1))
+    t = Table(box=box.SIMPLE, expand=True, padding=(0, 1), show_edge=False)
     t.add_column("#", width=3, justify="right")
     t.add_column("强度", width=5, justify="center")
     t.add_column("Commit", width=14, style="cyan")
     t.add_column("Subject", ratio=3)
     t.add_column("分值", width=6, justify="right")
-    t.add_column("Hunk重叠", width=9, justify="center")
+    t.add_column("Hunk重叠", width=12, justify="center")
     t.add_column("重叠函数", ratio=2)
 
     for i, p in enumerate(patches, 1):
@@ -264,7 +336,10 @@ def _render_prereq_table(patches) -> Table:
         if i >= 15:
             t.add_row("", "", "", f"[dim]... 共 {len(patches)} 条[/]", "", "", "")
             break
-    return t
+
+    parts.append(t)
+    return Panel(Group(*parts),
+                 title="[bold]前置依赖分析[/]", border_style="yellow", padding=(0, 2))
 
 
 def _render_dryrun_detail(dr) -> Panel:
@@ -361,20 +436,39 @@ def render_multi_strategy(msr, mode: str = "intro") -> Panel:
         elapsed = f"[dim]{s.elapsed:.1f}s[/]"
         stbl.add_row(icon, f"{s.level} {s.name}", res, conf, tgt, s.detail[:60], elapsed)
 
-    # 候选列表（取每个策略的top candidates）
+    # 候选列表（取每个策略的top candidates，展示完整分析数据供人工参考）
     cand_tables = []
     for s in r.strategies:
         if s.candidates:
+            is_l3 = s.level == "L3"
             ct = Table(box=box.SIMPLE, show_header=True, padding=(0, 1),
-                       title=f"[dim]{s.level} 候选[/]", expand=True, show_edge=False)
+                       title=f"[dim]{s.level} 候选列表 (人工参考)[/]", expand=True, show_edge=False)
+            ct.add_column("#", width=3, justify="right", style="dim")
             ct.add_column("Commit", width=14, style="cyan")
             ct.add_column("相似度", width=8, justify="right")
+            if is_l3:
+                ct.add_column("包含度", width=8, justify="right")
+                ct.add_column("匹配方式", width=14)
             ct.add_column("Subject", ratio=3)
-            for c in s.candidates[:3]:
+
+            for i, c in enumerate(s.candidates[:5], 1):
                 sim = c.get("similarity", c.get("confidence", 0))
                 sim_style = "green" if sim >= 0.85 else ("yellow" if sim >= 0.7 else "dim")
-                subj = c.get("subject", c.get("type", ""))[:50]
-                ct.add_row(c.get("commit_id", "")[:12], f"[{sim_style}]{sim:.0%}[/]", subj)
+                subj = c.get("subject", c.get("type", ""))[:55]
+
+                if is_l3:
+                    cont = c.get("containment")
+                    if cont and cont > 0:
+                        cont_style = "green" if cont >= 0.85 else ("yellow" if cont >= 0.7 else "dim")
+                        cont_str = f"[{cont_style}]{cont:.0%}[/]"
+                    else:
+                        cont_str = "[dim]-[/]"
+                    mtype = c.get("type", "diff")
+                    ct.add_row(str(i), c.get("commit_id", "")[:12],
+                               f"[{sim_style}]{sim:.0%}[/]", cont_str, mtype, subj)
+                else:
+                    ct.add_row(str(i), c.get("commit_id", "")[:12],
+                               f"[{sim_style}]{sim:.0%}[/]", subj)
             cand_tables.append(ct)
 
     # 综合判定（根据 mode 区分文案）
