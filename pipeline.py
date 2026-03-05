@@ -172,6 +172,7 @@ class Pipeline:
                     "context-C1": "上下文偏移已适配 (-C1)",
                     "3way": "3-way merge成功",
                     "regenerated": "上下文重生成成功",
+                    "conflict-adapted": "冲突已适配 (需人工审查)",
                 }
                 label = method_labels.get(dr.apply_method, dr.apply_method)
                 if dr.apply_method == "strict":
@@ -184,10 +185,24 @@ class Pipeline:
                         "已生成适配后的补丁 (原始改动不变, 仅更新 context lines)")
             else:
                 nc = len(dr.conflicting_files)
+                nh = len(dr.conflict_hunks)
                 cf = ", ".join(dr.conflicting_files[:3])
-                _cb("dryrun", "fail", f"{nc} 个文件冲突: {cf}")
-                result.recommendations.append(
-                    f"Dry-run: 补丁无法直接应用, {nc} 个文件冲突")
+                if nh:
+                    sev_counts = {}
+                    for h in dr.conflict_hunks:
+                        s = h.get("severity", "L3")
+                        sev_counts[s] = sev_counts.get(s, 0) + 1
+                    sev_str = " / ".join(
+                        f"{v}×{k}" for k, v in sorted(sev_counts.items()))
+                    _cb("dryrun", "fail",
+                        f"{nc} 文件冲突, {nh} hunk 已分析 ({sev_str})")
+                    result.recommendations.append(
+                        f"Dry-run: {nc} 个文件冲突, "
+                        f"冲突分析: {sev_str}")
+                else:
+                    _cb("dryrun", "fail", f"{nc} 个文件冲突: {cf}")
+                    result.recommendations.append(
+                        f"Dry-run: 补丁无法直接应用, {nc} 个文件冲突")
         else:
             _cb("dryrun", "skip", "已跳过")
 

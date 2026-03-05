@@ -159,10 +159,11 @@ class DryRunResult:
     apply_method: str = ""          # "strict" / "context-C1" / "3way" / "regenerated" / ""
     conflicting_files: List[str] = field(default_factory=list)
     conflict_details: List[Dict] = field(default_factory=list)
+    conflict_hunks: List[Dict] = field(default_factory=list)  # 逐hunk冲突分析
     error_output: str = ""
     stat_output: str = ""
     patch_file: str = ""
-    adapted_patch: str = ""         # 上下文重生成后的补丁内容
+    adapted_patch: str = ""         # 上下文重生成/冲突适配后的补丁内容
 
 
 @dataclass

@@ -713,9 +713,11 @@ def render_validate_report(result: dict):
         if applies:
             method_labels = {
                 "strict": "[green]strict — 原始补丁可直接应用[/]",
-                "context-C1": "[cyan]context-C1 — 上下文偏移已适配 (仅需1行context)[/]",
+                "context-C1": "[cyan]context-C1 — 上下文偏移已适配[/]",
                 "3way": "[cyan]3-way merge — 三方合并成功[/]",
                 "regenerated": "[bold cyan]regenerated — 上下文已重新生成[/]",
+                "conflict-adapted": "[bold yellow]conflict-adapted — "
+                                    "冲突已适配 (需人工审查语义)[/]",
             }
             status_text = method_labels.get(method, f"[green]可应用 ({method})[/]")
         else:
@@ -723,7 +725,8 @@ def render_validate_report(result: dict):
         dr_tbl.add_row("应用结果", status_text)
 
         if method and applies:
-            levels = ["strict", "context-C1", "3way", "regenerated"]
+            levels = ["strict", "context-C1", "3way",
+                      "regenerated", "conflict-adapted"]
             level_display = []
             for lvl in levels:
                 if lvl == method:
@@ -732,6 +735,10 @@ def render_validate_report(result: dict):
                 else:
                     level_display.append(f"[red]✘ {lvl}[/]")
             dr_tbl.add_row("尝试路径", " → ".join(level_display))
+        elif not applies:
+            dr_tbl.add_row("尝试路径",
+                           "[red]✘ strict → ✘ -C1 → ✘ 3way → "
+                           "✘ regenerated → ✘ conflict-adapted[/]")
 
         conf_files = dr_detail.get("conflicting_files", [])
         if conf_files:
@@ -756,12 +763,74 @@ def render_validate_report(result: dict):
         has_adapted = dr_detail.get("has_adapted_patch", False)
         if has_adapted:
             dr_tbl.add_row("", "")
+            adapt_msg = ("已生成适配补丁" if method == "conflict-adapted"
+                         else "已生成适配补丁 (context lines 已更新)")
             dr_tbl.add_row("[bold cyan]适配补丁[/]",
-                           "[bold cyan]已生成可直接应用的补丁 "
-                           "(核心 +/- 改动不变, context lines 已从目标文件更新)[/]")
+                           f"[bold cyan]{adapt_msg}[/]")
 
         sections.append(dr_tbl)
         sections.append(Text(""))
+
+        # ── 7b) 逐 Hunk 冲突分析 ─────────────────────
+        conflict_hunks = dr_detail.get("conflict_hunks", [])
+        if conflict_hunks:
+            sev_colors = {"L1": "yellow", "L2": "red", "L3": "bold red"}
+            sev_labels = {
+                "L1": "轻微 — 细微变动, 可自动适配",
+                "L2": "中度 — 部分重构, 需人工审查",
+                "L3": "重大 — 代码大幅改写, 需手动合入",
+            }
+
+            for hi, ch in enumerate(conflict_hunks[:8], 1):
+                sev = ch.get("severity", "L3")
+                sc = sev_colors.get(sev, "red")
+                file_path = ch.get("file", "")
+                sim = ch.get("similarity", 0)
+                loc = ch.get("location", "?")
+
+                hdr = Text()
+                hdr.append(f"  Hunk #{hi} ", style="bold")
+                hdr.append(f"[{sc}]{sev}[/{sc}] ", style="")
+                hdr.append(f"{file_path}:{loc}", style="dim")
+                if sim:
+                    hdr.append(f"  (行相似度 {sim:.0%})", style="dim")
+                sections.append(hdr)
+
+                reason = ch.get("reason", "")
+                if reason:
+                    sections.append(Text(f"    {reason}", style=sc))
+
+                # 变更行对比
+                changed = ch.get("changed_lines", [])
+                if changed:
+                    for cl in changed[:4]:
+                        ln = cl.get("line", "?")
+                        exp = cl.get("expected", "")
+                        act = cl.get("actual", "")
+                        t = Text()
+                        t.append(f"    L{ln} ", style="dim")
+                        t.append("补丁期望: ", style="bold")
+                        t.append(f"{exp[:70]}\n", style="red dim")
+                        t.append(f"         ", style="")
+                        t.append("文件实际: ", style="bold")
+                        t.append(f"{act[:70]}", style="cyan dim")
+                        sections.append(t)
+
+                # 补丁想改成的代码
+                added = ch.get("added", [])
+                if added and sev != "L1":
+                    add_text = Text()
+                    add_text.append("    补丁目标 (+): ", style="bold green")
+                    for al in added[:3]:
+                        add_text.append(f"\n      +{al[:70]}", style="green dim")
+                    sections.append(add_text)
+
+                sections.append(Text(""))
+
+            if len(conflict_hunks) > 8:
+                sections.append(Text(
+                    f"  ... 还有 {len(conflict_hunks) - 8} 个 hunk 未展示",
+                    style="dim"))
 
     # ── 6) 工具推荐的前置依赖 vs 真实前置依赖 ────────
     tool_prereqs = result.get("tool_prereqs", [])

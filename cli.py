@@ -619,13 +619,28 @@ def _diagnose_root_cause(diff_cmp: dict, dryrun_detail: dict,
                 "3way": "原始补丁 context 偏移, 已通过 3-way merge 成功适配",
                 "regenerated": "原始补丁 context 严重偏移, 已从目标文件重新生成 "
                                "context lines, 核心 +/- 改动行完全不变",
+                "conflict-adapted": "中间 commit 修改了补丁涉及的同一行代码, "
+                                    "已用目标文件实际内容替换补丁的 - 行、保留 + 行。"
+                                    "适配补丁可应用但需人工审查语义正确性",
             }.get(method, f"通过 {method} 适配成功")
             causes.append(f"上下文适配: {method_desc}")
         elif applies is False:
-            causes.append(
-                "代码一致但所有 DryRun 策略均失败 (strict → -C1 → 3way → 重生成) → "
-                "根因可能是: 中间 commit 不仅修改了相邻行, 还修改了补丁涉及的"
-                "同一行代码 (真正的代码冲突, 需要人工介入)")
+            # 检查是否有冲突分析数据
+            c_hunks = dryrun_detail.get("conflict_hunks", []) if dryrun_detail else []
+            if c_hunks:
+                sev_counts = {}
+                for h in c_hunks:
+                    s = h.get("severity", "L3")
+                    sev_counts[s] = sev_counts.get(s, 0) + 1
+                sev_str = ", ".join(f"{k}: {v}个hunk" for k, v in sorted(sev_counts.items()))
+                causes.append(
+                    f"所有自动适配策略均失败, 冲突分析: {sev_str}。"
+                    "中间 commit 修改了补丁涉及的同一行代码, "
+                    "见下方逐 hunk 冲突详情")
+            else:
+                causes.append(
+                    "代码一致但所有 DryRun 策略均失败 → "
+                    "中间 commit 修改了补丁涉及的同一行代码, 需要人工介入")
         elif applies is True and method == "strict" and known_prereqs:
             causes.append(
                 "代码一致且 strict 可干净应用，但实际修复时仍需前置补丁 → "
@@ -788,6 +803,7 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
                 "error_output": dr.error_output[:800] if dr.error_output else "",
                 "stat_output": dr.stat_output[:500] if dr.stat_output else "",
                 "has_adapted_patch": bool(dr.adapted_patch),
+                "conflict_hunks": dr.conflict_hunks,
             }
 
         # 获取 known_fix 的完整信息(stat + diff)

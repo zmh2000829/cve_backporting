@@ -102,11 +102,204 @@ class DryRunAgent:
                             patch.commit_id[:12])
                 return r3
 
-        # 全部失败
+        # 全部失败 → 逐 hunk 冲突分析
         r0.stat_output = self._get_stat(diff_text, target_version)
-        logger.info("[DryRun] 补丁 %s 所有策略均失败: %d 个文件冲突",
-                    patch.commit_id[:12], len(r0.conflicting_files))
+        analysis = self._analyze_conflicts(diff_text, rp_path)
+        r0.conflict_hunks = analysis["hunks"]
+
+        # 尝试冲突适配: 用目标文件实际行替换 patch 的 - 行, 保留 + 行
+        if analysis.get("adapted_diff"):
+            r4 = self._apply_check(analysis["adapted_diff"], rp_path, [])
+            if r4.applies_cleanly:
+                r4.apply_method = "conflict-adapted"
+                r4.stat_output = self._get_stat(
+                    analysis["adapted_diff"], target_version)
+                r4.adapted_patch = analysis["adapted_diff"]
+                r4.conflict_hunks = analysis["hunks"]
+                r4.error_output = (
+                    "(冲突适配成功: 补丁的 - 行已替换为目标文件实际内容, "
+                    "+ 行保持不变, 需人工确认语义正确性)")
+                logger.info("[DryRun] 冲突适配成功: %s",
+                            patch.commit_id[:12])
+                return r4
+
+        logger.info("[DryRun] 补丁 %s 所有策略均失败: %d 个文件冲突, "
+                    "%d 个 hunk 已分析",
+                    patch.commit_id[:12], len(r0.conflicting_files),
+                    len(r0.conflict_hunks))
         return r0
+
+    # ─── 冲突分析 (核心) ────────────────────────────────────────────
+
+    def _analyze_conflicts(self, diff_text: str, repo_path: str) -> dict:
+        """
+        逐 hunk 分析冲突原因。对每个 hunk:
+        1. 提取 patch 期望的 - 行 (expected)
+        2. 在目标文件中找到最近匹配位置
+        3. 比较 expected vs actual, 计算相似度
+        4. 分类冲突等级: L1 trivial / L2 minor / L3 significant
+        5. 尝试生成适配 patch: 用 actual 替换 expected, 保留 + 行
+        """
+        parsed = self._parse_hunks_for_regen(diff_text)
+        if not parsed:
+            return {"hunks": [], "adapted_diff": None}
+
+        hunk_analyses = []
+        adapted_parts = []
+        all_adaptable = True
+
+        for file_path, header_lines, hunks in parsed:
+            target_file = os.path.join(repo_path, file_path)
+
+            if not os.path.isfile(target_file):
+                for hh, hl in hunks:
+                    hunk_analyses.append({
+                        "file": file_path, "severity": "L3",
+                        "reason": "文件不存在",
+                        "expected": [], "actual": [], "added": [],
+                    })
+                all_adaptable = False
+                adapted_parts.append("\n".join(header_lines))
+                for hh, hl in hunks:
+                    adapted_parts.append(hh)
+                    adapted_parts.append("\n".join(hl))
+                continue
+
+            try:
+                with open(target_file, "r", encoding="utf-8",
+                          errors="replace") as f:
+                    file_lines = [l.rstrip("\n") for l in f.readlines()]
+            except Exception:
+                all_adaptable = False
+                adapted_parts.append("\n".join(header_lines))
+                for hh, hl in hunks:
+                    adapted_parts.append(hh)
+                    adapted_parts.append("\n".join(hl))
+                continue
+
+            adapted_parts.append("\n".join(header_lines))
+
+            for hunk_header, hunk_lines in hunks:
+                expected = [l[1:] for l in hunk_lines if l.startswith("-")]
+                added = [l[1:] for l in hunk_lines if l.startswith("+")]
+                context = [l[1:] if l.startswith(" ") else l
+                           for l in hunk_lines
+                           if not l.startswith("+") and not l.startswith("-")]
+
+                # 定位: 先用 expected 行, 再用 context 行
+                pos = None
+                if expected:
+                    pos = self._find_sequence_in_file(expected, file_lines)
+                if pos is None and context:
+                    pos = self._find_sequence_in_file(context, file_lines)
+                if pos is None and expected:
+                    # 最后尝试用首行 fuzzy 定位
+                    pos = self._find_best_single_line(
+                        expected[0], file_lines)
+
+                if pos is None:
+                    hunk_analyses.append({
+                        "file": file_path, "severity": "L3",
+                        "reason": "无法在目标文件中定位对应代码区域",
+                        "expected": expected[:8], "actual": [],
+                        "added": added[:8],
+                    })
+                    all_adaptable = False
+                    adapted_parts.append(hunk_header)
+                    adapted_parts.append("\n".join(hunk_lines))
+                    continue
+
+                # 提取目标文件中实际行
+                n_expected = len(expected) if expected else len(context)
+                actual = file_lines[pos:pos + n_expected]
+
+                # 逐行比较
+                sim = difflib.SequenceMatcher(
+                    None,
+                    [l.strip() for l in expected],
+                    [l.strip() for l in actual],
+                ).ratio() if expected else 0.0
+
+                changed_lines = []
+                for i, (e, a) in enumerate(
+                        zip(expected, actual)):
+                    if e.strip() != a.strip():
+                        changed_lines.append({
+                            "line": pos + i + 1,
+                            "expected": e.strip(),
+                            "actual": a.strip(),
+                        })
+
+                if sim >= 0.85:
+                    severity = "L1"
+                    reason = "轻微差异 — 仅部分行有细微变动, 可自动适配"
+                elif sim >= 0.50:
+                    severity = "L2"
+                    reason = "中度差异 — 部分代码被中间 commit 重构, 需人工审查适配结果"
+                else:
+                    severity = "L3"
+                    reason = "重大差异 — 代码被大幅改写, 需人工手动合入"
+
+                hunk_analyses.append({
+                    "file": file_path,
+                    "severity": severity,
+                    "similarity": round(sim, 3),
+                    "reason": reason,
+                    "expected": expected[:10],
+                    "actual": actual[:10],
+                    "added": added[:10],
+                    "changed_lines": changed_lines[:6],
+                    "location": pos + 1,
+                })
+
+                # 生成适配 hunk: 用 actual 替换 expected
+                if severity != "L3":
+                    ctx_before = 3
+                    start = max(0, pos - ctx_before)
+                    rebuilt = []
+                    for i in range(start, pos):
+                        rebuilt.append(" " + file_lines[i])
+                    for a_line in actual:
+                        rebuilt.append("-" + a_line)
+                    for a_line in added:
+                        rebuilt.append("+" + a_line)
+                    end_ctx = min(len(file_lines), pos + n_expected + 3)
+                    for i in range(pos + n_expected, end_ctx):
+                        rebuilt.append(" " + file_lines[i])
+
+                    old_c = sum(1 for l in rebuilt
+                                if l.startswith(" ") or l.startswith("-"))
+                    new_c = sum(1 for l in rebuilt
+                                if l.startswith(" ") or l.startswith("+"))
+                    new_hh = f"@@ -{start+1},{old_c} +{start+1},{new_c} @@"
+                    adapted_parts.append(new_hh)
+                    adapted_parts.append("\n".join(rebuilt))
+                else:
+                    all_adaptable = False
+                    adapted_parts.append(hunk_header)
+                    adapted_parts.append("\n".join(hunk_lines))
+
+        adapted_diff = None
+        if hunk_analyses and not all(h["severity"] == "L3"
+                                     for h in hunk_analyses):
+            adapted_diff = "\n".join(adapted_parts) + "\n"
+
+        return {"hunks": hunk_analyses, "adapted_diff": adapted_diff}
+
+    def _find_best_single_line(self, needle: str,
+                               haystack: List[str]) -> Optional[int]:
+        """用单行模糊匹配找最佳位置"""
+        needle_s = needle.strip()
+        if not needle_s:
+            return None
+        best_pos, best_ratio = None, 0.0
+        for i, line in enumerate(haystack):
+            r = difflib.SequenceMatcher(
+                None, needle_s, line.strip()).ratio()
+            if r > best_ratio and r >= 0.6:
+                best_ratio = r
+                best_pos = i
+        return best_pos
 
     # ─── 内部方法 ─────────────────────────────────────────────────
 
