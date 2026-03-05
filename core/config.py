@@ -34,10 +34,23 @@ DEFAULT_PATH_MAPPINGS = [
 
 
 @dataclass
+class LLMConfig:
+    enabled: bool = False
+    provider: str = "openai"
+    api_key: str = ""
+    base_url: str = "https://api.openai.com/v1"
+    model: str = "gpt-4o"
+    max_tokens: int = 2000
+    temperature: float = 0.3
+    timeout: int = 60
+
+
+@dataclass
 class Config:
     repositories: Dict[str, Dict[str, str]] = field(default_factory=dict)
     cache: CacheConfig = field(default_factory=CacheConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
+    llm: LLMConfig = field(default_factory=LLMConfig)
     path_mappings: list = field(default_factory=lambda: list(DEFAULT_PATH_MAPPINGS))
 
 
@@ -63,6 +76,12 @@ class ConfigLoader:
                 cfg.output = OutputConfig(**{
                     k: v for k, v in data["output"].items()
                     if k in ("output_dir", "log_level", "log_file")
+                })
+            if "llm" in data and isinstance(data["llm"], dict):
+                cfg.llm = LLMConfig(**{
+                    k: v for k, v in data["llm"].items()
+                    if k in ("enabled", "provider", "api_key", "base_url",
+                             "model", "max_tokens", "temperature", "timeout")
                 })
             if "path_mappings" in data and isinstance(data["path_mappings"], list):
                 cfg.path_mappings = data["path_mappings"]

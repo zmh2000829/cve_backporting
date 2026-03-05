@@ -590,17 +590,96 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
         if checks.get("dryrun_accurate") is False:
             issues.append("DryRun预测不准")
 
+        # ── 收集丰富的诊断数据 ──────────────────────────────
+        fix_patch_detail = {}
+        if result.fix_patch:
+            fp = result.fix_patch
+            fix_patch_detail = {
+                "commit_id": fp.commit_id[:12],
+                "subject": fp.subject,
+                "author": fp.author,
+                "modified_files": fp.modified_files,
+                "diff_lines": len(fp.diff_code.splitlines()) if fp.diff_code else 0,
+            }
+
+        dryrun_detail = {}
+        if result.dry_run:
+            dr = result.dry_run
+            applies = dr.applies_cleanly
+            dryrun_detail = {
+                "applies_cleanly": applies,
+                "conflicting_files": dr.conflicting_files,
+                "error_output": dr.error_output[:800] if dr.error_output else "",
+                "stat_output": dr.stat_output[:500] if dr.stat_output else "",
+            }
+            if applies and known_prereqs:
+                dryrun_detail["mismatch_reason"] = (
+                    "DryRun 判定补丁可干净应用, 但实际修复时需要先合入 "
+                    f"{len(known_prereqs)} 个前置补丁。可能原因: "
+                    "1) 前置补丁修改的是不同代码区域, 形式上不冲突但语义上有依赖; "
+                    "2) 3-way merge 掩盖了实际冲突; "
+                    "3) 前置补丁提供了编译/运行时依赖(数据结构/API变更)而非文本冲突")
+            elif not applies and not known_prereqs:
+                dryrun_detail["mismatch_reason"] = (
+                    "DryRun 判定补丁有冲突, 但实际修复时无需前置补丁即可合入。"
+                    "可能原因: 1) 本地仓库有独立修改使形式冲突但可手动解决; "
+                    "2) 实际合入使用了 3-way merge 或手动 resolve; "
+                    "3) 实际合入的补丁内容与社区版本有微调")
+
+        known_fix_detail = {}
+        kf_diff = git_mgr.run_git(
+            ["git", "show", "--stat", "--format=%H%n%s%n%an", known_fix],
+            tv, timeout=30)
+        if kf_diff:
+            lines = kf_diff.strip().split("\n")
+            if len(lines) >= 3:
+                known_fix_detail = {
+                    "commit_id": lines[0][:12],
+                    "subject": lines[1],
+                    "author": lines[2],
+                    "stat": "\n".join(lines[3:])[:500],
+                }
+
+        tool_prereqs_detail = [
+            {"commit_id": p.commit_id[:12], "subject": p.subject,
+             "grade": p.grade, "score": round(p.score, 2),
+             "overlap_hunks": p.overlap_hunks,
+             "adjacent_hunks": p.adjacent_hunks,
+             "overlap_funcs": p.overlap_funcs[:5]}
+            for p in (result.prerequisite_patches or [])
+        ]
+
+        known_prereqs_detail = []
+        for kid in known_prereqs:
+            info = git_mgr.run_git(
+                ["git", "log", "-1", "--format=%H\x1e%s\x1e%an", kid],
+                tv, timeout=10)
+            if info:
+                parts = info.strip().split("\x1e")
+                known_prereqs_detail.append({
+                    "commit_id": parts[0][:12],
+                    "subject": parts[1] if len(parts) > 1 else "",
+                    "author": parts[2] if len(parts) > 2 else "",
+                })
+            else:
+                known_prereqs_detail.append({"commit_id": kid[:12],
+                                             "subject": "", "author": ""})
+
+        recommendations = result.recommendations if result.recommendations else []
+
         return {
             "cve_id": cve_id, "known_fix": known_fix, "target": tv,
             "worktree_commit": rollback_hash[:16] if rollback_hash else rollback,
             "checks": checks,
             "overall_pass": overall and not issues,
             "summary": "; ".join(issues) if issues else "验证通过",
-            "tool_prereqs": [
-                {"commit_id": p.commit_id[:12], "subject": p.subject[:60],
-                 "grade": p.grade, "score": round(p.score, 2)}
-                for p in (result.prerequisite_patches or [])
-            ],
+            "issues": issues,
+            "fix_patch_detail": fix_patch_detail,
+            "dryrun_detail": dryrun_detail,
+            "known_fix_detail": known_fix_detail,
+            "tool_prereqs": tool_prereqs_detail,
+            "known_prereqs_detail": known_prereqs_detail,
+            "recommendations": recommendations,
         }
 
     finally:
@@ -625,6 +704,45 @@ def cmd_validate(args, config):
     result = _run_single_validate(
         config, args.cve_id, tv, args.known_fix, known_prereqs,
         git_mgr=git_mgr, show_stages=True)
+
+    # LLM 智能分析 (如果启用且有 FAIL 项)
+    llm_analysis = None
+    if not result.get("overall_pass") and config.llm.enabled:
+        from core.llm_analyzer import LLMAnalyzer
+        analyzer = LLMAnalyzer(config.llm)
+        fp_detail = result.get("fix_patch_detail", {})
+        dr_detail = result.get("dryrun_detail", {})
+        llm_ctx = {
+            "cve_id": args.cve_id,
+            "fix_patch_summary": (
+                f"Subject: {fp_detail.get('subject', 'N/A')}\n"
+                f"Files: {', '.join(fp_detail.get('modified_files', []))}\n"
+                f"Diff: {fp_detail.get('diff_lines', 0)} lines"
+            ) if fp_detail else "",
+            "dryrun_detail": (
+                f"applies_cleanly: {dr_detail.get('applies_cleanly')}\n"
+                f"conflicting_files: {dr_detail.get('conflicting_files', [])}\n"
+                f"error: {dr_detail.get('error_output', '')[:400]}"
+            ) if dr_detail else "",
+            "tool_prereqs": "\n".join(
+                f"- [{p['grade']}] {p['commit_id']} {p['subject'][:60]} "
+                f"(score={p['score']}, hunks={p.get('overlap_hunks',0)})"
+                for p in result.get("tool_prereqs", [])
+            ),
+            "known_prereqs_info": "\n".join(
+                f"- {p['commit_id']} {p['subject']}"
+                for p in result.get("known_prereqs_detail", [])
+            ) if result.get("known_prereqs_detail") else "无已知前置依赖",
+            "known_fix_diff_summary": (
+                f"Subject: {result.get('known_fix_detail', {}).get('subject', '')}\n"
+                f"{result.get('known_fix_detail', {}).get('stat', '')}"
+            ),
+            "issues": result.get("issues", []),
+        }
+        with console.status("[cyan]LLM 正在分析验证差异..."):
+            llm_analysis = analyzer.analyze_validate_diff(llm_ctx)
+        if llm_analysis:
+            result["llm_analysis"] = llm_analysis
 
     console.print()
     render_validate_report(result)

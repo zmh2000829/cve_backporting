@@ -507,13 +507,24 @@ Step 5: DryRun.check (试应用)
   ├─ Step 4: 创建 worktree GitRepoManager (branch=HEAD, use_cache=False)
   │          → Pipeline.analyze(cve_id, target) 运行完整分析
   │
-  ├─ Step 5: 对比检查
+  ├─ Step 5: 收集丰富诊断数据
+  │   ├─ fix_patch_detail:   社区修复补丁的 commit/subject/author/修改文件/diff行数
+  │   ├─ known_fix_detail:   本地仓库真实修复 commit 的 stat 输出 (文件变更摘要)
+  │   ├─ dryrun_detail:      应用结果/冲突文件/error输出/stat/不一致原因分析
+  │   ├─ tool_prereqs:       工具推荐的前置依赖 (含 grade/score/overlap_hunks/overlap_funcs)
+  │   └─ known_prereqs_detail: 真实合入的前置补丁信息 (commit/subject/author)
+  │
+  ├─ Step 6: 对比检查
   │   ├─ fix_correctly_absent:  result.is_fixed == False
   │   ├─ intro_detected:        result.is_vulnerable == True
   │   ├─ dryrun_accurate:       冲突预测是否匹配 prereqs 需求
   │   └─ prereq_metrics:        Precision / Recall / F1 (ID + Subject 匹配)
   │
-  └─ Step 6: git worktree remove, 渲染报告
+  ├─ Step 7: LLM 差异分析 (可选, 仅 FAIL 时触发)
+  │   └─ 将 fix_patch/dryrun/prereqs/known_fix 全部上下文发送给 LLM
+  │      请求分析: 1) 每个失败点根因 2) 前置依赖差异原因 3) DryRun 误判原因 4) 改进建议
+  │
+  └─ Step 8: git worktree remove, 渲染增强报告
 ```
 
 ### 前置依赖比较算法
@@ -555,6 +566,51 @@ benchmarks:
 | 搜索策略分布 | L1/L2/L3/未命中 各占比 |
 
 **CVE 数据不完整处理：** 当 MITRE API 无 fix commit 数据时，标记为"CVE上游数据不完整"而非误报 FAIL。
+
+### 增强验证报告
+
+验证报告采用分层展示，在 FAIL 场景下提供完整的差异诊断信息：
+
+| 报告区域 | 内容 | 何时显示 |
+|----------|------|---------|
+| 基本信息 | CVE / Known Fix / 目标分支 / Worktree Commit | 始终 |
+| 检查结果矩阵 | 修复检测 / 引入检测 / DryRun / P/R/F1 | 始终 |
+| 社区修复补丁 | commit / subject / author / 修改文件列表 / diff行数 | 有 fix_patch 时 |
+| 本地真实修复 | commit / subject / author / git show --stat | 始终 |
+| DryRun 详情 | 应用结果 / 冲突文件 / error 输出 / stat / **不一致原因** | 有 dryrun 时 |
+| 前置依赖对比 | 工具推荐列表 (grade/score/hunks/funcs) vs 真实合入列表 | 有 prereqs 时 |
+| 匹配详情 | TP / FP / FN 具体 commit ID | 有 prereq_metrics 时 |
+| LLM 差异分析 | AI 生成的根因分析和改进建议 (Markdown) | LLM 启用且 FAIL 时 |
+| 工具建议 | Pipeline 原生建议 | 有 recommendations 时 |
+
+**DryRun 不一致原因分析：**
+
+当 DryRun 预测与 known_prereqs 矛盾时，系统自动生成结构化原因分析：
+
+- **补丁可应用但存在已知前置依赖**：语义依赖（非文本冲突）、3-way merge 掩盖冲突、编译/运行时依赖
+- **补丁有冲突但无需前置依赖**：本地独立修改导致形式冲突、实际使用 3-way merge 或手动 resolve
+
+### LLM 智能分析 (可选)
+
+集成 OpenAI 兼容 API，在验证 FAIL 时自动分析差异原因：
+
+```yaml
+# config.yaml
+llm:
+  enabled: true
+  provider: "openai"         # 兼容 DeepSeek / Azure / vLLM 等
+  api_key: ""                # 或 LLM_API_KEY 环境变量
+  base_url: "https://api.openai.com/v1"
+  model: "gpt-4o"
+```
+
+LLM 接收完整上下文（社区补丁摘要、DryRun 输出、工具推荐、真实合入记录），输出：
+1. 逐项分析每个验证失败点的根因
+2. 工具推荐与真实情况的差异原因
+3. DryRun 预测不准确的可能原因
+4. 具体改进建议
+
+实现位于 `core/llm_analyzer.py`，使用标准 `urllib` 发送 HTTP 请求，不引入额外依赖。
 
 ### GitRepoManager worktree API
 

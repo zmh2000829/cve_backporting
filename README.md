@@ -33,7 +33,7 @@
 
 **多源补丁获取与容错** — `git.kernel.org`（主）→ `kernel.googlesource.com`（备，含重试）→ 本地 Git 对象库（兜底），三级回退 + 部分结果互补合并，单一数据源故障不影响分析流程。
 
-**闭环验证框架** — 基于 `git worktree` 的非破坏性回退验证：选取已修复 CVE，自动创建修复前快照，运行完整 Pipeline，与真实合入记录对比并量化 Precision / Recall / F1，支持批量基准测试汇总工具整体置信度。
+**闭环验证框架** — 基于 `git worktree` 的非破坏性回退验证：自动创建修复前快照、运行 Pipeline、与真实合入记录对比，输出完整差异诊断（社区补丁 vs 本地修复对比、DryRun 冲突根因分析、前置依赖 TP/FP/FN 明细），并支持集成 LLM API 进行 AI 根因分析。批量基准测试汇总 Precision / Recall / F1 量化工具整体置信度。
 
 ---
 
@@ -205,7 +205,7 @@ python cli.py validate \
   --known-prereqs "commit1,commit2"
 ```
 
-验证项：修复检测（应为未合入）、引入检测（应为已引入）、DryRun 预测、前置依赖 Precision / Recall / F1。
+验证报告展示完整的差异诊断：社区修复补丁 vs 本地真实修复 commit 对比、DryRun 冲突文件及不一致原因分析、工具推荐前置依赖 vs 真实合入记录并排对比（含 TP/FP/FN 匹配详情）。可选集成 LLM API 对 FAIL 项进行 AI 根因分析。
 
 ### 批量基准测试 (`benchmark`)
 

@@ -23,6 +23,19 @@ output:
   log_level: "INFO"               # DEBUG / INFO / WARNING / ERROR
   log_file: "./cve_analysis.log"
 
+# ─── LLM 分析 (可选) ──────────────────────────────────────────
+# 为 validate 命令的验证报告提供 AI 驱动的差异分析能力
+# 兼容 OpenAI 接口 (支持 DeepSeek / Azure / vLLM 等)
+llm:
+  enabled: false
+  provider: "openai"
+  api_key: ""                        # 也可通过 LLM_API_KEY 环境变量设置
+  base_url: "https://api.openai.com/v1"
+  model: "gpt-4o"
+  max_tokens: 2000
+  temperature: 0.3
+  timeout: 60
+
 # ─── 路径映射 ────────────────────────────────────────────────
 # 内核版本演进中目录结构会发生变化，导致社区补丁的文件路径
 # 在低版本仓库中不存在。配置映射规则后工具会自动双向翻译：

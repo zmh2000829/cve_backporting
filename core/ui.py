@@ -509,79 +509,243 @@ def render_multi_strategy(msr, mode: str = "intro") -> Panel:
 
 
 def render_validate_report(result: dict):
-    """渲染单个 CVE 验证报告"""
+    """渲染增强版单 CVE 验证报告，包含差异分析细节"""
+    from rich.console import Group
+    from rich.markdown import Markdown
+
     cve = result.get("cve_id", "N/A")
     known_fix = result.get("known_fix", "N/A")
+    overall = result.get("overall_pass", False)
+    sections = []
 
-    t = Table(box=box.SIMPLE, show_header=False, padding=(0, 1), expand=True)
-    t.add_column("K", width=20, style="bold")
-    t.add_column("V", ratio=1)
-    t.add_row("CVE", f"[cyan]{cve}[/]")
-    t.add_row("Known Fix", f"[cyan]{known_fix[:12]}[/]")
-    t.add_row("目标分支", result.get("target", "N/A"))
-    t.add_row("Worktree Commit", f"[dim]{result.get('worktree_commit', 'N/A')[:16]}[/]")
+    # ── 1) 基本信息 ──────────────────────────────────
+    info_tbl = Table(box=box.SIMPLE, show_header=False, padding=(0, 1), expand=True)
+    info_tbl.add_column("K", width=20, style="bold")
+    info_tbl.add_column("V", ratio=1)
+    info_tbl.add_row("CVE", f"[cyan]{cve}[/]")
+    info_tbl.add_row("Known Fix", f"[cyan]{known_fix[:12]}[/]")
+    info_tbl.add_row("目标分支", result.get("target", "N/A"))
+    info_tbl.add_row("Worktree Commit",
+                      f"[dim]{result.get('worktree_commit', 'N/A')[:16]}[/]")
+    sections.append(info_tbl)
+    sections.append(Text(""))
 
+    # ── 2) 检查结果矩阵 ──────────────────────────────
     checks = result.get("checks", {})
-    rows = []
+    ct = Table(box=box.ROUNDED, show_header=True, padding=(0, 1), expand=True)
+    ct.add_column("检查项", width=26, style="bold")
+    ct.add_column("结果", ratio=1)
 
     fix_absent = checks.get("fix_correctly_absent")
     if fix_absent is not None:
         icon = "[green]✔[/]" if fix_absent else "[red]✘[/]"
-        rows.append(("修复检测 (应为未合入)", icon))
+        ct.add_row("修复检测 (应为未合入)", icon)
 
-    intro_correct = checks.get("intro_detected")
-    if intro_correct is not None:
-        icon = "[green]✔[/]" if intro_correct else "[yellow]⊘[/]"
-        rows.append(("引入检测 (应为已引入)", icon))
+    intro = checks.get("intro_detected")
+    if intro is not None:
+        icon = "[green]✔[/]" if intro else "[yellow]⊘[/]"
+        ct.add_row("引入检测 (应为已引入)", icon)
 
-    intro_strategy = checks.get("intro_strategy", "")
-    if intro_strategy:
-        rows.append(("引入命中策略", f"[cyan]{intro_strategy}[/]"))
+    for label, key in [("引入命中策略", "intro_strategy"),
+                       ("修复命中策略", "fix_strategy")]:
+        v = checks.get(key, "")
+        if v:
+            ct.add_row(label, f"[cyan]{v}[/]")
 
-    fix_strategy = checks.get("fix_strategy", "")
-    if fix_strategy:
-        rows.append(("修复命中策略", f"[cyan]{fix_strategy}[/]"))
+    dryrun_ok = checks.get("dryrun_accurate")
+    if dryrun_ok is not None:
+        icon = "[green]✔[/]" if dryrun_ok else "[red]✘[/]"
+        ct.add_row("DryRun 预测", icon)
 
-    prereq = checks.get("prereq_metrics")
-    if prereq:
-        p, r, f1 = prereq["precision"], prereq["recall"], prereq["f1"]
-        p_style = "green" if p >= 0.8 else ("yellow" if p >= 0.5 else "red")
-        r_style = "green" if r >= 0.8 else ("yellow" if r >= 0.5 else "red")
-        rows.append(("前置依赖 精确率", f"[{p_style}]{p:.1%}[/]"))
-        rows.append(("前置依赖 召回率", f"[{r_style}]{r:.1%}[/]"))
-        rows.append(("前置依赖 F1", f"[bold]{f1:.1%}[/]"))
-        tp = prereq.get("true_positives", [])
-        fp = prereq.get("false_positives", [])
-        fn = prereq.get("false_negatives", [])
-        if tp:
-            rows.append(("  正确推荐 (TP)", f"[green]{len(tp)}[/]: " + ", ".join(s[:12] for s in tp[:5])))
-        if fp:
-            rows.append(("  误报 (FP)", f"[red]{len(fp)}[/]: " + ", ".join(s[:12] for s in fp[:5])))
-        if fn:
-            rows.append(("  漏报 (FN)", f"[yellow]{len(fn)}[/]: " + ", ".join(s[:12] for s in fn[:5])))
+    prereq_m = checks.get("prereq_metrics")
+    if prereq_m:
+        p, r, f1 = prereq_m["precision"], prereq_m["recall"], prereq_m["f1"]
+        ps = "green" if p >= 0.8 else ("yellow" if p >= 0.5 else "red")
+        rs = "green" if r >= 0.8 else ("yellow" if r >= 0.5 else "red")
+        ct.add_row("前置依赖 精确率", f"[{ps}]{p:.1%}[/]")
+        ct.add_row("前置依赖 召回率", f"[{rs}]{r:.1%}[/]")
+        ct.add_row("前置依赖 F1", f"[bold]{f1:.1%}[/]")
 
-    dryrun = checks.get("dryrun_accurate")
-    if dryrun is not None:
-        icon = "[green]✔[/]" if dryrun else "[red]✘[/]"
-        rows.append(("DryRun 预测", icon))
+    sections.append(ct)
+    sections.append(Text(""))
 
-    ct = Table(box=box.ROUNDED, show_header=True, padding=(0, 1), expand=True)
-    ct.add_column("检查项", width=26, style="bold")
-    ct.add_column("结果", ratio=1)
-    for k, v in rows:
-        ct.add_row(k, v)
+    # ── 3) 社区修复补丁详情 ──────────────────────────
+    fp_detail = result.get("fix_patch_detail", {})
+    if fp_detail:
+        fp_tbl = Table(box=box.SIMPLE_HEAVY, show_header=False, padding=(0, 1),
+                       expand=True, title="[bold]社区修复补丁[/]")
+        fp_tbl.add_column("K", width=16, style="bold")
+        fp_tbl.add_column("V", ratio=1)
+        fp_tbl.add_row("Commit", f"[cyan]{fp_detail.get('commit_id', '')}[/]")
+        fp_tbl.add_row("Subject", fp_detail.get("subject", ""))
+        fp_tbl.add_row("Author", fp_detail.get("author", ""))
+        files = fp_detail.get("modified_files", [])
+        fp_tbl.add_row("修改文件", f"[dim]{len(files)}[/] 个")
+        for f in files[:8]:
+            fp_tbl.add_row("", f"  [dim]{f}[/]")
+        if len(files) > 8:
+            fp_tbl.add_row("", f"  [dim]... +{len(files) - 8} 更多[/]")
+        fp_tbl.add_row("Diff 行数", str(fp_detail.get("diff_lines", 0)))
+        sections.append(fp_tbl)
+        sections.append(Text(""))
 
-    overall = result.get("overall_pass", False)
+    # ── 4) 真实修复 commit 详情 ──────────────────────
+    kf_detail = result.get("known_fix_detail", {})
+    if kf_detail:
+        kf_tbl = Table(box=box.SIMPLE_HEAVY, show_header=False, padding=(0, 1),
+                       expand=True, title="[bold]本地仓库真实修复 commit[/]")
+        kf_tbl.add_column("K", width=16, style="bold")
+        kf_tbl.add_column("V", ratio=1)
+        kf_tbl.add_row("Commit", f"[cyan]{kf_detail.get('commit_id', '')}[/]")
+        kf_tbl.add_row("Subject", kf_detail.get("subject", ""))
+        kf_tbl.add_row("Author", kf_detail.get("author", ""))
+        stat = kf_detail.get("stat", "")
+        if stat:
+            for line in stat.strip().split("\n")[:10]:
+                kf_tbl.add_row("", f"[dim]{line}[/]")
+        sections.append(kf_tbl)
+        sections.append(Text(""))
+
+    # ── 5) DryRun 详细分析 ───────────────────────────
+    dr_detail = result.get("dryrun_detail", {})
+    if dr_detail:
+        applies = dr_detail.get("applies_cleanly", None)
+        dr_tbl = Table(box=box.SIMPLE_HEAVY, show_header=False, padding=(0, 1),
+                       expand=True, title="[bold]DryRun 详情[/]")
+        dr_tbl.add_column("K", width=16, style="bold")
+        dr_tbl.add_column("V", ratio=1)
+        status_text = ("[green]可干净应用[/]" if applies
+                       else "[red]有冲突[/]")
+        dr_tbl.add_row("应用结果", status_text)
+
+        conf_files = dr_detail.get("conflicting_files", [])
+        if conf_files:
+            dr_tbl.add_row("冲突文件", f"[red]{len(conf_files)}[/] 个")
+            for cf in conf_files[:10]:
+                dr_tbl.add_row("", f"  [red]{cf}[/]")
+
+        err = dr_detail.get("error_output", "")
+        if err:
+            err_lines = err.strip().split("\n")[:8]
+            dr_tbl.add_row("错误输出", "")
+            for el in err_lines:
+                dr_tbl.add_row("", f"[dim red]{el}[/]")
+
+        stat = dr_detail.get("stat_output", "")
+        if stat:
+            stat_lines = stat.strip().split("\n")[:8]
+            dr_tbl.add_row("补丁统计", "")
+            for sl in stat_lines:
+                dr_tbl.add_row("", f"[dim]{sl}[/]")
+
+        mismatch = dr_detail.get("mismatch_reason", "")
+        if mismatch:
+            dr_tbl.add_row("", "")
+            dr_tbl.add_row("[yellow]不一致原因[/]", f"[yellow]{mismatch}[/]")
+
+        sections.append(dr_tbl)
+        sections.append(Text(""))
+
+    # ── 6) 工具推荐的前置依赖 vs 真实前置依赖 ────────
+    tool_prereqs = result.get("tool_prereqs", [])
+    known_prereqs = result.get("known_prereqs_detail", [])
+
+    if tool_prereqs or known_prereqs:
+        cmp_tbl = Table(box=box.ROUNDED, show_header=True, padding=(0, 1),
+                        expand=True, title="[bold]前置依赖对比[/]")
+
+        if tool_prereqs:
+            tp_tbl = Table(box=box.SIMPLE, show_header=True, padding=(0, 1),
+                           expand=True, title="[bold cyan]工具推荐[/]")
+            tp_tbl.add_column("#", width=3)
+            tp_tbl.add_column("Commit", width=14, style="cyan")
+            tp_tbl.add_column("Subject", ratio=1)
+            tp_tbl.add_column("等级", width=8)
+            tp_tbl.add_column("分数", width=6)
+            tp_tbl.add_column("重叠Hunk", width=9)
+            tp_tbl.add_column("重叠函数", width=12)
+            for i, p in enumerate(tool_prereqs[:15], 1):
+                grade = p.get("grade", "")
+                gs = {"strong": "bold red", "medium": "yellow",
+                      "weak": "dim"}.get(grade, "")
+                funcs = ", ".join(p.get("overlap_funcs", [])[:3])
+                tp_tbl.add_row(
+                    str(i), p.get("commit_id", ""),
+                    p.get("subject", "")[:55],
+                    f"[{gs}]{grade}[/]" if gs else grade,
+                    str(p.get("score", "")),
+                    str(p.get("overlap_hunks", 0)),
+                    funcs if funcs else "-",
+                )
+            if len(tool_prereqs) > 15:
+                tp_tbl.add_row("...", f"+{len(tool_prereqs)-15}", "", "", "", "", "")
+            sections.append(tp_tbl)
+            sections.append(Text(""))
+
+        if known_prereqs:
+            kp_tbl = Table(box=box.SIMPLE, show_header=True, padding=(0, 1),
+                           expand=True, title="[bold green]真实合入记录[/]")
+            kp_tbl.add_column("#", width=3)
+            kp_tbl.add_column("Commit", width=14, style="green")
+            kp_tbl.add_column("Subject", ratio=1)
+            kp_tbl.add_column("Author", width=20)
+            for i, kp in enumerate(known_prereqs, 1):
+                kp_tbl.add_row(
+                    str(i), kp.get("commit_id", ""),
+                    kp.get("subject", ""), kp.get("author", ""))
+            sections.append(kp_tbl)
+            sections.append(Text(""))
+
+        # TP/FP/FN 详情
+        if prereq_m:
+            tp_ids = prereq_m.get("true_positives", [])
+            fp_ids = prereq_m.get("false_positives", [])
+            fn_ids = prereq_m.get("false_negatives", [])
+            match_tbl = Table(box=box.SIMPLE, show_header=True, padding=(0, 1),
+                              expand=True, title="[bold]匹配详情[/]")
+            match_tbl.add_column("类别", width=18, style="bold")
+            match_tbl.add_column("数量", width=6)
+            match_tbl.add_column("Commit IDs", ratio=1)
+            match_tbl.add_row("[green]正确推荐 (TP)[/]", f"[green]{len(tp_ids)}[/]",
+                              ", ".join(s[:12] for s in tp_ids[:8]))
+            match_tbl.add_row("[red]误报 (FP)[/]", f"[red]{len(fp_ids)}[/]",
+                              ", ".join(s[:12] for s in fp_ids[:8]))
+            match_tbl.add_row("[yellow]漏报 (FN)[/]", f"[yellow]{len(fn_ids)}[/]",
+                              ", ".join(s[:12] for s in fn_ids[:8]))
+            sections.append(match_tbl)
+            sections.append(Text(""))
+
+    # ── 7) LLM 分析 ─────────────────────────────────
+    llm = result.get("llm_analysis", "")
+    if llm:
+        sections.append(Panel(
+            Markdown(llm),
+            title="[bold magenta]LLM 差异分析[/]",
+            border_style="magenta", padding=(1, 2),
+        ))
+        sections.append(Text(""))
+
+    # ── 8) 工具建议 ──────────────────────────────────
+    recs = result.get("recommendations", [])
+    if recs:
+        rec_text = Text()
+        for r in recs[:5]:
+            rec_text.append(f"  • {r}\n", style="dim")
+        sections.append(Panel(rec_text, title="[bold]工具建议[/]",
+                              border_style="dim", padding=(0, 2)))
+        sections.append(Text(""))
+
+    # ── 9) 最终裁定 ──────────────────────────────────
     verdict = Text()
     if overall:
         verdict.append("  ✔ PASS  ", style="bold white on green")
     else:
         verdict.append("  ✘ FAIL  ", style="bold white on red")
     verdict.append(f"  {result.get('summary', '')}", style="dim")
+    sections.append(verdict)
 
-    from rich.console import Group
     p = Panel(
-        Group(t, Text(""), ct, Text(""), verdict),
+        Group(*sections),
         title=f"[bold]验证报告 — {cve}[/]",
         border_style="green" if overall else "red",
         padding=(1, 2),
