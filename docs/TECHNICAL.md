@@ -41,7 +41,7 @@
 | `PrerequisitePatch` | 前置依赖补丁：commit_id、grade(strong/medium/weak)、score、overlap_hunks/funcs |
 | `StrategyResult` | check-intro/fix 单级策略结果：level、found、confidence、candidates |
 | `MultiStrategyResult` | 三级策略聚合结果：strategies、is_present、verdict |
-| `DryRunResult` | 试应用结果：applies_cleanly、conflicting_files |
+| `DryRunResult` | 试应用结果：applies_cleanly、apply_method、conflict_hunks、adapted_patch |
 | `AnalysisResult` | 完整分析结果（聚合以上所有） |
 
 ### git_manager.py — Git仓库管理
@@ -429,16 +429,124 @@ class PrerequisitePatch:
 
 ### DryRun Agent (`agents/dryrun.py`)
 
-**流程：**
-1. 从PatchInfo提取纯diff部分，写入临时文件
-2. `git apply --stat` 获取修改统计
-3. `git apply --check` 检测能否干净应用
-4. 若失败，解析stderr提取冲突文件列表
-5. 可选 `git apply --check --3way` 尝试3-way merge
+**设计背景：** 社区修复补丁无法直接 `git apply` 到目标分支的原因复杂多样：context lines 偏移（中间 commit 修改了相邻行）、补丁涉及的同一行被修改（真正的代码冲突）、跨版本路径不同。DryRun Agent 实现了**五级渐进式试应用策略**和**逐 hunk 冲突分析**，尽可能自动适配，无法自动解决时提供精确的冲突诊断。
 
-**冲突解析模式：**
-- `error: patch failed: <file>:<line>`
-- `error: <file>: does not exist in index`
+#### 五级自适应策略
+
+| Level | 策略 | 命令 / 算法 | 适用场景 |
+|-------|------|------------|---------|
+| L0 | `strict` | `git apply --check` | 补丁可直接应用 |
+| L1 | `context-C1` | `git apply --check -C1` | context lines 有偏移，仅需 1 行 context 匹配 |
+| L2 | `3way` | `git apply --check --3way` | base blob 可用时三方合并 |
+| L3 | `regenerated` | 从目标文件重建 context | context 严重偏移，核心 +/- 不变 |
+| L4 | `conflict-adapted` | 用目标文件实际行替换 - 行 | 中间 commit 修改了补丁涉及的同一行代码 |
+
+```
+check_adaptive(patch, target_version)
+  │
+  ├─ L0: git apply --check ──── 成功 → 返回 (strict)
+  │                              失败 ↓
+  ├─ L1: git apply --check -C1 ── 成功 → 返回 (context-C1)
+  │                              失败 ↓
+  ├─ L2: git apply --check --3way ── 成功 → 返回 (3way)
+  │                              失败 ↓
+  ├─ L3: _regenerate_patch ───── 成功 → 返回 (regenerated)
+  │   └─ 定位 - 行位置, 从目标文件提取正确 context, 重建 patch
+  │                              失败 ↓
+  ├─ L4: _analyze_conflicts ──── 冲突分析 + 尝试冲突适配
+  │   ├─ 逐 hunk 定位: expected vs actual
+  │   ├─ 分级: L1/L2/L3
+  │   ├─ 生成适配 patch: actual 替换 expected, 保留 +
+  │   └─ git apply --check ──── 成功 → 返回 (conflict-adapted, 需人工审查)
+  │                              失败 ↓
+  └─ 全部失败: 返回冲突分析报告 (conflict_hunks)
+```
+
+#### 路径映射感知
+
+DryRun Agent 接收 `PathMapper` 实例，在两个层面应用路径映射：
+
+1. **Diff 路径重写** (`_rewrite_diff_paths`)：将补丁中的 upstream 路径（如 `fs/smb/client/`）替换为 local 路径（如 `fs/cifs/`），确保 `git apply` 能找到正确文件
+2. **文件查找回退** (`_resolve_file_path`)：在 `_regenerate_patch` 和 `_analyze_conflicts` 中，先查原始路径，失败则尝试 `PathMapper.translate()` 的所有变体
+
+#### Stable Backport 补丁优先
+
+Pipeline 在执行 DryRun 前，自动从 CVE 的 `version_commit_mapping` 中查找与目标分支版本最匹配的 stable backport 补丁（如 5.10.237 的 backport），优先使用该补丁而非 mainline 补丁。Stable backport 的路径和 context 与目标分支更一致，大幅提高 DryRun 的成功率。
+
+```python
+# Pipeline._find_stable_patch 逻辑
+1. 从 target_version (如 "5.10-hulk") 提取 major.minor 前缀 "5.10"
+2. 在 version_commit_mapping 中查找 5.10.x 的 backport commit
+3. 通过 Crawler 获取该 commit 的补丁
+4. 若找到 → DryRun 使用此补丁; 否则 → 回退到最近低版本 backport 或 mainline
+```
+
+#### 核心定位算法 (`_locate_in_file`)
+
+五策略渐进式在目标文件中定位 hunk 对应的代码区域：
+
+```
+策略1: 精确序列匹配 (strip 后完全一致)
+  │   遍历文件, needle[0..n] == haystack[i..i+n]
+  │   失败 ↓
+策略2: 行号提示 + 窗口搜索
+  │   从 hunk header @@ -X,Y @@ 提取 X 作为起始提示
+  │   在 [X-100, X+100] 窗口内精确匹配, 失败则逐行模糊匹配
+  │   失败 ↓
+策略3: 全局逐行模糊匹配
+  │   对每个位置, 逐行计算 SequenceMatcher.ratio()
+  │   加权平均 ≥ 0.55 (长行权重高, 避免 { } 等短行干扰)
+  │   失败 ↓
+策略4: Context 行重试
+  │   用 hunk 的 context 行 (非 +/-) 重新搜索
+  │   失败 ↓
+策略5: 首行最佳匹配
+      用第一行 fuzzy match (ratio ≥ 0.6), 作为最后手段
+```
+
+**逐行模糊匹配评分 (`_line_fuzzy_score`)：**
+
+```python
+for a, b in zip(needle_lines, haystack_lines):
+    weight = max(1.0, len(a) / 10.0)  # 长行权重更高
+    if a == b:
+        score = 1.0
+    else:
+        score = SequenceMatcher(None, a, b).ratio()
+    total += weight * score
+return total / total_weight
+```
+
+此算法解决了之前的两个缺陷：
+- 旧算法要求 70% 行**精确一致**，对中间 commit 修改的行完全无容错
+- 新算法对每行独立计算相似度，即使部分行被修改也能定位正确位置
+
+#### 逐 Hunk 冲突分析
+
+当所有自动策略失败时，`_analyze_conflicts` 对每个冲突 hunk 执行：
+
+1. **定位**：用 `_locate_in_file` 找到 hunk 对应的文件位置
+2. **对比**：提取 patch 期望的 `-` 行 (expected) 和文件实际行 (actual)
+3. **逐行比较**：标记每一行的具体差异（补丁期望 vs 文件实际）
+4. **分级**：
+
+| 级别 | 行相似度 | 含义 | 处理方式 |
+|------|---------|------|---------|
+| **L1** | ≥ 85% | 轻微差异（变量重命名、空格变动等） | 自动适配 |
+| **L2** | 50-85% | 中度差异（部分重构） | 自动适配 + 人工审查 |
+| **L3** | < 50% | 重大差异（代码大幅改写） | 需人工手动合入 |
+
+5. **冲突适配补丁生成**（L1/L2 级 hunk）：
+   - 用目标文件 actual 行替换 patch 的 `-` 行
+   - 保留 patch 的 `+` 行不变
+   - 从目标文件提取正确的 context
+   - 尝试 `git apply --check`，成功则标记为 `conflict-adapted`
+
+**CLI 展示**：对分析人员展示完整的冲突诊断信息：
+- 尝试路径：`✘ strict → ✘ -C1 → ✘ 3way → ✘ regenerated → ✔ conflict-adapted`
+- 逐 hunk 冲突详情：文件路径、行号、冲突等级、行相似度
+- 每行差异对比：`补丁期望: xxx` vs `文件实际: yyy`
+- 补丁目标代码：patch 想改成什么 (`+` 行)
 
 ---
 
@@ -451,8 +559,9 @@ Step 3: Analysis.search (修复commit)
        └─ 若已合入 → 结束
        └─ 尝试 5.10 stable backport
 Step 4: Dependency.analyze (前置依赖)
-Step 5: DryRun.check (试应用)
-       └─ 若失败 → DryRun.check_with_3way
+Step 5: DryRun.check_adaptive (多级自适应试应用)
+       └─ 优先使用 stable backport 补丁
+       └─ strict → -C1 → 3way → regenerated → conflict-adapted
 ```
 
 ---
@@ -633,12 +742,13 @@ remove_worktree(rv, worktree_path)
 | CVE-2024-26633 | 已修复 | L1找到引入commit, L2找到修复backport |
 | CVE-2025-40198 | N/A | Mainline识别准确性 (7个版本映射全部正确) |
 | CVE-2024-50154 | 已修复 | L1引入 + L2修复 + DryRun冲突检测 |
-| CVE-2024-26633 | validate PASS | worktree回退验证: 修复检测✔ 引入检测L1✔ DryRun✔ |
+| CVE-2024-26633 | validate | worktree回退验证: 修复检测✔ 引入检测L1✔ DryRun 3way✔ |
+| CVE-2025-40196 | 未修复 | 引入L2✔, stable backport 补丁自动选择, DryRun 3way✔ |
 
 ## 已知限制
 
 1. Diff匹配(L3)需要逐commit获取diff，大量候选时较慢
 2. 依赖分析基于文件/函数重叠，无法捕获数据结构变更等间接依赖
-3. DryRun只检测形式冲突，不检测语义冲突（编译/逻辑错误）
+3. DryRun 的 `conflict-adapted` 策略生成的适配补丁**需人工审查语义正确性** — 它保证补丁能 apply，但不保证逻辑正确
 4. MITRE API对部分老旧CVE可能缺少structured affected数据
 5. 验证框架的前置依赖比较依赖 ID/Subject 匹配，无法覆盖纯代码语义等价的情况

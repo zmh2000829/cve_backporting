@@ -33,6 +33,8 @@
 
 **多源补丁获取与容错** — `git.kernel.org`（主）→ `kernel.googlesource.com`（备，含重试）→ 本地 Git 对象库（兜底），三级回退 + 部分结果互补合并，单一数据源故障不影响分析流程。
 
+**五级自适应 DryRun 引擎** — `strict → -C1 → 3way → 上下文重生成 → 冲突适配` 渐进式策略，自动应对从"context 偏移"到"同行代码被修改"的各类冲突场景。路径映射感知自动翻译跨版本文件路径，优先选用 stable backport 补丁。全部失败时提供**逐 hunk 冲突分析**：精确到行的"补丁期望 vs 文件实际"对比、L1/L2/L3 三级冲突严重度分级、可应用的冲突适配补丁自动生成。
+
 **闭环验证框架** — 基于 `git worktree` 的非破坏性回退验证：自动创建修复前快照、运行 Pipeline、与真实合入记录对比，输出完整差异诊断（社区补丁 vs 本地修复对比、DryRun 冲突根因分析、前置依赖 TP/FP/FN 明细），并支持集成 LLM API 进行 AI 根因分析。批量基准测试汇总 Precision / Recall / F1 量化工具整体置信度。
 
 ---
@@ -49,7 +51,7 @@ Crawler → Analysis → Dependency → DryRun
 
 - 识别 Mainline fix commit 和引入 commit，三级搜索定位目标仓库中的对应 commit
 - 判定漏洞是否已引入、修复补丁是否已合入
-- 若未合入：自动分析前置依赖补丁 + `git apply --check` 检测冲突
+- 若未合入：自动分析前置依赖补丁 + 五级自适应 DryRun 冲突预检（含逐 hunk 冲突分析）
 - 适用于日常安全巡检、CVE 修复评估、批量漏洞状态盘点
 
 ### 2. 漏洞引入检测 (`check-intro`)
@@ -128,7 +130,7 @@ cve_backporting/
 | **Crawler** | 从 MITRE API + googlesource 获取 CVE 元数据和补丁内容 |
 | **Analysis** | 三级搜索定位目标仓库中的对应 commit (ID → Subject → Diff) |
 | **Dependency** | 分析前置依赖补丁、Fixes 标签引用、函数级冲突检测 |
-| **DryRun** | `git apply --check` 试应用补丁，检测冲突文件 |
+| **DryRun** | 五级自适应试应用（strict → -C1 → 3way → 上下文重建 → 冲突适配）+ 逐 hunk 冲突分析 |
 
 ## 快速开始
 

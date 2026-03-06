@@ -40,7 +40,7 @@ class Pipeline:
         self.crawler = CrawlerAgent(api_timeout=api_timeout, git_mgr=git_mgr)
         self.analysis = AnalysisAgent(git_mgr, path_mapper=pm)
         self.dependency = DependencyAgent(git_mgr, path_mapper=pm)
-        self.dryrun = DryRunAgent(git_mgr)
+        self.dryrun = DryRunAgent(git_mgr, path_mapper=pm)
         self.git_mgr = git_mgr
 
     def analyze(self, cve_id: str, target_version: str,
@@ -163,8 +163,15 @@ class Pipeline:
         # ── Step 6: DryRun (多级自适应) ──────────────────────────────
         if enable_dryrun:
             _cb("dryrun", "running")
+            # 优先使用 stable backport 补丁 (路径和 context 更匹配目标分支)
+            dryrun_patch = fix_patch
+            bp_patch = self._find_stable_patch(cve_info, target_version)
+            if bp_patch and bp_patch.diff_code:
+                dryrun_patch = bp_patch
+                logger.info("[Pipeline] DryRun 使用 stable backport 补丁: %s",
+                            bp_patch.commit_id[:12])
             result.dry_run = self.dryrun.check_adaptive(
-                fix_patch, target_version)
+                dryrun_patch, target_version)
             dr = result.dry_run
             if dr.applies_cleanly:
                 method_labels = {
@@ -222,4 +229,35 @@ class Pipeline:
                                                    bp_patch.diff_code, tv)
                         if sr.found:
                             return sr
+        return None
+
+    def _find_stable_patch(self, cve_info, tv: str):
+        """
+        查找最匹配目标分支的 stable backport 补丁。
+        从 version_commit_mapping 中按版本距离排序, 优先选最近的 backport。
+        """
+        import re as _re
+
+        # 从 tv (如 "5.10-hulk") 提取 major.minor 前缀
+        m = _re.match(r"(\d+\.\d+)", tv)
+        target_prefix = m.group(1) if m else ""
+
+        # 精确匹配: 找 5.10.x 的 backport
+        if target_prefix:
+            for ver in sorted(cve_info.version_commit_mapping.keys(),
+                              reverse=True):
+                if ver.startswith(target_prefix):
+                    bp_cid = cve_info.version_commit_mapping[ver]
+                    if bp_cid != cve_info.fix_commit_id:
+                        patch = self.crawler.fetch_patch(bp_cid, tv)
+                        if patch and patch.diff_code:
+                            return patch
+
+        # 回退: 找最近的低版本 backport (如 5.10 没有则用 5.15/5.4)
+        for ver in sorted(cve_info.version_commit_mapping.keys()):
+            bp_cid = cve_info.version_commit_mapping[ver]
+            if bp_cid != cve_info.fix_commit_id:
+                patch = self.crawler.fetch_patch(bp_cid, tv)
+                if patch and patch.diff_code:
+                    return patch
         return None
