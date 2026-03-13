@@ -8,14 +8,23 @@ Dry-Run Agent — 多级补丁试应用 + 逐 hunk 冲突分析
   Level 3 - regenerated:      从目标文件重建 context (核心 +/- 不变)
   Level 4 - conflict-adapted: 用目标文件实际行替换 - 行, 保留 + 行
 
-核心定位算法 (_locate_in_file) — 七策略渐进式:
-  1. 精确序列匹配 (strip 后)
-  2. 函数名锚点搜索 (@@ 行提取函数名, 限定函数作用域)
-  3. 行号提示 ± 窗口搜索 (hunk header @@ -X,Y @@, ±200 行)
-  4. 全局逐行模糊匹配 (SequenceMatcher 加权评分)
-  5. Context 行重试
-  6. 逐行独立投票 (每行独立匹配, 取位置聚簇中位数)
-  7. 最长行最佳匹配
+核心定位:
+  _locate_hunk → (change_pos, n_remove):
+    change_pos = 变更点在目标文件中的行号
+    n_remove   = 需删除的行数 (纯添加 hunk 为 0)
+
+  定位策略:
+    1. 精确序列匹配 (removed 或 context)
+    2. 锚点行定位 (before-ctx 最后一行 / after-ctx 第一行)
+    3. 函数名作用域搜索
+    4. 行号提示 ± 窗口 (含跨 hunk 偏移传播)
+    5. 全局逐行模糊匹配
+    6. 分段 context (before / after 独立搜索)
+    7. 逐行投票 (起始位置众数)
+
+  补丁重建:
+    不再走查 hunk_lines (避免额外行导致错位),
+    直接从目标文件 change_pos 读取 context + 实际 - 行, 保留原始 + 行。
 """
 
 import os
@@ -23,7 +32,8 @@ import re
 import tempfile
 import logging
 import difflib
-from typing import List, Optional
+from collections import Counter
+from typing import List, Optional, Tuple
 
 from core.models import PatchInfo, DryRunResult
 from core.git_manager import GitRepoManager
@@ -34,9 +44,38 @@ _NOISE_PREFIXES = ("\\",)
 
 
 def _clean_hunk_lines(lines: List[str]) -> List[str]:
-    """过滤 hunk 中的非代码行 (如 '\\ No newline at end of file')"""
     return [l for l in lines
             if not any(l.startswith(p) for p in _NOISE_PREFIXES)]
+
+
+def _split_hunk_segments(hunk_lines: List[str]):
+    """
+    拆分 hunk → (ctx_before, removed, added, ctx_after)
+    ctx_before: 第一个变更行之前的 context
+    ctx_after:  最后一个变更行之后的 context
+    """
+    clean = _clean_hunk_lines(hunk_lines)
+    ctx_before, removed, added, ctx_after = [], [], [], []
+    first_change, last_change = len(clean), -1
+
+    for i, l in enumerate(clean):
+        if l.startswith("-") or l.startswith("+"):
+            first_change = min(first_change, i)
+            last_change = max(last_change, i)
+
+    for i, l in enumerate(clean):
+        if l.startswith("-"):
+            removed.append(l[1:])
+        elif l.startswith("+"):
+            added.append(l[1:])
+        else:
+            line = l[1:] if l.startswith(" ") else l
+            if i < first_change:
+                ctx_before.append(line)
+            elif i > last_change:
+                ctx_after.append(line)
+
+    return ctx_before, removed, added, ctx_after
 
 
 class DryRunAgent:
@@ -51,7 +90,8 @@ class DryRunAgent:
     def check(self, patch: PatchInfo, target_version: str) -> DryRunResult:
         return self._try_apply(patch, target_version, method="strict")
 
-    def check_with_3way(self, patch: PatchInfo, target_version: str) -> DryRunResult:
+    def check_with_3way(self, patch: PatchInfo,
+                        target_version: str) -> DryRunResult:
         result = self._try_apply(patch, target_version, method="strict")
         if result.applies_cleanly:
             return result
@@ -60,10 +100,6 @@ class DryRunAgent:
 
     def check_adaptive(self, patch: PatchInfo,
                        target_version: str) -> DryRunResult:
-        """
-        多级自适应试应用:
-          strict → -C1 → --3way → 上下文重生成 → 冲突适配
-        """
         base_result = self._prepare(patch, target_version)
         if base_result is not None:
             return base_result
@@ -72,7 +108,6 @@ class DryRunAgent:
         diff_text = self._extract_pure_diff(patch.diff_code)
         mapped_diff = self._rewrite_diff_paths(diff_text)
 
-        # Level 0: strict
         r0 = self._apply_check(mapped_diff, rp_path, [])
         if r0.applies_cleanly:
             r0.apply_method = "strict"
@@ -80,7 +115,6 @@ class DryRunAgent:
             logger.info("[DryRun] strict 成功: %s", patch.commit_id[:12])
             return r0
 
-        # Level 1: -C1
         r1 = self._apply_check(mapped_diff, rp_path, ["-C1"])
         if r1.applies_cleanly:
             r1.apply_method = "context-C1"
@@ -91,7 +125,6 @@ class DryRunAgent:
             logger.info("[DryRun] -C1 成功: %s", patch.commit_id[:12])
             return r1
 
-        # Level 2: --3way
         r2 = self._apply_check(mapped_diff, rp_path, ["--3way"])
         if r2.applies_cleanly:
             r2.apply_method = "3way"
@@ -100,7 +133,6 @@ class DryRunAgent:
             logger.info("[DryRun] 3-way merge成功: %s", patch.commit_id[:12])
             return r2
 
-        # Level 3: 上下文重生成
         adapted = self._regenerate_patch(mapped_diff, rp_path)
         if adapted:
             r3 = self._apply_check(adapted, rp_path, [])
@@ -108,12 +140,12 @@ class DryRunAgent:
                 r3.apply_method = "regenerated"
                 r3.stat_output = self._get_stat(adapted, target_version)
                 r3.adapted_patch = adapted
-                r3.error_output = "(上下文重生成成功: context 已从目标文件更新)"
+                r3.error_output = (
+                    "(上下文重生成成功: context 已从目标文件更新)")
                 logger.info("[DryRun] 上下文重生成成功: %s",
                             patch.commit_id[:12])
                 return r3
 
-        # Level 4: 逐 hunk 冲突分析 + 冲突适配
         r0.stat_output = self._get_stat(mapped_diff, target_version)
         analysis = self._analyze_conflicts(mapped_diff, rp_path)
         r0.conflict_hunks = analysis["hunks"]
@@ -176,7 +208,497 @@ class DryRunAgent:
                         return t
         return None
 
-    # ─── 冲突分析 ─────────────────────────────────────────────────
+    # ─── Hunk 定位 (核心) ────────────────────────────────────────
+
+    def _locate_hunk(self, hunk_lines: List[str],
+                     file_lines: List[str],
+                     hint_line: Optional[int],
+                     func_name: Optional[str]
+                     ) -> Tuple[Optional[int], int]:
+        """
+        定位 hunk 在目标文件中的变更点。
+        返回 (change_pos, n_remove):
+          - 有 - 行: change_pos = 第一个 removed 行的位置, n_remove = 删除行数
+          - 纯添加:  change_pos = 插入点, n_remove = 0
+        """
+        ctx_before, removed, added, ctx_after = \
+            _split_hunk_segments(hunk_lines)
+        ctx_all = ctx_before + ctx_after
+
+        if removed:
+            return self._locate_removal_hunk(
+                removed, ctx_before, ctx_after, file_lines,
+                hint_line, func_name)
+
+        return self._locate_addition_hunk(
+            ctx_before, ctx_after, added, file_lines,
+            hint_line, func_name)
+
+    def _locate_removal_hunk(self, removed, ctx_before, ctx_after,
+                             file_lines, hint_line, func_name):
+        n = len(removed)
+        ctx_all = ctx_before + ctx_after
+
+        # A) 直接搜索 removed 行
+        pos = self._locate_in_file(
+            removed, ctx_all, file_lines, hint_line, func_name)
+        if pos is not None:
+            return pos, n
+
+        # B) 用 before-context 最后一行做锚点
+        if ctx_before:
+            adj = ((hint_line + len(ctx_before) - 1)
+                   if hint_line else hint_line)
+            anchor = self._find_anchor_line(
+                ctx_before[-1], file_lines, adj)
+            if anchor is not None:
+                return anchor + 1, n
+
+        # C) 用 after-context 第一行做锚点
+        if ctx_after:
+            adj = ((hint_line + len(ctx_before) + n)
+                   if hint_line else hint_line)
+            anchor = self._find_anchor_line(
+                ctx_after[0], file_lines, adj)
+            if anchor is not None:
+                return max(0, anchor - n), n
+
+        return None, n
+
+    def _locate_addition_hunk(self, ctx_before, ctx_after, added,
+                              file_lines, hint_line, func_name):
+        """
+        纯添加 hunk: 找插入点。
+        关键策略: 以 before-context 最后一行或 after-context 第一行做锚点,
+        单行搜索比整段 context 搜索更鲁棒 (不受中间额外行打断影响)。
+        """
+        # A) before-context 最后一行做锚点 → 插入点 = 锚点 + 1
+        if ctx_before:
+            adj = ((hint_line + len(ctx_before) - 1)
+                   if hint_line else hint_line)
+            anchor = self._find_anchor_line(
+                ctx_before[-1], file_lines, adj)
+            if anchor is not None:
+                return anchor + 1, 0
+
+        # B) after-context 第一行做锚点 → 插入点 = 锚点
+        if ctx_after:
+            adj = ((hint_line + len(ctx_before))
+                   if hint_line else hint_line)
+            anchor = self._find_anchor_line(
+                ctx_after[0], file_lines, adj)
+            if anchor is not None:
+                return anchor, 0
+
+        # C) 整段 before-context 精确/模糊搜索
+        if ctx_before and len(ctx_before) >= 2:
+            pos = self._locate_in_file(
+                ctx_before, ctx_after, file_lines, hint_line, func_name)
+            if pos is not None:
+                return pos + len(ctx_before), 0
+
+        # D) 整段 after-context 精确/模糊搜索
+        if ctx_after and len(ctx_after) >= 2:
+            adj = ((hint_line + len(ctx_before))
+                   if hint_line else hint_line)
+            pos = self._locate_in_file(
+                ctx_after, ctx_before, file_lines, adj, func_name)
+            if pos is not None:
+                return pos, 0
+
+        # E) 全 hunk 非 + 行投票
+        non_plus = []
+        for l in _clean_hunk_lines([]):
+            pass
+        non_plus = [
+            l[1:] if (l.startswith("-") or l.startswith(" ")) else l
+            for l in _clean_hunk_lines(ctx_before + ctx_after)
+            if l.strip()
+        ]
+        if not non_plus:
+            non_plus = [l for l in ctx_before + ctx_after if l.strip()]
+        if non_plus and len(non_plus) >= 2:
+            pos = self._find_by_line_voting(non_plus, file_lines)
+            if pos is not None:
+                return pos + len(ctx_before), 0
+
+        return None, 0
+
+    def _find_anchor_line(self, line: str, file_lines: List[str],
+                          hint_line: Optional[int],
+                          window: int = 300) -> Optional[int]:
+        """
+        在 hint 附近精确或高阈值模糊查找单行。
+        返回匹配行在 file_lines 中的索引。
+        """
+        ns = line.strip()
+        if not ns or len(ns) < 4:
+            return None
+        hs = [l.strip() for l in file_lines]
+
+        if hint_line and hint_line > 0:
+            lo = max(0, hint_line - 1 - window)
+            hi = min(len(hs), hint_line - 1 + window)
+        else:
+            lo, hi = 0, len(hs)
+
+        for i in range(lo, hi):
+            if hs[i] == ns:
+                return i
+
+        best_pos, best_r = None, 0.0
+        for i in range(lo, hi):
+            r = difflib.SequenceMatcher(None, ns, hs[i]).ratio()
+            if r > best_r and r >= 0.85:
+                best_r = r
+                best_pos = i
+        return best_pos
+
+    # ─── 序列定位算法 ────────────────────────────────────────────
+
+    def _locate_in_file(self, expected: List[str],
+                        context_lines: List[str],
+                        file_lines: List[str],
+                        hint_line: Optional[int] = None,
+                        func_name: Optional[str] = None) -> Optional[int]:
+        search_seq = expected if expected else context_lines
+        if not search_seq:
+            return None
+        # 保留空行, 仅去噪声行
+        seq = [l for l in search_seq if not l.startswith("\\")]
+        if not seq:
+            return None
+
+        pos = self._find_exact_sequence(seq, file_lines)
+        if pos is not None:
+            return pos
+
+        if func_name:
+            pos = self._find_in_function(seq, file_lines, func_name)
+            if pos is not None:
+                return pos
+
+        if hint_line is not None and hint_line > 0:
+            pos = self._find_near_hint(seq, file_lines,
+                                       hint_line, window=300)
+            if pos is not None:
+                return pos
+
+        pos = self._find_fuzzy_sequence(seq, file_lines)
+        if pos is not None:
+            return pos
+
+        if expected and context_lines:
+            ctx = [l for l in context_lines if not l.startswith("\\")]
+            if ctx:
+                for m in (self._find_exact_sequence,
+                          self._find_fuzzy_sequence):
+                    pos = m(ctx, file_lines)
+                    if pos is not None:
+                        return pos
+
+        # 逐行投票: 过滤空行
+        vote_seq = [l for l in seq if l.strip()]
+        if vote_seq and len(vote_seq) >= 2:
+            pos = self._find_by_line_voting(vote_seq, file_lines)
+            if pos is not None:
+                return pos
+
+        best = max((l for l in seq if l.strip()),
+                   key=lambda l: len(l.strip()), default=None)
+        if best and len(best.strip()) >= 8:
+            return self._find_best_single_line(best, file_lines)
+
+        return None
+
+    # ─── 定位策略实现 ─────────────────────────────────────────────
+
+    def _find_exact_sequence(self, needle: List[str],
+                             haystack: List[str]) -> Optional[int]:
+        if not needle:
+            return None
+        n = len(needle)
+        ns = [l.strip() for l in needle]
+        hs = [l.strip() for l in haystack]
+        for i in range(len(hs) - n + 1):
+            if hs[i:i + n] == ns:
+                return i
+        return None
+
+    def _find_in_function(self, needle: List[str],
+                          haystack: List[str],
+                          func_name: str) -> Optional[int]:
+        fn_tokens = func_name.strip().split("(")[0].strip().split()
+        fn_key = fn_tokens[-1] if fn_tokens else ""
+        if not fn_key or len(fn_key) < 2:
+            return None
+
+        func_start = None
+        for i, line in enumerate(haystack):
+            if fn_key in line and ("(" in line or "{" in line):
+                func_start = i
+                break
+        if func_start is None:
+            return None
+
+        brace, found_open = 0, False
+        func_end = min(len(haystack), func_start + 500)
+        for i in range(func_start, func_end):
+            brace += haystack[i].count("{") - haystack[i].count("}")
+            if "{" in haystack[i]:
+                found_open = True
+            if found_open and brace <= 0:
+                func_end = i + 1
+                break
+
+        scope = haystack[func_start:func_end]
+        pos = self._find_exact_sequence(needle, scope)
+        if pos is not None:
+            return func_start + pos
+        pos = self._find_fuzzy_sequence(needle, scope)
+        if pos is not None:
+            return func_start + pos
+        return None
+
+    def _find_near_hint(self, needle: List[str],
+                        haystack: List[str],
+                        hint_line: int,
+                        window: int = 300) -> Optional[int]:
+        if not needle:
+            return None
+        n = len(needle)
+        ns = [l.strip() for l in needle]
+        hs = [l.strip() for l in haystack]
+
+        lo = max(0, hint_line - 1 - window)
+        hi = min(len(hs) - n + 1, hint_line - 1 + window)
+        if lo >= hi:
+            return None
+
+        for i in range(lo, hi):
+            if hs[i:i + n] == ns:
+                return i
+
+        threshold = 0.45 if n <= 3 else 0.50
+        best_pos, best_score = None, 0.0
+        for i in range(lo, hi):
+            s = self._line_fuzzy_score(ns, hs[i:i + n])
+            if s > best_score and s >= threshold:
+                best_score = s
+                best_pos = i
+        return best_pos
+
+    def _find_fuzzy_sequence(self, needle: List[str],
+                             haystack: List[str]) -> Optional[int]:
+        if not needle:
+            return None
+        n = len(needle)
+        if n > len(haystack):
+            return None
+        ns = [l.strip() for l in needle]
+        hs = [l.strip() for l in haystack]
+        threshold = 0.45 if n <= 3 else 0.50
+
+        best_pos, best_score = None, 0.0
+        for i in range(len(hs) - n + 1):
+            s = self._line_fuzzy_score(ns, hs[i:i + n])
+            if s > best_score and s >= threshold:
+                best_score = s
+                best_pos = i
+        return best_pos
+
+    def _find_by_line_voting(self, needle: List[str],
+                             haystack: List[str]) -> Optional[int]:
+        """
+        每行独立估算序列起始位置 estimate = file_pos - needle_idx, 取众数。
+        """
+        if not needle or len(needle) < 2:
+            return None
+        hs = [l.strip() for l in haystack]
+        estimates = []
+
+        for idx, nl in enumerate(needle):
+            ns = nl.strip()
+            if len(ns) < 5:
+                continue
+            found = False
+            for i, h in enumerate(hs):
+                if ns == h:
+                    estimates.append(i - idx)
+                    found = True
+                    break
+            if not found:
+                best_i, best_r = None, 0.0
+                for i, h in enumerate(hs):
+                    r = difflib.SequenceMatcher(None, ns, h).ratio()
+                    if r > best_r and r >= 0.70:
+                        best_r = r
+                        best_i = i
+                if best_i is not None:
+                    estimates.append(best_i - idx)
+
+        if len(estimates) < max(1, len(needle) * 0.3):
+            return None
+
+        vote = Counter(estimates)
+        best_est, best_cnt = vote.most_common(1)[0]
+        if best_cnt < max(1, len(estimates) * 0.3):
+            grouped = {}
+            for e in estimates:
+                bucket = round(e / 2) * 2
+                grouped[bucket] = grouped.get(bucket, 0) + 1
+            best_est = max(grouped, key=grouped.get)
+
+        return max(0, best_est)
+
+    @staticmethod
+    def _line_fuzzy_score(a_lines: List[str],
+                          b_lines: List[str]) -> float:
+        if not a_lines or len(a_lines) != len(b_lines):
+            return 0.0
+        total_w, total_s = 0.0, 0.0
+        for a, b in zip(a_lines, b_lines):
+            w = max(1.0, len(a) / 10.0)
+            s = 1.0 if a == b else difflib.SequenceMatcher(
+                None, a, b).ratio()
+            total_w += w
+            total_s += w * s
+        return total_s / total_w if total_w > 0 else 0.0
+
+    def _find_best_single_line(self, needle: str,
+                               haystack: List[str]) -> Optional[int]:
+        ns = needle.strip()
+        if not ns or len(ns) < 4:
+            return None
+        best_pos, best_r = None, 0.0
+        for i, line in enumerate(haystack):
+            r = difflib.SequenceMatcher(
+                None, ns, line.strip()).ratio()
+            if r > best_r and r >= 0.60:
+                best_r = r
+                best_pos = i
+        return best_pos
+
+    @staticmethod
+    def _compare_lines(expected, actual, pos):
+        if not expected:
+            return 0.0, []
+        sim = difflib.SequenceMatcher(
+            None, [l.strip() for l in expected],
+            [l.strip() for l in actual]).ratio()
+        changed = []
+        for i, (e, a) in enumerate(zip(expected, actual)):
+            if e.strip() != a.strip():
+                changed.append({
+                    "line": pos + i + 1,
+                    "expected": e.strip(),
+                    "actual": a.strip(),
+                })
+        return sim, changed
+
+    @staticmethod
+    def _parse_hunk_line_hint(hunk_header: str) -> Optional[int]:
+        m = re.match(r"@@\s+-(\d+)", hunk_header)
+        return int(m.group(1)) if m else None
+
+    @staticmethod
+    def _extract_func_from_hunk(hunk_header: str) -> Optional[str]:
+        m = re.match(r"@@[^@]+@@\s*(.+)", hunk_header)
+        if m:
+            name = m.group(1).strip()
+            if name and len(name) > 2:
+                return name
+        return None
+
+    # ─── 上下文重生成 (L3) ────────────────────────────────────────
+
+    def _regenerate_patch(self, diff_text: str,
+                          repo_path: str) -> Optional[str]:
+        parsed = self._parse_hunks_for_regen(diff_text)
+        if not parsed:
+            return None
+
+        new_parts = []
+        any_adapted = False
+
+        for file_path, header_lines, hunks in parsed:
+            resolved = self._resolve_file_path(file_path, repo_path)
+            if resolved is None:
+                new_parts.append("\n".join(header_lines))
+                for hh, hl in hunks:
+                    new_parts.append(hh)
+                    new_parts.append("\n".join(hl))
+                continue
+
+            try:
+                with open(resolved, "r", encoding="utf-8",
+                          errors="replace") as f:
+                    target_lines = [l.rstrip("\n") for l in f.readlines()]
+            except Exception:
+                new_parts.append("\n".join(header_lines))
+                for hh, hl in hunks:
+                    new_parts.append(hh)
+                    new_parts.append("\n".join(hl))
+                continue
+
+            new_parts.append("\n".join(header_lines))
+            file_offset = 0
+
+            for hunk_header, hunk_lines in hunks:
+                hint_line = self._parse_hunk_line_hint(hunk_header)
+                func_name = self._extract_func_from_hunk(hunk_header)
+                adj_hint = ((hint_line + file_offset) if hint_line
+                            else hint_line)
+
+                change_pos, n_remove = self._locate_hunk(
+                    hunk_lines, target_lines, adj_hint, func_name)
+
+                if change_pos is not None and hint_line:
+                    _, _, _, ctx_after = _split_hunk_segments(hunk_lines)
+                    ctx_before_len = len(_split_hunk_segments(
+                        hunk_lines)[0])
+                    expected_start = hint_line - 1
+                    actual_start = change_pos - ctx_before_len
+                    file_offset = actual_start - expected_start
+
+                if change_pos is None:
+                    new_parts.append(hunk_header)
+                    new_parts.append("\n".join(hunk_lines))
+                    continue
+
+                _, _, added_lines, _ = _split_hunk_segments(hunk_lines)
+                any_adapted = True
+
+                # 直接从目标文件构建补丁 (不走查 hunk_lines)
+                ctx_n = 3
+                start = max(0, change_pos - ctx_n)
+                rebuilt = []
+                for i in range(start, change_pos):
+                    rebuilt.append(" " + target_lines[i])
+                for i in range(change_pos,
+                               min(len(target_lines),
+                                   change_pos + n_remove)):
+                    rebuilt.append("-" + target_lines[i])
+                for a in added_lines:
+                    rebuilt.append("+" + a)
+                end = min(len(target_lines),
+                          change_pos + n_remove + ctx_n)
+                for i in range(change_pos + n_remove, end):
+                    rebuilt.append(" " + target_lines[i])
+
+                oc = sum(1 for l in rebuilt
+                         if l.startswith(" ") or l.startswith("-"))
+                nc = sum(1 for l in rebuilt
+                         if l.startswith(" ") or l.startswith("+"))
+                new_parts.append(
+                    f"@@ -{start + 1},{oc} +{start + 1},{nc} @@")
+                new_parts.append("\n".join(rebuilt))
+
+        if not any_adapted:
+            return None
+        return "\n".join(new_parts) + "\n"
+
+    # ─── 冲突分析 (L4) ───────────────────────────────────────────
 
     def _analyze_conflicts(self, diff_text: str, repo_path: str) -> dict:
         parsed = self._parse_hunks_for_regen(diff_text)
@@ -216,63 +738,85 @@ class DryRunAgent:
                 continue
 
             adapted_parts.append("\n".join(header_lines))
+            file_offset = 0
 
             for hunk_header, hunk_lines in hunks:
-                clean = _clean_hunk_lines(hunk_lines)
-                expected = [l[1:] for l in clean if l.startswith("-")]
-                added = [l[1:] for l in clean if l.startswith("+")]
-                ctx = [l[1:] if l.startswith(" ") else l
-                       for l in clean
-                       if not l.startswith("+") and not l.startswith("-")]
+                ctx_before, expected, added, ctx_after = \
+                    _split_hunk_segments(hunk_lines)
 
                 hint_line = self._parse_hunk_line_hint(hunk_header)
                 func_name = self._extract_func_from_hunk(hunk_header)
+                adj_hint = ((hint_line + file_offset) if hint_line
+                            else hint_line)
 
-                pos = self._locate_in_file(
-                    expected, ctx, file_lines, hint_line, func_name)
+                change_pos, n_remove = self._locate_hunk(
+                    hunk_lines, file_lines, adj_hint, func_name)
 
-                if pos is None:
+                if change_pos is not None and hint_line:
+                    expected_start = hint_line - 1
+                    actual_start = change_pos - len(ctx_before)
+                    file_offset = actual_start - expected_start
+
+                if change_pos is None:
                     hunk_analyses.append({
                         "file": file_path, "severity": "L3",
                         "reason": "无法在目标文件中定位对应代码区域",
                         "expected": expected[:8], "actual": [],
                         "added": added[:8], "hint_line": hint_line,
+                        "patch_ctx_before": ctx_before[:5],
+                        "patch_ctx_after": ctx_after[:5],
                     })
                     any_l3 = True
                     adapted_parts.append(hunk_header)
                     adapted_parts.append("\n".join(hunk_lines))
                     continue
 
-                n_exp = len(expected) if expected else len(ctx)
-                actual = file_lines[pos:pos + n_exp]
-                sim, changed = self._compare_lines(expected, actual, pos)
+                actual = file_lines[change_pos:change_pos + n_remove]
+                if n_remove > 0:
+                    sim, changed = self._compare_lines(
+                        expected, actual, change_pos)
+                else:
+                    sim, changed = 1.0, []
 
-                if sim >= 0.85:
+                if n_remove == 0:
+                    sev, reason = "L1", "纯添加 hunk — 已定位插入点"
+                elif sim >= 0.85:
                     sev, reason = "L1", "轻微差异 — 可自动适配"
                 elif sim >= 0.50:
-                    sev, reason = "L2", "中度差异 — 需人工审查适配结果"
+                    sev, reason = "L2", "中度差异 — 需人工审查"
                 else:
                     sev, reason = "L3", "重大差异 — 需人工手动合入"
 
+                snippet_lo = max(0, change_pos - 3)
+                snippet_hi = min(len(file_lines),
+                                 change_pos + n_remove + 3)
                 hunk_analyses.append({
                     "file": file_path, "severity": sev,
                     "similarity": round(sim, 3), "reason": reason,
                     "expected": expected[:10], "actual": actual[:10],
                     "added": added[:10], "changed_lines": changed[:6],
-                    "location": pos + 1,
+                    "location": change_pos + 1,
+                    "patch_ctx_before": ctx_before[:5],
+                    "patch_ctx_after": ctx_after[:5],
+                    "target_snippet":
+                        file_lines[snippet_lo:snippet_hi][:12],
                 })
 
                 if sev != "L3":
-                    start = max(0, pos - 3)
+                    ctx_n = 3
+                    start = max(0, change_pos - ctx_n)
                     rebuilt = []
-                    for i in range(start, pos):
+                    for i in range(start, change_pos):
                         rebuilt.append(" " + file_lines[i])
-                    for a in actual:
-                        rebuilt.append("-" + a)
+                    for i in range(change_pos,
+                                   min(len(file_lines),
+                                       change_pos + n_remove)):
+                        rebuilt.append("-" + file_lines[i])
                     for a in added:
                         rebuilt.append("+" + a)
-                    end = min(len(file_lines), pos + n_exp + 3)
-                    for i in range(pos + n_exp, end):
+                    end = min(len(file_lines),
+                              change_pos + n_remove + ctx_n)
+                    for i in range(change_pos + n_remove, end):
                         rebuilt.append(" " + file_lines[i])
                     oc = sum(1 for l in rebuilt
                              if l.startswith(" ") or l.startswith("-"))
@@ -292,378 +836,6 @@ class DryRunAgent:
             adapted_diff = "\n".join(adapted_parts) + "\n"
 
         return {"hunks": hunk_analyses, "adapted_diff": adapted_diff}
-
-    # ─── 核心定位算法 (七策略) ────────────────────────────────────
-
-    def _locate_in_file(self, expected: List[str],
-                        context_lines: List[str],
-                        file_lines: List[str],
-                        hint_line: Optional[int] = None,
-                        func_name: Optional[str] = None) -> Optional[int]:
-        """
-        七策略渐进式在目标文件中定位 hunk 对应位置:
-        1. 精确序列匹配
-        2. 函数名锚点 + 函数作用域内搜索
-        3. 行号提示 ± 窗口
-        4. 全局逐行模糊匹配
-        5. Context 行重试
-        6. 逐行独立投票
-        7. 最长行最佳匹配
-        """
-        search_seq = expected if expected else context_lines
-        if not search_seq:
-            return None
-        # 过滤空行和噪声
-        clean_seq = [l for l in search_seq
-                     if l.strip() and not l.startswith("\\")]
-        if not clean_seq:
-            clean_seq = search_seq
-
-        # 策略1: 精确序列匹配
-        pos = self._find_exact_sequence(clean_seq, file_lines)
-        if pos is not None:
-            return pos
-
-        # 策略2: 函数名锚点搜索
-        if func_name:
-            pos = self._find_in_function(clean_seq, file_lines, func_name)
-            if pos is not None:
-                return pos
-
-        # 策略3: 行号提示 ± 窗口 (±200 行)
-        if hint_line is not None and hint_line > 0:
-            pos = self._find_near_hint(clean_seq, file_lines,
-                                       hint_line, window=200)
-            if pos is not None:
-                return pos
-
-        # 策略4: 全局逐行模糊匹配
-        pos = self._find_fuzzy_sequence(clean_seq, file_lines)
-        if pos is not None:
-            return pos
-
-        # 策略5: Context 行重试
-        if expected and context_lines:
-            clean_ctx = [l for l in context_lines
-                         if l.strip() and not l.startswith("\\")]
-            if clean_ctx:
-                for m in (self._find_exact_sequence,
-                          self._find_fuzzy_sequence):
-                    pos = m(clean_ctx, file_lines)
-                    if pos is not None:
-                        return pos
-
-        # 策略6: 逐行独立投票
-        pos = self._find_by_line_voting(clean_seq, file_lines)
-        if pos is not None:
-            return pos
-
-        # 策略7: 最长行最佳匹配
-        best = max(clean_seq, key=lambda l: len(l.strip()), default=None)
-        if best and len(best.strip()) >= 6:
-            return self._find_best_single_line(best, file_lines)
-
-        return None
-
-    # ─── 定位策略实现 ─────────────────────────────────────────────
-
-    def _find_exact_sequence(self, needle: List[str],
-                             haystack: List[str]) -> Optional[int]:
-        if not needle:
-            return None
-        n = len(needle)
-        ns = [l.strip() for l in needle]
-        hs = [l.strip() for l in haystack]
-        for i in range(len(hs) - n + 1):
-            if hs[i:i + n] == ns:
-                return i
-        return None
-
-    def _find_in_function(self, needle: List[str],
-                          haystack: List[str],
-                          func_name: str) -> Optional[int]:
-        """
-        在目标文件中查找函数的起止范围，在该范围内搜索。
-        函数边界: 找到函数签名行, 向下追踪大括号平衡。
-        """
-        func_start, func_end = None, None
-        fn = func_name.strip().split("(")[0].strip()
-        if not fn or len(fn) < 2:
-            return None
-
-        for i, line in enumerate(haystack):
-            if fn in line and ("(" in line or "{" in line):
-                func_start = i
-                break
-        if func_start is None:
-            return None
-
-        # 从函数起始找到函数结束 (大括号平衡)
-        brace = 0
-        found_open = False
-        for i in range(func_start, min(len(haystack), func_start + 500)):
-            brace += haystack[i].count("{") - haystack[i].count("}")
-            if "{" in haystack[i]:
-                found_open = True
-            if found_open and brace <= 0:
-                func_end = i + 1
-                break
-        if func_end is None:
-            func_end = min(len(haystack), func_start + 300)
-
-        scope = haystack[func_start:func_end]
-        # 在函数作用域内精确搜索
-        pos = self._find_exact_sequence(needle, scope)
-        if pos is not None:
-            return func_start + pos
-        # 函数作用域内模糊搜索
-        pos = self._find_fuzzy_sequence(needle, scope)
-        if pos is not None:
-            return func_start + pos
-        return None
-
-    def _find_near_hint(self, needle: List[str],
-                        haystack: List[str],
-                        hint_line: int,
-                        window: int = 200) -> Optional[int]:
-        if not needle:
-            return None
-        n = len(needle)
-        ns = [l.strip() for l in needle]
-        hs = [l.strip() for l in haystack]
-
-        lo = max(0, hint_line - 1 - window)
-        hi = min(len(hs) - n + 1, hint_line - 1 + window)
-        if lo >= hi:
-            return None
-
-        for i in range(lo, hi):
-            if hs[i:i + n] == ns:
-                return i
-
-        best_pos, best_score = None, 0.0
-        for i in range(lo, hi):
-            s = self._line_fuzzy_score(ns, hs[i:i + n])
-            if s > best_score and s >= 0.50:
-                best_score = s
-                best_pos = i
-        return best_pos
-
-    def _find_fuzzy_sequence(self, needle: List[str],
-                             haystack: List[str]) -> Optional[int]:
-        if not needle:
-            return None
-        n = len(needle)
-        if n > len(haystack):
-            return None
-        ns = [l.strip() for l in needle]
-        hs = [l.strip() for l in haystack]
-        # 短序列降低阈值
-        threshold = 0.45 if n <= 3 else 0.50
-
-        best_pos, best_score = None, 0.0
-        for i in range(len(hs) - n + 1):
-            s = self._line_fuzzy_score(ns, hs[i:i + n])
-            if s > best_score and s >= threshold:
-                best_score = s
-                best_pos = i
-        return best_pos
-
-    def _find_by_line_voting(self, needle: List[str],
-                             haystack: List[str]) -> Optional[int]:
-        """
-        逐行独立匹配, 收集每行在文件中的位置, 取聚簇中位数。
-        解决"序列整体不匹配但大部分行可独立找到"的场景。
-        """
-        if not needle or len(needle) < 2:
-            return None
-        hs = [l.strip() for l in haystack]
-        positions = []
-
-        for idx, nl in enumerate(needle):
-            ns = nl.strip()
-            if len(ns) < 6:
-                continue
-            found = False
-            for i, h in enumerate(hs):
-                if ns == h:
-                    positions.append((i, idx))
-                    found = True
-                    break
-            if not found:
-                best_i, best_r = None, 0.0
-                for i, h in enumerate(hs):
-                    r = difflib.SequenceMatcher(None, ns, h).ratio()
-                    if r > best_r and r >= 0.70:
-                        best_r = r
-                        best_i = i
-                if best_i is not None:
-                    positions.append((best_i, idx))
-
-        if len(positions) < max(1, len(needle) * 0.3):
-            return None
-
-        # 找最大聚簇: 按文件行号排序, 找连续递增的最长子序列
-        positions.sort()
-        file_positions = [p[0] for p in positions]
-
-        if len(file_positions) == 1:
-            return max(0, file_positions[0] - positions[0][1])
-
-        # 用中位数估算起始位置
-        median = file_positions[len(file_positions) // 2]
-        first_needle_idx = positions[len(positions) // 2][1]
-        return max(0, median - first_needle_idx)
-
-    @staticmethod
-    def _line_fuzzy_score(a_lines: List[str],
-                          b_lines: List[str]) -> float:
-        if not a_lines or len(a_lines) != len(b_lines):
-            return 0.0
-        total_w, total_s = 0.0, 0.0
-        for a, b in zip(a_lines, b_lines):
-            w = max(1.0, len(a) / 10.0)
-            s = 1.0 if a == b else difflib.SequenceMatcher(
-                None, a, b).ratio()
-            total_w += w
-            total_s += w * s
-        return total_s / total_w if total_w > 0 else 0.0
-
-    def _find_best_single_line(self, needle: str,
-                               haystack: List[str]) -> Optional[int]:
-        ns = needle.strip()
-        if not ns or len(ns) < 4:
-            return None
-        best_pos, best_r = None, 0.0
-        for i, line in enumerate(haystack):
-            r = difflib.SequenceMatcher(
-                None, ns, line.strip()).ratio()
-            if r > best_r and r >= 0.60:
-                best_r = r
-                best_pos = i
-        return best_pos
-
-    @staticmethod
-    def _compare_lines(expected: List[str], actual: List[str],
-                       pos: int) -> tuple:
-        if not expected:
-            return 0.0, []
-        sim = difflib.SequenceMatcher(
-            None, [l.strip() for l in expected],
-            [l.strip() for l in actual]).ratio()
-        changed = []
-        for i, (e, a) in enumerate(zip(expected, actual)):
-            if e.strip() != a.strip():
-                changed.append({
-                    "line": pos + i + 1,
-                    "expected": e.strip(),
-                    "actual": a.strip(),
-                })
-        return sim, changed
-
-    @staticmethod
-    def _parse_hunk_line_hint(hunk_header: str) -> Optional[int]:
-        m = re.match(r"@@\s+-(\d+)", hunk_header)
-        return int(m.group(1)) if m else None
-
-    @staticmethod
-    def _extract_func_from_hunk(hunk_header: str) -> Optional[str]:
-        """从 @@ ... @@ function_name 提取函数名"""
-        m = re.match(r"@@[^@]+@@\s*(.+)", hunk_header)
-        if m:
-            name = m.group(1).strip()
-            if name and len(name) > 2:
-                return name
-        return None
-
-    # ─── 上下文重生成 ─────────────────────────────────────────────
-
-    def _regenerate_patch(self, diff_text: str,
-                          repo_path: str) -> Optional[str]:
-        parsed = self._parse_hunks_for_regen(diff_text)
-        if not parsed:
-            return None
-
-        new_parts = []
-        any_adapted = False
-
-        for file_path, header_lines, hunks in parsed:
-            resolved = self._resolve_file_path(file_path, repo_path)
-            if resolved is None:
-                new_parts.append("\n".join(header_lines))
-                for hh, hl in hunks:
-                    new_parts.append(hh)
-                    new_parts.append("\n".join(hl))
-                continue
-
-            try:
-                with open(resolved, "r", encoding="utf-8",
-                          errors="replace") as f:
-                    target_lines = [l.rstrip("\n") for l in f.readlines()]
-            except Exception:
-                new_parts.append("\n".join(header_lines))
-                for hh, hl in hunks:
-                    new_parts.append(hh)
-                    new_parts.append("\n".join(hl))
-                continue
-
-            new_parts.append("\n".join(header_lines))
-
-            for hunk_header, hunk_lines in hunks:
-                clean = _clean_hunk_lines(hunk_lines)
-                removed = [l[1:] for l in clean if l.startswith("-")]
-                ctx = [l[1:] if l.startswith(" ") else l
-                       for l in clean
-                       if not l.startswith("+") and not l.startswith("-")]
-
-                hint_line = self._parse_hunk_line_hint(hunk_header)
-                func_name = self._extract_func_from_hunk(hunk_header)
-                search_seq = removed if removed else ctx
-                pos = self._locate_in_file(
-                    search_seq, ctx, target_lines, hint_line, func_name)
-
-                if pos is None:
-                    new_parts.append(hunk_header)
-                    new_parts.append("\n".join(hunk_lines))
-                    continue
-
-                any_adapted = True
-                start = max(0, pos - 3)
-                rebuilt = []
-                for i in range(start, pos):
-                    rebuilt.append(" " + target_lines[i])
-
-                idx = pos
-                for hl in hunk_lines:
-                    if hl.startswith("\\"):
-                        continue
-                    if hl.startswith("-"):
-                        rebuilt.append(hl)
-                        idx += 1
-                    elif hl.startswith("+"):
-                        rebuilt.append(hl)
-                    else:
-                        if idx < len(target_lines):
-                            rebuilt.append(" " + target_lines[idx])
-                            idx += 1
-                        else:
-                            rebuilt.append(hl)
-
-                end_ctx = min(len(target_lines), idx + 3)
-                for i in range(idx, end_ctx):
-                    rebuilt.append(" " + target_lines[i])
-
-                oc = sum(1 for l in rebuilt
-                         if l.startswith(" ") or l.startswith("-"))
-                nc = sum(1 for l in rebuilt
-                         if l.startswith(" ") or l.startswith("+"))
-                new_parts.append(
-                    f"@@ -{start + 1},{oc} +{start + 1},{nc} @@")
-                new_parts.append("\n".join(rebuilt))
-
-        if not any_adapted:
-            return None
-        return "\n".join(new_parts) + "\n"
 
     # ─── 内部方法 ─────────────────────────────────────────────────
 
@@ -739,12 +911,7 @@ class DryRunAgent:
                 pass
 
     def _parse_hunks_for_regen(self, diff_text: str):
-        """
-        解析 unified diff → [(file_path, header_lines, [(hunk_header, hunk_lines)])]
-
-        关键: hunk 内容捕获必须在 ---/+++ 判断之前，
-        否则 hunk 中以 ---/+++ 开头的代码行会被错误吞入 header。
-        """
+        """hunk 内容捕获必须在 ---/+++ 判断之前"""
         results = []
         current_file = None
         header_lines = []
@@ -771,8 +938,6 @@ class DryRunAgent:
                 current_hunk_header = line
                 current_hunk_lines = []
             elif current_hunk_header is not None:
-                # ★ 必须在 ---/+++ 判断之前! 否则 hunk 中的
-                # `---xxx` (删除 `--xxx`) 会被错误解析为文件 header
                 current_hunk_lines.append(line)
             elif line.startswith("---") or line.startswith("+++"):
                 header_lines.append(line)
@@ -785,8 +950,6 @@ class DryRunAgent:
             results.append((current_file, header_lines, hunks))
 
         return results if results else None
-
-    # ─── 工具方法 ─────────────────────────────────────────────────
 
     @staticmethod
     def _extract_pure_diff(text):
