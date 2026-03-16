@@ -771,39 +771,107 @@ def render_validate_report(result: dict):
         sections.append(dr_tbl)
         sections.append(Text(""))
 
+        # ── 7c) 生成的 Patch 文件 ──────────────────────
+        patch_file = result.get("patch_file")
+        if patch_file:
+            patch_panel = Text()
+            patch_panel.append("✔ 生成的适配补丁文件\n", style="bold green")
+            patch_panel.append(f"  路径: {patch_file}\n\n", style="cyan")
+            
+            # 读取并显示 patch 内容
+            try:
+                with open(patch_file, "r") as f:
+                    patch_content = f.read()
+                    lines = patch_content.split("\n")
+                    
+                    # 显示前 50 行
+                    for line in lines[:50]:
+                        if line.startswith("+++") or line.startswith("---"):
+                            patch_panel.append(f"  {line}\n", style="bold")
+                        elif line.startswith("+"):
+                            patch_panel.append(f"  {line}\n", style="green")
+                        elif line.startswith("-"):
+                            patch_panel.append(f"  {line}\n", style="red")
+                        elif line.startswith("@@"):
+                            patch_panel.append(f"  {line}\n", style="cyan")
+                        else:
+                            patch_panel.append(f"  {line}\n", style="dim")
+                    
+                    if len(lines) > 50:
+                        patch_panel.append(f"\n  ... 还有 {len(lines) - 50} 行\n", style="dim")
+                        patch_panel.append(f"  完整补丁请查看: {patch_file}\n", style="dim")
+            except Exception as e:
+                patch_panel.append(f"  [red]读取失败: {e}[/]\n", style="")
+            
+            sections.append(Panel(patch_panel, title="[bold green]Patch 文件[/]",
+                                  border_style="green", padding=(0, 2)))
+            sections.append(Text(""))
+
         # ── 7a) 详细搜索过程 ─────────────────────────
         search_reports = dr_detail.get("search_reports", [])
         if search_reports:
-            sr_panel = Text()
-            sr_panel.append("详细搜索过程\n", style="bold cyan")
-            for sr in search_reports[:5]:
-                sr_panel.append(f"\n  文件: {sr.get('file_path', 'N/A')}\n", style="dim")
-                sr_panel.append(f"  Hunk: {sr.get('hunk_header', 'N/A')}\n", style="dim")
+            for sr_idx, sr in enumerate(search_reports[:8], 1):
+                sr_panel = Text()
+                sr_panel.append(f"Hunk #{sr_idx}: {sr.get('file_path', 'N/A')}\n", style="bold cyan")
+                sr_panel.append(f"  Header: {sr.get('hunk_header', 'N/A')}\n", style="dim")
+                
+                # 代码片段
+                removed = sr.get('removed_lines', [])
+                added = sr.get('added_lines', [])
+                if removed:
+                    sr_panel.append(f"  删除行数: {len(removed)}\n", style="red")
+                    for r in removed[:3]:
+                        sr_panel.append(f"    - {r[:70]}\n", style="red dim")
+                    if len(removed) > 3:
+                        sr_panel.append(f"    ... +{len(removed)-3} 更多\n", style="red dim")
+                
+                if added:
+                    sr_panel.append(f"  新增行数: {len(added)}\n", style="green")
+                    for a in added[:3]:
+                        sr_panel.append(f"    + {a[:70]}\n", style="green dim")
+                    if len(added) > 3:
+                        sr_panel.append(f"    ... +{len(added)-3} 更多\n", style="green dim")
+                
+                # Context 信息
+                ctx_before = sr.get('before_context', [])
+                ctx_after = sr.get('after_context', [])
+                sr_panel.append(f"  Context: before={len(ctx_before)} after={len(ctx_after)}\n", style="dim")
                 
                 # 搜索策略结果
                 strategies = sr.get('strategy_results', [])
                 if strategies:
-                    sr_panel.append("  策略尝试:\n", style="bold")
-                    for strat in strategies[:7]:
+                    sr_panel.append("  搜索策略:\n", style="bold")
+                    for strat in strategies[:8]:
                         name = strat.get('strategy_name', '')
                         success = strat.get('success', False)
                         conf = strat.get('confidence', 0)
+                        pos = strat.get('position')
                         icon = "[green]✔[/]" if success else "[red]✘[/]"
+                        
                         sr_panel.append(f"    {icon} {name}", style="")
                         if conf > 0:
                             sr_panel.append(f" (置信度 {conf:.0%})", style="dim")
+                        if pos is not None:
+                            sr_panel.append(f" @ line {pos}", style="cyan")
                         sr_panel.append("\n", style="")
                 
                 # Context 匹配率
-                ctx_rate = sr.get('context_match_rate', 0)
+                ctx_rate = sr.get('context_match_rate', -1)
                 if ctx_rate >= 0:
                     ctx_style = "green" if ctx_rate >= 0.8 else ("yellow" if ctx_rate >= 0.5 else "red")
                     sr_panel.append(f"  Context 匹配率: [{ctx_style}]{ctx_rate:.0%}[/]\n", style="")
                 
+                # 最终定位结果
+                final_pos = sr.get('final_position')
+                final_strat = sr.get('final_strategy')
+                if final_pos is not None:
+                    sr_panel.append(f"  ✔ 定位成功: 行 {final_pos} (via {final_strat})\n", style="green")
+                else:
+                    sr_panel.append(f"  ✘ 定位失败: 所有策略均未命中\n", style="red")
+                
                 sr_panel.append("\n", style="")
+                sections.append(sr_panel)
             
-            sections.append(Panel(sr_panel, title="[bold cyan]搜索过程详情[/]",
-                                  border_style="cyan", padding=(0, 2)))
             sections.append(Text(""))
 
         # ── 7b) 逐 Hunk 冲突分析 ─────────────────────

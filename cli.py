@@ -108,6 +108,13 @@ def _analyze_one(pipe: Pipeline, cve_id: str, target: str,
     console.print(render_report(result))
     console.print(render_recommendations(result))
 
+    # 输出生成的 patch 文件
+    if result.dry_run and result.dry_run.adapted_patch:
+        patch_file = os.path.join(out_dir, f"{cve_id}_{target}_adapted.patch")
+        with open(patch_file, "w") as f:
+            f.write(result.dry_run.adapted_patch)
+        console.print(f"\n[green]✔ 生成的适配补丁已保存:[/] [cyan]{patch_file}[/]")
+
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     fp = os.path.join(out_dir, f"{cve_id}_{target}_{ts}.json")
     from dataclasses import asdict
@@ -122,7 +129,7 @@ def _analyze_one(pipe: Pipeline, cve_id: str, target: str,
             "prerequisite_patches": prereqs,
             "recommendations": result.recommendations,
         }, f, indent=2, ensure_ascii=False, default=str)
-    console.print(f"\n[dim]报告已保存: {fp}[/]")
+    console.print(f"[dim]报告已保存: {fp}[/]")
 
 
 # ─── check-intro ─────────────────────────────────────────────────────
@@ -860,6 +867,18 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
 
         recommendations = result.recommendations if result.recommendations else []
 
+        # 输出生成的 patch 文件
+        adapted_patch = result.dry_run.adapted_patch if result.dry_run else None
+        patch_file = None
+        if adapted_patch:
+            import os
+            output_dir = config.output.output_dir
+            os.makedirs(output_dir, exist_ok=True)
+            patch_file = os.path.join(output_dir, f"{cve_id}_{tv}_adapted.patch")
+            with open(patch_file, "w") as f:
+                f.write(adapted_patch)
+            logger.info(f"生成的适配补丁已保存: {patch_file}")
+
         return {
             "cve_id": cve_id, "known_fix": known_fix, "target": tv,
             "worktree_commit": rollback_hash[:16] if rollback_hash else rollback,
@@ -875,6 +894,7 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
             "tool_prereqs": tool_prereqs_detail,
             "known_prereqs_detail": known_prereqs_detail,
             "recommendations": recommendations,
+            "patch_file": patch_file,  # 新增：patch 文件路径
         }
 
     finally:
