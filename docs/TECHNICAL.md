@@ -431,6 +431,58 @@ class PrerequisitePatch:
 
 **设计背景：** 社区修复补丁无法直接 `git apply` 到目标分支的原因复杂多样：context lines 偏移（中间 commit 修改了相邻行）、补丁涉及的同一行被修改（真正的代码冲突）、跨版本路径不同。DryRun Agent 实现了**五级渐进式试应用策略**和**逐 hunk 冲突分析**，尽可能自动适配，无法自动解决时提供精确的冲突诊断。
 
+#### 代码语义匹配 — 解决 Context 被打断问题
+
+**核心问题**：mainline patch 的 context 行在企业仓库中被打断（中间插入了额外代码），导致 context 序列匹配全部失败。
+
+**解决方案**：不再依赖 context 序列的连续性，而是提取 patch 的实际代码片段（removed/added），用**多维度代码相似度**在目标文件中搜索。
+
+**新增类**：
+
+| 类 | 用途 |
+|---|------|
+| `CodeMatcher` | 多维度代码相似度匹配：结构相似度 (编辑距离) + 标识符匹配率 + 关键字序列相似度 |
+| `PatchContextExtractor` | 从 patch 提取代码片段、标识符、关键字、函数名等元数据 |
+
+**多维度相似度计算**：
+
+```
+score = 0.5 × structure_sim (SequenceMatcher)
+      + 0.3 × identifier_match_rate (变量名/函数名交集)
+      + 0.2 × keyword_sequence_sim (关键字序列相似度)
+```
+
+**集成到 `_locate_hunk`**：
+
+| 策略 | 调用位置 | 适用场景 |
+|------|---------|---------|
+| L1-L7 | 现有序列匹配 | context 连续、行号接近 |
+| **L8** | **`_locate_removal_hunk` / `_locate_addition_hunk` 末尾** | **context 被打断、行号偏移严重** |
+
+L8 策略在所有传统策略失败后触发，用代码内容而非 context 序列做匹配。
+
+**示例**：
+
+```
+Mainline patch (纯添加 hunk):
+  ctx_before = ["static struct kmem_cache *dquot_cachep;"]
+  + 新增代码
+  ctx_after = ["static int nr_dquots;"]
+
+企业仓库文件:
+  line 1: ...
+  line 2: /* custom comment */  ← 额外行, 打断了 context 序列
+  line 3: static struct kmem_cache *dquot_cachep;
+  line 4: static int nr_dquots;
+
+传统 context 序列匹配: 失败 (序列被打断)
+L8 代码语义匹配:
+  1. 提取 ctx_before[-1] 的标识符: {static, struct, kmem_cache, dquot_cachep}
+  2. 在文件中搜索包含这些标识符的行
+  3. 找到 line 3 (相似度 0.94)
+  4. 插入点 = 3 + 1 = 4 ✔
+```
+
 #### 五级自适应策略
 
 | Level | 策略 | 命令 / 算法 | 适用场景 |
@@ -805,3 +857,120 @@ remove_worktree(rv, worktree_path)
 3. DryRun 的 `conflict-adapted` 策略生成的适配补丁**需人工审查语义正确性** — 它保证补丁能 apply，但不保证逻辑正确
 4. MITRE API对部分老旧CVE可能缺少structured affected数据
 5. 验证框架的前置依赖比较依赖 ID/Subject 匹配，无法覆盖纯代码语义等价的情况
+
+---
+
+## 新增功能 (Phase 1-4)
+
+### Phase 1: 代码语义匹配 (CodeMatcher)
+
+**文件**：`core/code_matcher.py`
+
+**核心类**：
+- `PatchContextExtractor`：从 patch 提取代码片段、标识符、关键字、函数名
+- `CodeMatcher`：多维度代码相似度匹配
+
+**多维度相似度**：
+```
+score = 0.5 × structure_sim (SequenceMatcher 编辑距离)
+      + 0.3 × identifier_match_rate (变量名/函数名交集)
+      + 0.2 × keyword_sequence_sim (关键字序列相似度)
+```
+
+**集成点**：`agents/dryrun.py` 的 `_locate_hunk` 作为 Level 8 策略，在所有传统序列匹配失败后触发。
+
+**解决的问题**：
+- mainline patch 的 context 行在企业仓库中被打断（中间插入额外代码）
+- 传统 context 序列匹配无法处理被打断的情况
+- 代码语义匹配不依赖 context 序列连续性，只关注代码内容本身
+
+### Phase 2: 详细搜索过程报告 (SearchReport)
+
+**文件**：`core/search_report.py`
+
+**核心类**：
+- `StrategyResult`：单个搜索策略的结果（策略名、成功/失败、位置、置信度）
+- `HunkSearchReport`：单个 hunk 的完整搜索报告（removed/added/context、策略结果、context 对比）
+- `DetailedSearchReport`：完整补丁搜索报告（汇总统计）
+
+**集成点**：`agents/dryrun.py` 的 `check_adaptive` 方法收集搜索报告，存储在 `DryRunResult.search_reports`。
+
+**提供的信息**：
+- 每个 hunk 的逐策略尝试结果
+- mainline context vs 目标文件实际 context 的对比
+- 代码片段对比（removed/added 的实际内容）
+- 搜索成功/失败的原因
+
+### Phase 3: AI 辅助补丁生成 (AIPatchGenerator)
+
+**文件**：`core/ai_patch_generator.py`
+
+**核心类**：
+- `AIPatchGenerator`：调用 LLM 生成最小化修改的补丁
+
+**工作流程**：
+1. 输入：mainline patch + 目标文件实际代码 + 冲突分析结果
+2. 构建 prompt，发送给 LLM
+3. LLM 分析并生成新补丁（仅改变必要的 context 行，保留所有 + 行）
+4. 验证补丁格式和可应用性
+
+**配置**（在 `config.yaml` 中）：
+```yaml
+ai_patch_generation:
+  enabled: false
+  provider: "openai"
+  # 复用现有 llm 配置
+```
+
+**集成点**：可在 `check_adaptive` 中作为 Level 5 策略（在所有自动策略失败后调用）。
+
+### Phase 4: 函数分析 (FunctionAnalyzer)
+
+**文件**：`core/function_analyzer.py`
+
+**核心类**：
+- `FunctionInfo`：函数信息（名称、位置、签名、参数、调用者/被调用者、修改行号）
+- `FunctionAnalyzer`：C 代码函数分析
+
+**功能**：
+- 从 C 代码中提取函数定义
+- 分析补丁修改的函数及其调用关系
+- 生成影响分析报告
+
+**方法**：
+- `extract_functions(file_content, file_path)`：提取所有函数定义
+- `analyze_patch_impact(patch_diff, file_content, file_path)`：分析补丁对函数的影响
+
+**输出**：
+```python
+{
+    "modified_functions": [FunctionInfo, ...],  # 被修改的函数
+    "affected_functions": [FunctionInfo, ...],  # 调用被修改函数的函数
+    "impact_summary": str                       # 影响摘要
+}
+```
+
+**集成点**：可在 `DryRunResult` 中添加 `modified_functions` 字段，在 TUI 中展示函数调用链。
+
+---
+
+## 新增数据模型
+
+**`core/models.py` 更新**：
+- `DryRunResult` 新增字段 `search_reports: List[Dict]`，存储详细搜索过程
+
+**`core/search_report.py` 新增**：
+- `StrategyResult`、`HunkSearchReport`、`DetailedSearchReport` 数据类
+
+---
+
+## 集成总结
+
+| 功能 | 文件 | 集成点 | 优先级 |
+|------|------|--------|--------|
+| 代码语义匹配 | `core/code_matcher.py` | `_locate_hunk` L8 策略 | P0 |
+| 搜索过程报告 | `core/search_report.py` | `check_adaptive` 收集 | P1 |
+| AI 补丁生成 | `core/ai_patch_generator.py` | `check_adaptive` L5 策略 | P2 |
+| 函数分析 | `core/function_analyzer.py` | `DryRunResult` 扩展 | P3 |
+
+所有新增功能均为**可选集成**，不影响现有 Pipeline 的正常运行。

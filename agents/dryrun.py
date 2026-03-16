@@ -37,6 +37,8 @@ from typing import List, Optional, Tuple
 
 from core.models import PatchInfo, DryRunResult
 from core.git_manager import GitRepoManager
+from core.code_matcher import CodeMatcher, PatchContextExtractor
+from core.search_report import HunkSearchReport, StrategyResult, DetailedSearchReport
 
 logger = logging.getLogger(__name__)
 
@@ -79,11 +81,12 @@ def _split_hunk_segments(hunk_lines: List[str]):
 
 
 class DryRunAgent:
-    """补丁试应用Agent — 多级上下文自适应 + 路径映射"""
+    """补丁试应用Agent — 多级上下文自适应 + 路径映射 + 代码语义匹配"""
 
     def __init__(self, git_mgr: GitRepoManager, path_mapper=None):
         self.git_mgr = git_mgr
         self.path_mapper = path_mapper
+        self.code_matcher = CodeMatcher()
 
     # ─── 公开接口 ─────────────────────────────────────────────────
 
@@ -149,6 +152,10 @@ class DryRunAgent:
         r0.stat_output = self._get_stat(mapped_diff, target_version)
         analysis = self._analyze_conflicts(mapped_diff, rp_path)
         r0.conflict_hunks = analysis["hunks"]
+        
+        # 收集搜索报告
+        if analysis.get("search_reports"):
+            r0.search_reports = analysis["search_reports"]
 
         if analysis.get("adapted_diff"):
             r4 = self._apply_check(analysis["adapted_diff"], rp_path, [])
@@ -158,6 +165,7 @@ class DryRunAgent:
                     analysis["adapted_diff"], target_version)
                 r4.adapted_patch = analysis["adapted_diff"]
                 r4.conflict_hunks = analysis["hunks"]
+                r4.search_reports = analysis.get("search_reports", [])
                 r4.error_output = (
                     "(冲突适配成功: - 行替换为目标文件实际内容, "
                     "+ 行不变, 需人工审查)")
@@ -263,6 +271,13 @@ class DryRunAgent:
             if anchor is not None:
                 return max(0, anchor - n), n
 
+        # D) Level 8: 代码语义匹配 (context 被打断时的最后手段)
+        if removed:
+            pos = self.code_matcher.find_removed_lines(
+                removed, file_lines, hint_line)
+            if pos is not None:
+                return pos, n
+
         return None, n
 
     def _locate_addition_hunk(self, ctx_before, ctx_after, added,
@@ -321,6 +336,13 @@ class DryRunAgent:
             pos = self._find_by_line_voting(non_plus, file_lines)
             if pos is not None:
                 return pos + len(ctx_before), 0
+
+        # F) Level 8: 代码语义匹配 (context 被打断时的最后手段)
+        if ctx_before:
+            pos = self.code_matcher.find_insertion_point(
+                ctx_before, ctx_after, file_lines, hint_line)
+            if pos is not None:
+                return pos, 0
 
         return None, 0
 
@@ -700,10 +722,59 @@ class DryRunAgent:
 
     # ─── 冲突分析 (L4) ───────────────────────────────────────────
 
+    # ─── 冲突分析与搜索报告 ────────────────────────────────────────
+
+    def _locate_hunk_with_report(self, hunk_lines: List[str],
+                                  file_lines: List[str],
+                                  hint_line: Optional[int],
+                                  func_name: Optional[str],
+                                  hunk_header: str,
+                                  file_path: str) -> Tuple[Optional[int], int, HunkSearchReport]:
+        """
+        定位 hunk 并收集详细搜索过程报告
+        返回 (change_pos, n_remove, report)
+        """
+        ctx_before, removed, added, ctx_after = _split_hunk_segments(hunk_lines)
+        
+        report = HunkSearchReport(
+            hunk_index=0,  # 由调用者设置
+            file_path=file_path,
+            hunk_header=hunk_header,
+            removed_lines=removed,
+            added_lines=added,
+            before_context=ctx_before,
+            after_context=ctx_after,
+        )
+        
+        # 记录 mainline context
+        report.mainline_context = ctx_before + ctx_after
+        
+        # 尝试定位
+        change_pos, n_remove = self._locate_hunk(
+            hunk_lines, file_lines, hint_line, func_name)
+        
+        if change_pos is not None:
+            # 获取目标文件的实际 context
+            snippet_start = max(0, change_pos - len(ctx_before))
+            snippet_end = min(len(file_lines), change_pos + n_remove + len(ctx_after))
+            report.target_context = file_lines[snippet_start:snippet_end]
+            
+            # 计算 context 匹配率
+            if report.mainline_context and report.target_context:
+                matches = sum(1 for m, t in zip(report.mainline_context, report.target_context)
+                            if m.strip() == t.strip())
+                report.context_match_rate = matches / max(len(report.mainline_context), 
+                                                         len(report.target_context))
+            
+            report.final_position = change_pos
+            report.final_confidence = 0.95  # 成功定位
+        
+        return change_pos, n_remove, report
+
     def _analyze_conflicts(self, diff_text: str, repo_path: str) -> dict:
         parsed = self._parse_hunks_for_regen(diff_text)
         if not parsed:
-            return {"hunks": [], "adapted_diff": None}
+            return {"hunks": [], "adapted_diff": None, "search_reports": []}
 
         hunk_analyses = []
         adapted_parts = []
@@ -835,7 +906,11 @@ class DryRunAgent:
                 h["severity"] == "L3" for h in hunk_analyses):
             adapted_diff = "\n".join(adapted_parts) + "\n"
 
-        return {"hunks": hunk_analyses, "adapted_diff": adapted_diff}
+        return {
+            "hunks": hunk_analyses,
+            "adapted_diff": adapted_diff,
+            "search_reports": []  # 暂时为空，后续可扩展
+        }
 
     # ─── 内部方法 ─────────────────────────────────────────────────
 

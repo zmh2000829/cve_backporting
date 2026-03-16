@@ -164,6 +164,7 @@ class DryRunResult:
     stat_output: str = ""
     patch_file: str = ""
     adapted_patch: str = ""         # 上下文重生成/冲突适配后的补丁内容
+    search_reports: List[Dict] = field(default_factory=list)  # 详细搜索过程报告
 
 
 @dataclass
