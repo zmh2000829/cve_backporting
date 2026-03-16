@@ -1,358 +1,254 @@
 # 五级自适应 DryRun 算法详解
 
-## 概述
+## 🎯 核心概念（用生活类比理解）
 
-DryRun Agent 实现了一个**五级渐进式补丁试应用引擎**，从严格的 `strict` 模式逐步降级到高度自适应的 `conflict-adapted` 模式，最终提供精确的逐 hunk 冲突分析。这个设计解决了社区补丁在企业自维护仓库中无法直接应用的核心难题。
+想象你要把一份**社区食谱**（mainline patch）应用到你的**家庭厨房**（企业仓库）。但问题是：
 
-## 五级策略概览
+- **社区食谱**是基于标准厨房写的
+- **你的厨房**经过了多次改装（中间 commit 修改了代码）
+- 有些工具位置不同（路径重组）
+- 有些食材已经换过（代码被修改）
+
+**五级自适应 DryRun** 就像一个聪明的厨师，他会：
+
+1. **先试试原始食谱** — 也许你的厨房还是标准的
+2. **放宽一些要求** — 也许只需要找到关键工具就行
+3. **用三方参考** — 也许能从原始厨房的照片推断出来
+4. **重新调整食谱** — 根据你的厨房实际情况改写食谱
+5. **创意改编** — 用你现有的食材和工具完成菜肴
+
+---
+
+## 📊 五级策略概览
 
 ```
 补丁输入
   │
-  ├─ Level 0: strict
-  │   └─ git apply --check
-  │       成功 ✔ → 返回 (apply_method="strict")
-  │       失败 ↓
+  ├─ Level 0: strict (严格模式)
+  │   └─ 要求: 完全匹配
+  │       成功 ✔ → 返回
+  │       失败 ↓ (补丁和文件不匹配)
   │
-  ├─ Level 1: context-C1
-  │   └─ git apply --check -C1
-  │       成功 ✔ → 返回 (apply_method="context-C1")
-  │       失败 ↓
+  ├─ Level 1: context-C1 (放宽要求)
+  │   └─ 要求: 至少 1 行匹配
+  │       成功 ✔ → 返回
+  │       失败 ↓ (偏移太大)
   │
-  ├─ Level 2: 3way
-  │   └─ git apply --check --3way
-  │       成功 ✔ → 返回 (apply_method="3way")
-  │       失败 ↓
+  ├─ Level 2: 3way (三方合并)
+  │   └─ 要求: 有原始版本参考
+  │       成功 ✔ → 返回
+  │       失败 ↓ (无法自动合并)
   │
-  ├─ Level 3: regenerated
-  │   └─ _regenerate_patch (从目标文件重建 context)
-  │       成功 ✔ → 返回 (apply_method="regenerated")
-  │       失败 ↓
+  ├─ Level 3: regenerated (重建补丁)
+  │   └─ 要求: 能找到变更点
+  │       成功 ✔ → 返回
+  │       失败 ↓ (找不到位置)
   │
-  ├─ Level 4: conflict-adapted
-  │   └─ _analyze_conflicts + 冲突适配
-  │       成功 ✔ → 返回 (apply_method="conflict-adapted")
-  │       失败 ↓
+  ├─ Level 4: conflict-adapted (冲突适配)
+  │   └─ 要求: 能理解冲突
+  │       成功 ✔ → 返回
+  │       失败 ↓ (冲突太复杂)
   │
   └─ 全部失败
-      └─ 返回完整冲突分析报告 (conflict_hunks)
+      └─ 返回详细冲突分析报告
 ```
-
-## 详细算法
-
-### Level 0: Strict 模式
-
-**命令**：`git apply --check`
-
-**原理**：标准 Git 补丁应用检查，要求 context 行精确匹配。
-
-**适用场景**：
-- 补丁来自同一分支或版本
-- 目标文件未经修改
-- 无任何 context 偏移
-
-**失败原因**：
-- Context 行不匹配（中间 commit 修改了相邻行）
-- 文件路径不存在（跨版本路径重组）
-- 补丁涉及的代码已被修改
 
 ---
 
-### Level 1: Context-C1 模式
+## 🔍 详细算法
 
-**命令**：`git apply --check -C1`
+### Level 0: Strict 模式 — "完美匹配"
 
-**原理**：降低 context 匹配要求，仅需 1 行 context 匹配而非全部。
+**类比**：就像拼图，要求每一块都完全吻合
 
-**适用场景**：
-- 中间 commit 修改了补丁 context 的部分行
-- 行号偏移不超过几行
-- 补丁核心代码（+/- 行）未被修改
+**工作原理**：
+```
+社区补丁的 context 行:
+  line 1: static struct kmem_cache *dquot_cachep;
+  line 2: static int nr_dquots;
 
-**失败原因**：
-- Context 偏移超过 1 行
-- 补丁涉及的代码被修改
-- 3-way merge 无法自动解决
+你的文件:
+  line 162: static struct kmem_cache *dquot_cachep;
+  line 163: static int nr_dquots;
+
+结果: ✔ 完全匹配！补丁可以直接应用
+```
+
+**何时成功**：
+- 补丁来自同一分支（比如都是 5.10 版本）
+- 你的文件没有被其他 commit 修改过
+- 行号完全对齐
+
+**何时失败**：
+- 中间有其他 commit 修改了相邻的行
+- 文件路径在不同版本中不同
+- 补丁涉及的代码已经被改过
 
 ---
 
-### Level 2: 3-Way Merge 模式
+### Level 1: Context-C1 模式 — "放宽要求"
 
-**命令**：`git apply --check --3way`
+**类比**：不要求完全匹配，只要找到关键特征就行
 
-**原理**：使用三方合并算法，利用 base blob（补丁生成时的原始文件）进行智能冲突解决。
+**工作原理**：
+```
+社区补丁期望的 context:
+  line 1: static struct kmem_cache *dquot_cachep;
+  line 2: static int nr_dquots;
 
-**适用场景**：
-- Base blob 在 Git 对象库中可用
-- 目标文件与 base 有共同祖先
-- 冲突可通过三方合并自动解决
+你的文件（中间多了一行）:
+  line 162: static struct kmem_cache *dquot_cachep;
+  line 163: /* custom comment */  ← 额外的行
+  line 164: static int nr_dquots;
 
-**失败原因**：
-- Base blob 不可用（补丁来自不同仓库）
-- 三方合并产生冲突标记
-- 补丁和目标文件的修改无法自动合并
+strict 模式: ✘ 失败（3 行不匹配 2 行）
+-C1 模式: ✔ 成功（至少有 1 行匹配）
+```
+
+**何时成功**：
+- 中间 commit 只修改了几行
+- 补丁的核心代码（+/- 行）没被改过
+- 偏移不超过几行
+
+**何时失败**：
+- 偏移太大（超过 1 行）
+- 补丁要删除的代码已经被改过
+- 无法自动合并
 
 ---
 
-### Level 3: 上下文重生成模式
+### Level 2: 3-Way Merge 模式 — "三方参考"
 
-**命令**：`_regenerate_patch(patch, target_file)`
+**类比**：就像调解纠纷，有三方信息：原始版本、社区版本、你的版本
 
-**原理**：
-1. 在目标文件中定位补丁的变更点（使用两层定位架构）
-2. 从目标文件提取正确的 context 行
-3. 保留补丁的 +/- 行不变
-4. 重建补丁并尝试应用
+**工作原理**：
+```
+原始版本 (base):
+  static struct kmem_cache *dquot_cachep;
+  static int nr_dquots;
 
-**核心算法：两层定位架构**
+社区版本 (patch):
+  static struct kmem_cache *dquot_cachep;
+  + static struct workqueue_struct *dquot_wq;
+  static int nr_dquots;
 
-#### 第一层：`_locate_hunk` — Hunk 级变更点定位
+你的版本 (target):
+  static struct kmem_cache *dquot_cachep;
+  /* custom comment */
+  static int nr_dquots;
 
-返回 `(change_pos, n_remove)`：
-- `change_pos`：变更点在目标文件中的行号
-- `n_remove`：需删除的行数（纯添加 hunk 为 0）
-
-**有删除行的 hunk**：
-```python
-def _locate_removal_hunk(removed, ctx_before, ctx_after, file_lines, hint_line, func_name):
-    # A) 直接搜索 removed 行序列
-    pos = _locate_in_file(removed, ctx_all, file_lines, hint_line, func_name)
-    if pos: return pos, len(removed)
-    
-    # B) before-context 最后一行做锚点
-    if ctx_before:
-        anchor = _find_anchor_line(ctx_before[-1], file_lines, hint_line)
-        if anchor: return anchor + 1, len(removed)
-    
-    # C) after-context 第一行做锚点
-    if ctx_after:
-        anchor = _find_anchor_line(ctx_after[0], file_lines, hint_line)
-        if anchor: return max(0, anchor - len(removed)), len(removed)
-    
-    # D) Level 8: 代码语义匹配
-    pos = code_matcher.find_removed_lines(removed, file_lines, hint_line)
-    if pos: return pos, len(removed)
-    
-    return None, len(removed)
+三方合并: 
+  ✔ 可以推断出: 在 dquot_cachep 后面插入新代码，
+    即使中间多了一行注释
 ```
 
-**纯添加的 hunk**：
-```python
-def _locate_addition_hunk(ctx_before, ctx_after, added, file_lines, hint_line, func_name):
-    # A) before-context 最后一行做锚点 → 插入点 = 锚点 + 1  ★关键
-    if ctx_before:
-        anchor = _find_anchor_line(ctx_before[-1], file_lines, hint_line)
-        if anchor: return anchor + 1, 0
-    
-    # B) after-context 第一行做锚点 → 插入点 = 锚点
-    if ctx_after:
-        anchor = _find_anchor_line(ctx_after[0], file_lines, hint_line)
-        if anchor: return anchor, 0
-    
-    # ... 其他策略 ...
-    
-    # F) Level 8: 代码语义匹配
-    pos = code_matcher.find_insertion_point(ctx_before, ctx_after, file_lines, hint_line)
-    if pos: return pos, 0
-    
-    return None, 0
+**何时成功**：
+- Git 对象库中有原始版本（base blob）
+- 冲突可以自动解决
+- 三方合并能推断出正确的结果
+
+**何时失败**：
+- 原始版本不可用（补丁来自不同仓库）
+- 冲突太复杂，无法自动解决
+- 补丁和你的修改有真正的语义冲突
+
+---
+
+### Level 3: Regenerated 模式 — "重建补丁" ⭐ 核心创新
+
+**类比**：就像一个聪明的编辑，根据你的文件重新写补丁
+
+**核心问题**：
+```
+社区补丁说: "在第 162 行后面插入新代码"
+但你的文件: 第 162 行是对的，但第 163 行多了一行注释
+           所以实际应该在第 164 行后面插入
+
+怎么办？ → 重新定位！找到真正的插入点
 ```
 
-**锚点行定位的关键创新**：
+#### 🎯 两层定位架构
+
+**第一层：锚点行定位** — 找到关键的"地标"
 
 ```
-问题场景:
-  Mainline patch (纯添加 hunk):
-    ctx_before[-1] = "static struct kmem_cache *dquot_cachep;"  ← 锚点行
+问题: 补丁的 context 被打断了
+  社区补丁:
+    ctx_before[-1] = "static struct kmem_cache *dquot_cachep;"  ← 地标
     + 新增代码
     ctx_after[0]  = "static int nr_dquots;"
 
-  企业内部文件:
-    line 1: ...module_names[] = INIT_QUOTA_MODULE_NAMES;
-    line 2: (empty)
-    line 3: /* custom comment */  ← 额外行, 打断了 context 序列
-    line 4: static struct kmem_cache *dquot_cachep;  ← 锚点命中!
-    line 5: static int nr_dquots;
+  你的文件:
+    line 162: static struct kmem_cache *dquot_cachep;  ← 找到地标！
+    line 163: /* custom comment */  ← 额外行（被打断）
+    line 164: static int nr_dquots;
 
-解法:
-  不搜索整段 6 行 context，而是只搜索变更边界的单行锚点
-  → 单行搜索不受 context 序列中间额外行的影响
-  → 利用行号 hint + 偏移修正缩小搜索窗口 (±300 行)
-  → 先精确匹配，再 SequenceMatcher ≥ 0.85 模糊匹配
-  → anchor = 4 → insert_point = 5 ✔
+解法: 不搜索整段 context，只搜索单行地标
+  → 单行搜索不受中间额外行的影响
+  → 找到地标后，插入点 = 地标行号 + 1 = 163
 ```
 
-#### 第二层：`_locate_in_file` — 序列级搜索引擎
+**为什么这样做**：
+- 传统方法：搜索 6 行连续的 context → 失败（被打断了）
+- 新方法：只搜索 1 行地标 → 成功（不受打断影响）
 
-当锚点行搜索不适用时（如 removed 行序列搜索），使用七策略渐进式搜索：
+**第二层：七策略序列搜索** — 如果地标也找不到
 
-| 策略 | 算法 | 适用场景 |
-|------|------|---------|
-| 1 | 精确序列匹配 | 序列在文件中完全一致（strip 后） |
-| 2 | 函数名锚点搜索 | 从 `@@` 行提取函数名，限定函数作用域 |
-| 3 | 行号提示窗口 | 利用 hunk header 行号 hint，±300 行窗口搜索 |
-| 4 | 全局逐行模糊匹配 | SequenceMatcher 加权评分，短序列阈值 0.45 |
-| 5 | Context 行重试 | 用 context 行重新尝试策略 1-4 |
-| 6 | 逐行投票 | 每行独立匹配，位置估算众数 |
-| 7 | 最长行最佳匹配 | 选信息量最大的行做 fuzzy match |
+当锚点行搜索失败时，使用 7 个递进式策略：
 
-**逐行投票算法**（策略 6）：
+| 策略 | 做什么 | 何时用 |
+|------|--------|--------|
+| 1 | 精确匹配 | 代码完全一样 |
+| 2 | 函数名搜索 | 知道在哪个函数里 |
+| 3 | 行号窗口 | 知道大概在哪个范围 |
+| 4 | 模糊匹配 | 代码有点不一样 |
+| 5 | Context 重试 | 用 context 行重新尝试 |
+| 6 | 逐行投票 | 多行投票找位置 |
+| 7 | 最长行匹配 | 用最有特征的行 |
 
-```python
-def _find_by_line_voting(needle, haystack):
-    """
-    每行独立匹配，收集位置估算，取众数
-    """
-    votes = Counter()
-    
-    for needle_idx, needle_line in enumerate(needle):
-        # 在 haystack 中找最匹配的行
-        best_match_idx = _find_best_line_match(needle_line, haystack)
-        if best_match_idx is not None:
-            # 估算序列起始位置
-            estimate = best_match_idx - needle_idx
-            votes[estimate] += 1
-    
-    if votes:
-        best_start, _ = votes.most_common(1)[0]
-        return best_start
-    return None
+**逐行投票的妙处**：
+
 ```
+假设要找这 4 行代码的位置:
+  [0] "dquot_cachep;"
+  [1] "nr_dquots;"
+  [2] "reserved_space;"
+  [3] "quota_format;"
 
-**示例**：
-```
-needle:                          haystack 匹配    estimate = file_pos - idx
-  [0] "dquot_cachep;"    →    line 4      →  4 - 0 = 4
-  [1] "nr_dquots;"       →    line 5      →  5 - 1 = 4
-  [2] "reserved_space;"  →    line 6      →  6 - 2 = 4
-  [3] "quota_format;"    →    line 7      →  7 - 3 = 4
+在文件中逐行搜索:
+  [0] "dquot_cachep;" → 找到在 line 4
+  [1] "nr_dquots;" → 找到在 line 5
+  [2] "reserved_space;" → 找到在 line 6
+  [3] "quota_format;" → 找到在 line 7
 
-votes: {4: 4} → best_start = 4 ✔
-即使中间有额外行，大多数行对起始位置的估算仍一致
+计算每行的"起始位置估算":
+  line 4 - 0 = 4
+  line 5 - 1 = 4
+  line 6 - 2 = 4
+  line 7 - 3 = 4
+
+投票结果: 4 票都投给位置 4 → 确定起始位置是 4 ✔
+
+即使中间有额外行，大多数行的估算仍然一致！
 ```
 
 **跨 hunk 偏移传播**：
 
-```python
-file_offset = 0  # 同文件的累积偏移
+```
+同一个文件有多个 hunk:
 
-for hunk_header, hunk_lines in hunks:
-    # 定位 hunk
-    change_pos, n_remove = _locate_hunk(hunk_lines, file_lines, 
-                                        hint_line + file_offset, func_name)
-    
-    if change_pos is not None and hint_line:
-        # 计算实际偏移
-        expected_start = hint_line - 1
-        actual_start = change_pos - len(ctx_before)
-        file_offset = actual_start - expected_start  # ← 传播到下一个 hunk
+Hunk 1: 定位成功，发现实际偏移 = +2 行
+        → 记录这个偏移
+
+Hunk 2: 使用 Hunk 1 的偏移信息
+        → 搜索范围自动调整
+        → 定位更精准
+
+Hunk 3: 使用 Hunk 1+2 的累积偏移
+        → 越来越精准
 ```
 
-**补丁重建**：
-
-```python
-def _regenerate_patch(patch_diff, target_file):
-    """
-    从目标文件重建补丁，保证 context 正确
-    """
-    for file_path, hunks in parsed_hunks:
-        for hunk_header, hunk_lines in hunks:
-            # 定位变更点
-            change_pos, n_remove = _locate_hunk(hunk_lines, file_lines, ...)
-            
-            if change_pos is None:
-                continue  # 无法定位，保留原始 hunk
-            
-            # 从目标文件提取 context
-            ctx_n = 3
-            start = max(0, change_pos - ctx_n)
-            end = min(len(file_lines), change_pos + n_remove + ctx_n)
-            
-            # 重建 hunk
-            rebuilt = []
-            for i in range(start, change_pos):
-                rebuilt.append(" " + file_lines[i])  # context
-            for i in range(change_pos, change_pos + n_remove):
-                rebuilt.append("-" + file_lines[i])  # 实际 - 行
-            for a in added_lines:
-                rebuilt.append("+" + a)  # 原始 + 行不变
-            for i in range(change_pos + n_remove, end):
-                rebuilt.append(" " + file_lines[i])  # context
-            
-            # 生成新 hunk header
-            oc = sum(1 for l in rebuilt if l.startswith(" ") or l.startswith("-"))
-            nc = sum(1 for l in rebuilt if l.startswith(" ") or l.startswith("+"))
-            new_header = f"@@ -{start+1},{oc} +{start+1},{nc} @@"
-            
-            output.append(new_header)
-            output.extend(rebuilt)
-```
-
-**适用场景**：
-- Context 严重偏移（中间 commit 修改了多行相邻代码）
-- 补丁核心代码（+/- 行）未被修改
-- 行号偏移可通过定位算法精确计算
-
-**失败原因**：
-- 无法定位变更点（代码结构完全改变）
-- 补丁涉及的代码被修改
-- 多个 hunk 的偏移不一致
-
----
-
-### Level 4: 冲突适配模式
-
-**算法**：`_analyze_conflicts` + 冲突适配补丁生成
-
-**原理**：
-1. 对每个 hunk 执行定位和对比
-2. 提取补丁期望的 `-` 行和文件实际行
-3. 逐行比较，计算相似度
-4. 分级：L1 (≥85%) / L2 (50-85%) / L3 (<50%)
-5. 对 L1/L2 级 hunk 生成冲突适配补丁
-6. 尝试应用适配补丁
-
-**冲突分级**：
-
-| 级别 | 相似度 | 含义 | 处理 |
-|------|--------|------|------|
-| **L1** | ≥ 85% | 轻微差异（变量重命名、空格变动） | 自动适配 |
-| **L2** | 50-85% | 中度差异（部分重构） | 自动适配 + 人工审查 |
-| **L3** | < 50% | 重大差异（代码大幅改写） | 需人工手动合入 |
-
-**冲突适配补丁生成**：
-
-```python
-def _generate_adapted_patch(hunk_header, expected, added, actual, file_lines, change_pos):
-    """
-    用目标文件实际行替换补丁的 - 行，保留 + 行
-    """
-    ctx_n = 3
-    start = max(0, change_pos - ctx_n)
-    
-    rebuilt = []
-    
-    # Context 行（before）
-    for i in range(start, change_pos):
-        rebuilt.append(" " + file_lines[i])
-    
-    # 替换 - 行为实际行
-    for actual_line in actual:
-        rebuilt.append("-" + actual_line)
-    
-    # 保留 + 行不变
-    for added_line in added:
-        rebuilt.append("+" + added_line)
-    
-    # Context 行（after）
-    end = min(len(file_lines), change_pos + len(actual) + ctx_n)
-    for i in range(change_pos + len(actual), end):
-        rebuilt.append(" " + file_lines[i])
-    
-    return rebuilt
-```
-
-**示例**：
+**补丁重建过程**：
 
 ```
 原始补丁:
@@ -363,168 +259,221 @@ def _generate_adapted_patch(hunk_header, expected, added, actual, file_lines, ch
   +static int dquot_count;
    static int nr_dquots;
 
-文件实际内容（line 162-167）:
-  162: static struct kmem_cache *dquot_cachep;
-  163: /* custom field */
-  164: static int nr_dquots;
-  165: ...
+定位结果: 变更点在 line 162
 
-冲突分析:
-  expected: ["static struct kmem_cache *dquot_cachep;"]
-  actual:   ["static struct kmem_cache *dquot_cachep;", "/* custom field */"]
-  相似度: 0.5 → L2 级冲突
+从你的文件提取 context:
+  line 159-161: context before
+  line 162-162: 要删除的行（这里没有）
+  line 163-165: context after
 
-冲突适配补丁:
-  @@ -162,7 +162,10 @@
+重建补丁:
+  @@ -159,9 +159,12 @@
+   ... context before ...
    static struct kmem_cache *dquot_cachep;
-  -/* custom field */
   +static struct workqueue_struct *dquot_wq;
   +static DEFINE_MUTEX(dquot_lock);
   +static int dquot_count;
+   /* custom comment */  ← 从你的文件提取
    static int nr_dquots;
+   ... context after ...
+
+关键: + 行完全不变，只更新了 context 行
 ```
 
-**适用场景**：
-- 中间 commit 修改了补丁涉及的同一行代码
-- 修改是局部的（不影响整体逻辑）
-- 补丁的 + 行（新增代码）仍然有效
+**何时成功**：
+- 能找到变更点（通过锚点或七策略）
+- 补丁的 +/- 行没被改过
+- 行号偏移可以计算
 
-**失败原因**：
-- 冲突过于复杂（多行交叉修改）
-- 适配后的补丁仍无法应用
+**何时失败**：
+- 代码结构完全改变，找不到变更点
+- 补丁要删除的代码已经被改过
+- 多个 hunk 的偏移不一致
+
+---
+
+### Level 4: Conflict-Adapted 模式 — "冲突适配"
+
+**类比**：就像一个灵活的编辑，能理解冲突并创意改编
+
+**工作原理**：
+
+```
+补丁期望删除:
+  - static int old_field;
+
+你的文件实际有:
+  - static int old_field;
+  - /* custom field */
+
+冲突分析:
+  期望: ["static int old_field;"]
+  实际: ["static int old_field;", "/* custom field */"]
+  相似度: 50% → L2 级冲突（中度）
+
+冲突适配:
+  用你的文件实际行替换补丁的 - 行:
+  - static int old_field;
+  - /* custom field */
+  
+  保留补丁的 + 行不变:
+  + static struct workqueue_struct *dquot_wq;
+  + static DEFINE_MUTEX(dquot_lock);
+  + static int dquot_count;
+
+结果: ✔ 生成适配补丁，可以应用
+```
+
+**冲突分级**：
+
+| 级别 | 相似度 | 含义 | 例子 |
+|------|--------|------|------|
+| **L1** | ≥ 85% | 轻微差异 | 变量重命名、空格变动 |
+| **L2** | 50-85% | 中度差异 | 部分重构、多了几行 |
+| **L3** | < 50% | 重大差异 | 代码大幅改写 |
+
+**何时成功**：
+- 冲突是局部的（不影响整体逻辑）
+- 补丁的新增代码（+ 行）仍然有效
+- L1/L2 级冲突可以自动适配
+
+**何时失败**：
+- 冲突太复杂（多行交叉修改）
+- 补丁的新增代码与现有代码冲突
 - 需要人工审查和手动合入
 
 ---
 
-## 路径映射感知
+## 🗺️ 路径映射感知
 
-DryRun Agent 在两个层面应用路径映射：
+**问题**：Linux 内核在版本演进中会重组目录
 
-### 1. Diff 路径重写
+```
+社区补丁 (mainline 6.2):
+  fs/smb/client/connect.c
 
-```python
-def _rewrite_diff_paths(self, diff_text: str) -> str:
-    """
-    将补丁中的 upstream 路径替换为 local 路径
-    例如: fs/smb/client/ → fs/cifs/
-    """
-    lines = diff_text.split("\n")
-    result = []
-    for line in lines:
-        if line.startswith("diff --git"):
-            for up, lo in self.path_mapper._rules:
-                line = line.replace(f"a/{up}", f"a/{lo}")
-                line = line.replace(f"b/{up}", f"b/{lo}")
-        elif line.startswith("--- a/") or line.startswith("+++ b/"):
-            prefix = line[:6]
-            path = line[6:]
-            for up, lo in self.path_mapper._rules:
-                if path.startswith(up):
-                    path = lo + path[len(up):]
-                    break
-            line = prefix + path
-        result.append(line)
-    return "\n".join(result)
+你的仓库 (5.10):
+  fs/cifs/connect.c
+
+怎么办？ → 自动翻译路径
 ```
 
-### 2. 文件查找回退
+**解决方案**：
 
 ```python
-def _resolve_file_path(self, file_path: str, repo_path: str) -> Optional[str]:
-    """
-    先查原始路径，失败则尝试所有映射变体
-    """
-    target = os.path.join(repo_path, file_path)
-    if os.path.isfile(target):
-        return target
-    
-    if self.path_mapper:
-        for variant in self.path_mapper.translate(file_path):
-            if variant != file_path:
-                t = os.path.join(repo_path, variant)
-                if os.path.isfile(t):
-                    return t
-    
-    return None
+# 内置映射规则
+fs/smb/client/ → fs/cifs/
+fs/smb/server/ → fs/ksmbd/
+drivers/gpu/drm/i915/display/ → drivers/gpu/drm/i915/
+
+# 应用到补丁
+补丁中的路径: fs/smb/client/connect.c
+翻译后: fs/cifs/connect.c
+在你的仓库中查找: ✔ 找到！
 ```
 
 ---
 
-## Stable Backport 补丁优先
+## 🎁 Stable Backport 补丁优先
 
-Pipeline 在执行 DryRun 前，自动从 CVE 的 `version_commit_mapping` 中查找与目标分支版本最匹配的 stable backport 补丁。
+**概念**：优先使用为你的版本专门制作的补丁
 
-```python
-def _find_stable_patch(self, cve_info, target_version: str):
-    """
-    从 target_version (如 "5.10-hulk") 提取 major.minor 前缀 "5.10"
-    在 version_commit_mapping 中查找 5.10.x 的 backport commit
-    """
-    tv_prefix = target_version.split("-")[0]  # "5.10"
-    
-    # 查找匹配的 backport
-    for version, commit_id in cve_info.version_commit_mapping.items():
-        if version.startswith(tv_prefix):
-            return commit_id
-    
-    # 回退到最近低版本 backport
-    return None
 ```
+CVE 修复有多个版本:
+  - mainline (7.x) 的修复
+  - 5.15 stable backport
+  - 5.10 stable backport  ← 你的版本！
+  - 5.4 stable backport
 
-**优势**：
-- Stable backport 的路径和 context 与目标分支更一致
-- 大幅提高 DryRun 的成功率
-- 减少冲突分析的复杂性
+选择策略:
+  1. 查找 5.10 backport → ✔ 找到！使用它
+  2. 如果没有，查找 5.4 backport
+  3. 最后才用 mainline
+
+为什么？
+  - 5.10 backport 的 context 和路径与你的仓库最匹配
+  - 大幅提高成功率
+  - 减少冲突
+```
 
 ---
 
-## 代码语义匹配（Level 8 策略）
+## 🧠 代码语义匹配（Level 8 策略）
 
-当所有传统序列匹配策略失败时，使用代码语义匹配作为最后手段。
+**问题**：当所有传统方法都失败时怎么办？
 
-**多维度相似度**：
-
-```python
-score = 0.5 × structure_sim (SequenceMatcher 编辑距离)
-      + 0.3 × identifier_match_rate (变量名/函数名交集)
-      + 0.2 × keyword_sequence_sim (关键字序列相似度)
-```
-
-**示例**：
+**解决方案**：用代码的"意思"而不是"形式"来匹配
 
 ```
-目标代码:
-  ["int dquot_cachep;", "int nr_dquots;"]
+补丁要找的代码:
+  int dquot_cachep;
+  int nr_dquots;
 
-文件内容:
+你的文件中:
   line 1: // quota system
   line 2: static struct dquot_hash_table {
   line 3:     struct hlist_head *hash;
-  line 4:     int dquot_cachep;
-  line 5:     int nr_dquots;
+  line 4:     int dquot_cachep;  ← 找到！
+  line 5:     int nr_dquots;     ← 找到！
   line 6:     spinlock_t lock;
   line 7: } dquot_table;
 
 匹配过程:
-  1. 提取目标标识符: {int, dquot_cachep, nr_dquots}
-  2. 在文件中搜索包含这些标识符的行
-  3. line 4-5 匹配度最高 (0.94)
-  4. 返回 line 4 作为定位点
+  1. 提取关键词: {int, dquot_cachep, nr_dquots}
+  2. 在文件中搜索包含这些关键词的行
+  3. line 4-5 匹配度最高 (94%)
+  4. 返回 line 4 作为定位点 ✔
+```
+
+**多维度相似度**：
+
+```
+score = 0.5 × 结构相似度 (编辑距离)
+      + 0.3 × 标识符匹配率 (变量名/函数名)
+      + 0.2 × 关键字相似度 (关键字序列)
+
+例子:
+  补丁代码: "int dquot_cachep;"
+  文件代码: "static int dquot_cachep;"
+  
+  结构相似度: 0.9 (只多了 static)
+  标识符匹配: 1.0 (完全相同)
+  关键字相似度: 0.8 (都有 int)
+  
+  最终分数: 0.5×0.9 + 0.3×1.0 + 0.2×0.8 = 0.91 ✔
 ```
 
 ---
 
-## 性能特性
+## 📈 性能特性
 
-| 指标 | 数据 |
-|------|------|
-| 平均定位时间 | < 100ms (单 hunk) |
-| 最坏情况 | 七策略全部尝试 (~500ms) |
-| 内存占用 | O(file_size) 用于文件内容缓存 |
-| 缓存命中率 | 同文件多 hunk 的偏移传播提高 ~80% 命中率 |
+| 指标 | 数据 | 含义 |
+|------|------|------|
+| 平均定位时间 | < 100ms | 单个 hunk 的定位很快 |
+| 最坏情况 | ~500ms | 七策略全部尝试 |
+| 内存占用 | O(file_size) | 与文件大小成正比 |
+| 缓存命中率 | ~80% 提升 | 偏移传播大幅提高命中率 |
 
 ---
 
-## 总结
+## 🎓 总结
 
-五级自适应 DryRun 算法通过**渐进式降级策略**和**两层定位架构**，在面对复杂的补丁应用场景时提供了最大的灵活性和准确性。从严格的 `strict` 模式到高度自适应的 `conflict-adapted` 模式，每一级都针对特定的冲突类型进行了优化，最终为分析人员提供了精确的冲突诊断和自动适配能力。
+**五级自适应 DryRun** 就像一个聪明的厨师：
+
+1. **先试试原始食谱** — 也许能直接用
+2. **放宽一些要求** — 也许只需要关键部分匹配
+3. **用三方参考** — 也许能从原始版本推断
+4. **重新调整食谱** — 根据你的厨房重建食谱
+5. **创意改编** — 理解冲突并创意解决
+
+每一级都针对特定的问题场景优化，最终为你提供：
+- ✔ 补丁能否应用
+- ✔ 如何应用
+- ✔ 哪里有冲突
+- ✔ 如何解决冲突
+
+**核心创新**：
+- 🎯 **锚点行定位** — 不受 context 被打断的影响
+- 📊 **逐行投票** — 多行投票找位置
+- 🔄 **偏移传播** — 同文件多 hunk 越来越精准
+- 🧠 **代码语义匹配** — 用代码的"意思"而不是"形式"
