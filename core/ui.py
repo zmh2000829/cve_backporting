@@ -724,6 +724,35 @@ def render_validate_report(result: dict):
             status_text = "[red]所有策略均失败[/]"
         dr_tbl.add_row("应用结果", status_text)
 
+        # 详细的策略描述
+        strategy_descriptions = {
+            "strict": {
+                "desc": "标准 Git 补丁应用检查",
+                "principle": "要求 context 行精确匹配，补丁可直接应用",
+                "reason": "补丁来自同一分支或版本，目标文件未经修改，无任何 context 偏移",
+            },
+            "context-C1": {
+                "desc": "降低 context 匹配要求",
+                "principle": "仅需 1 行 context 匹配而非全部，使用 git apply -C1",
+                "reason": "中间 commit 修改了补丁 context 的部分行，但行号偏移不超过几行，补丁核心代码未被修改",
+            },
+            "3way": {
+                "desc": "三方合并算法",
+                "principle": "利用 base blob（补丁生成时的原始文件）进行智能冲突解决",
+                "reason": "Base blob 在 Git 对象库中可用，目标文件与 base 有共同祖先，冲突可通过三方合并自动解决",
+            },
+            "regenerated": {
+                "desc": "从目标文件重建 context",
+                "principle": "在目标文件中定位补丁变更点，从目标文件提取正确的 context 行，保留补丁的 +/- 行不变",
+                "reason": "Context 严重偏移（中间 commit 修改了多行相邻代码），但补丁核心代码未被修改，行号偏移可通过定位算法精确计算",
+            },
+            "conflict-adapted": {
+                "desc": "冲突适配补丁生成",
+                "principle": "用目标文件实际行替换补丁的 - 行，保留 + 行不变，生成适配补丁",
+                "reason": "中间 commit 修改了补丁涉及的同一行代码，修改是局部的，补丁的 + 行（新增代码）仍然有效",
+            },
+        }
+
         if method and applies:
             levels = ["strict", "context-C1", "3way",
                       "regenerated", "conflict-adapted"]
@@ -735,13 +764,32 @@ def render_validate_report(result: dict):
                 else:
                     level_display.append(f"[red]✘ {lvl}[/]")
             dr_tbl.add_row("尝试路径", " → ".join(level_display))
+            
+            # 添加成功策略的详细说明
+            if method in strategy_descriptions:
+                desc_info = strategy_descriptions[method]
+                dr_tbl.add_row("", "")
+                dr_tbl.add_row("[bold cyan]成功策略详解[/]", "")
+                dr_tbl.add_row("  方法", f"[cyan]{desc_info['desc']}[/]")
+                dr_tbl.add_row("  原理", f"[dim]{desc_info['principle']}[/]")
+                dr_tbl.add_row("  成功原因", f"[green]{desc_info['reason']}[/]")
         elif not applies:
             dr_tbl.add_row("尝试路径",
                            "[red]✘ strict → ✘ -C1 → ✘ 3way → "
                            "✘ regenerated → ✘ conflict-adapted[/]")
+            
+            # 添加失败原因分析
+            dr_tbl.add_row("", "")
+            dr_tbl.add_row("[bold red]失败分析[/]", "")
+            dr_tbl.add_row("  strict 失败", "[dim]Context 行不匹配或文件路径不存在[/]")
+            dr_tbl.add_row("  -C1 失败", "[dim]Context 偏移超过 1 行或补丁涉及代码被修改[/]")
+            dr_tbl.add_row("  3way 失败", "[dim]Base blob 不可用或三方合并产生冲突[/]")
+            dr_tbl.add_row("  regenerated 失败", "[dim]无法定位变更点或补丁涉及代码被大幅改写[/]")
+            dr_tbl.add_row("  conflict-adapted 失败", "[dim]冲突过于复杂或适配后补丁仍无法应用[/]")
 
         conf_files = dr_detail.get("conflicting_files", [])
         if conf_files:
+            dr_tbl.add_row("", "")
             dr_tbl.add_row("冲突文件", f"[red]{len(conf_files)}[/] 个")
             for cf in conf_files[:10]:
                 dr_tbl.add_row("", f"  [red]{cf}[/]")
@@ -749,13 +797,15 @@ def render_validate_report(result: dict):
         err = dr_detail.get("error_output", "")
         if err:
             err_lines = err.strip().split("\n")[:6]
-            dr_tbl.add_row("详情", "")
+            dr_tbl.add_row("", "")
+            dr_tbl.add_row("错误详情", "")
             for el in err_lines:
                 dr_tbl.add_row("", f"[dim]{el}[/]")
 
         stat = dr_detail.get("stat_output", "")
         if stat:
             stat_lines = stat.strip().split("\n")[:8]
+            dr_tbl.add_row("", "")
             dr_tbl.add_row("补丁统计", "")
             for sl in stat_lines:
                 dr_tbl.add_row("", f"[dim]{sl}[/]")
