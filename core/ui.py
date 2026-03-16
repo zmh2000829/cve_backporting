@@ -771,6 +771,41 @@ def render_validate_report(result: dict):
         sections.append(dr_tbl)
         sections.append(Text(""))
 
+        # ── 7a) 详细搜索过程 ─────────────────────────
+        search_reports = dr_detail.get("search_reports", [])
+        if search_reports:
+            sr_panel = Text()
+            sr_panel.append("详细搜索过程\n", style="bold cyan")
+            for sr in search_reports[:5]:
+                sr_panel.append(f"\n  文件: {sr.get('file_path', 'N/A')}\n", style="dim")
+                sr_panel.append(f"  Hunk: {sr.get('hunk_header', 'N/A')}\n", style="dim")
+                
+                # 搜索策略结果
+                strategies = sr.get('strategy_results', [])
+                if strategies:
+                    sr_panel.append("  策略尝试:\n", style="bold")
+                    for strat in strategies[:7]:
+                        name = strat.get('strategy_name', '')
+                        success = strat.get('success', False)
+                        conf = strat.get('confidence', 0)
+                        icon = "[green]✔[/]" if success else "[red]✘[/]"
+                        sr_panel.append(f"    {icon} {name}", style="")
+                        if conf > 0:
+                            sr_panel.append(f" (置信度 {conf:.0%})", style="dim")
+                        sr_panel.append("\n", style="")
+                
+                # Context 匹配率
+                ctx_rate = sr.get('context_match_rate', 0)
+                if ctx_rate >= 0:
+                    ctx_style = "green" if ctx_rate >= 0.8 else ("yellow" if ctx_rate >= 0.5 else "red")
+                    sr_panel.append(f"  Context 匹配率: [{ctx_style}]{ctx_rate:.0%}[/]\n", style="")
+                
+                sr_panel.append("\n", style="")
+            
+            sections.append(Panel(sr_panel, title="[bold cyan]搜索过程详情[/]",
+                                  border_style="cyan", padding=(0, 2)))
+            sections.append(Text(""))
+
         # ── 7b) 逐 Hunk 冲突分析 ─────────────────────
         conflict_hunks = dr_detail.get("conflict_hunks", [])
         if conflict_hunks:
