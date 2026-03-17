@@ -1,347 +1,381 @@
-# CVE Backporting — Linux 内核漏洞补丁智能回溯引擎
+<p align="center">
+  <img src="https://img.shields.io/badge/CVE-Backporting-0d1117?style=for-the-badge&logo=linux&logoColor=white&labelColor=FCC624" alt="CVE Backporting" height="36">
+</p>
 
-<div align="center">
+<h1 align="center">CVE Backporting Engine</h1>
 
-**一条命令，从 CVE 编号到可落地的 Backport 方案。**
+<p align="center">
+  <strong>Automated CVE Patch Analysis & Backporting for Enterprise Linux Kernels</strong>
+</p>
 
-面向自维护 Linux Kernel 仓库的**全自动 CVE 分析 Pipeline**，集情报采集、引入判定、修复定位、依赖分析、冲突预检于一体。
+<p align="center">
+  <a href="#"><img src="https://img.shields.io/badge/Python-3.8%2B-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="MIT License"></a>
+  <a href="docs/TECHNICAL.md"><img src="https://img.shields.io/badge/Docs-Technical-blue?style=for-the-badge" alt="Docs"></a>
+  <a href="docs/ADAPTIVE_DRYRUN.md"><img src="https://img.shields.io/badge/Algo-5--Level%20DryRun-orange?style=for-the-badge" alt="Algorithm"></a>
+</p>
 
-[![GitHub](https://img.shields.io/badge/GitHub-zmh2000829%2Fcve_backporting-blue?logo=github)](https://github.com/zmh2000829/cve_backporting)
-[![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
-[![Python](https://img.shields.io/badge/Python-3.8%2B-blue)](https://www.python.org/)
+<p align="center">
+  <em>One command — from CVE ID to deployable backport strategy.</em>
+</p>
 
-</div>
-
----
-
-## 🎯 核心价值
-
-| 传统人工流程 | 本工具 |
-|-------------|--------|
-| 手动查 MITRE、googlesource、邮件列表，逐个比对 commit | **Crawler Agent** 自动聚合多源情报，三级回退保证可用性 |
-| `git log --grep` 然后肉眼比对 subject | **三级搜索引擎** (ID → Subject → Diff) 自动定位，置信度量化输出 |
-| 本地仓库 squash 了社区补丁，传统 diff 比对完全失效 | **Diff 包含度算法** 识别"小补丁藏在大 commit 里"的场景 |
-| 内核版本间路径重组 (`fs/cifs/` → `fs/smb/client/`)，搜索直接找不到 | **PathMapper** 双向路径翻译，自动适配 8+ 已知子系统迁移 |
-| 百万级 commit 仓库 `git log` 一跑几分钟 | **SQLite + FTS5 缓存** + 增量更新，日常同步秒级完成 |
-| cherry-pick 前不确定要不要先合前置补丁 | **Hunk 级依赖分析** 精确到行范围，强/中/弱三级分级 |
-
----
-
-## 🚀 技术亮点
-
-### 1️⃣ 多 Agent 流水线架构
-
-四个独立 Agent（Crawler / Analysis / Dependency / DryRun）通过 Pipeline 编排器串联，每个阶段可独立使用、独立测试，关注点清晰分离。
-
-```
-CVE ID → Crawler → Analysis → Dependency → DryRun → 决策报告
-         情报采集   三级搜索    依赖分析    冲突预检
-```
-
-### 2️⃣ 三级渐进式 Commit 搜索
-
-**L1 精确 ID 匹配**（毫秒级）→ **L2 Subject 语义匹配**（SequenceMatcher 标准化比对）→ **L3 Diff 代码级匹配**（双向相似度 + 单向包含度自适应切换）
-
-在 commit ID 完全偏移的深度定制仓库中仍能精准定位。
-
-### 3️⃣ Diff Containment 算法 — 企业仓库的"杀手锏"
-
-针对企业内核"多 patch squash 为一个 commit"的常见实践，设计了基于 **Multiset 的单向包含度检测**：
-
-```
-社区补丁 (3 行改动)
-  +line_a
-  +line_b
-  -line_c
-
-企业大 commit (200 行改动)
-  +unrelated_1
-  +line_a      ✓ matched
-  +line_b      ✓ matched
-  -line_c      ✓ matched
-  +unrelated_2
-  -unrelated_3
-
-结果: 包含度 100% (3/3 matched)
-     双向相似度仅 ~30% (传统算法失效)
-```
-
-### 4️⃣ 跨版本路径映射
-
-内置 **8 组 Linux 内核子系统目录迁移规则**（cifs→smb、staging 毕业等），支持自定义扩展。在搜索和比对两个环节双向翻译，彻底解决"同一个文件在不同版本有不同路径"的匹配盲区。
-
-### 5️⃣ 千万级 Commit 性能优化
-
-- 流式 `git log` 读取（零内存拷贝）
-- 50K 批量写入、WAL + mmap 调优
-- FTS5 全文索引加速 subject 搜索
-- **增量缓存**自动校验分支一致性，rebase 后智能降级全量重建
-
-### 6️⃣ 多源补丁获取与容错
-
-`git.kernel.org`（主）→ `kernel.googlesource.com`（备，含重试）→ 本地 Git 对象库（兜底）
-
-三级回退 + 部分结果互补合并，单一数据源故障不影响分析流程。
-
-### 7️⃣ 五级自适应 DryRun 引擎 — 核心创新
-
-`strict → -C1 → 3way → 上下文重生成 → 冲突适配` 渐进式策略。
-
-**两层定位架构**：
-- **第一层** `_locate_hunk` — 用**锚点行定位**（before-context 最后一行 / after-context 第一行单行搜索）精确找到变更点，**不受 context 序列被额外代码行打断的影响**
-- **第二层** `_locate_in_file` — 用**七策略序列搜索**（精确 → 函数名锚点 → 行号窗口 → 模糊 → context → 投票 → 最长行）做兜底
-
-**补丁重建改进**：直接从目标文件变更点读取 context，不走查 hunk_lines，彻底解决额外行导致的对齐错位。
-
-**跨 hunk 偏移传播**：同文件多个 hunk 的搜索越来越精准。
-
-**路径映射感知**：自动翻译跨版本文件路径，优先选用 stable backport 补丁。
-
-**逐 hunk 冲突分析**：精确到行的"补丁期望 vs 文件实际"对比、L1/L2/L3 三级冲突严重度分级、自动生成冲突适配补丁。
-
-### 8️⃣ 代码语义匹配（Level 8 策略）
-
-当 context 序列被企业仓库的自定义代码打断时，提取 patch 的实际代码片段（removed/added），用**多维度代码相似度**（结构相似度 + 标识符匹配率 + 关键字序列相似度）在目标文件中搜索，**不依赖 context 序列连续性**，彻底解决"内容相同但 context 不连续"的核心难题。
-
-### 9️⃣ 闭环验证框架
-
-基于 `git worktree` 的非破坏性回退验证：自动创建修复前快照、运行 Pipeline、与真实合入记录对比，输出完整差异诊断（社区补丁 vs 本地修复对比、DryRun 冲突根因分析、前置依赖 TP/FP/FN 明细），并支持集成 LLM API 进行 AI 根因分析。批量基准测试汇总 Precision / Recall / F1 量化工具整体置信度。
+<p align="center">
+  <a href="#quick-start">Quick Start</a> ·
+  <a href="docs/TECHNICAL.md">Technical Docs</a> ·
+  <a href="docs/ADAPTIVE_DRYRUN.md">Algorithm Deep-Dive</a> ·
+  <a href="docs/MULTI_LEVEL_ALGORITHM.md">Multi-Level Algorithm</a> ·
+  <a href="#architecture">Architecture</a> ·
+  <a href="#benchmarks">Benchmarks</a>
+</p>
 
 ---
 
-## 📊 核心能力
+**CVE Backporting Engine** is an end-to-end automated pipeline for analyzing, locating, and backporting Linux kernel CVE security patches to enterprise-maintained downstream kernel branches. It combines multi-source intelligence gathering, multi-level commit search, hunk-level dependency analysis, and a **five-level adaptive dry-run engine** to deliver actionable backport strategies — with optional AI-assisted patch generation.
 
-### 1. CVE 全流程分析 (`analyze`)
+If you maintain a long-term enterprise Linux kernel and need to efficiently triage and backport upstream CVE fixes, this is the tool.
 
-给定一个 CVE ID，自动完成 **情报获取 → 引入检测 → 修复定位 → 依赖分析 → Dry-Run 冲突预检** 全链路。
+---
+
+## Why This Tool?
+
+| Traditional Manual Workflow | CVE Backporting Engine |
+|:--------------------------|:----------------------|
+| Manually search MITRE, googlesource, mailing lists, compare commits one by one | **Crawler Agent** auto-aggregates multi-source intelligence with 3-level fallback |
+| `git log --grep` then visually compare subjects | **3-Level Search Engine** (ID → Subject → Diff) with quantified confidence scores |
+| Enterprise squash commits break traditional diff comparison completely | **Diff Containment Algorithm** — multiset-based unidirectional containment detection |
+| Cross-version path renames (`fs/cifs/` → `fs/smb/client/`) cause search blind spots | **PathMapper** — bidirectional path translation across 8+ known subsystem migrations |
+| Multi-million commit repos make `git log` take minutes | **SQLite + FTS5 cache** with incremental updates, daily sync in seconds |
+| Uncertain whether prerequisite patches are needed before cherry-pick | **Hunk-level dependency analysis** with strong/medium/weak 3-tier grading |
+| `git apply` fails with cryptic errors, no guidance on resolution | **5-Level Adaptive DryRun** — from strict apply to AI-assisted patch generation |
+
+---
+
+## Key Innovations
+
+### Five-Level Adaptive DryRun Engine
+
+The core innovation — a progressive fallback architecture that maximizes automatic patch adaptation:
+
+```
+Patch Input
+  │
+  ├─ L0: Strict ──────── Exact context match (git apply --check)
+  ├─ L1: Context-C1 ──── Relaxed context (git apply -C1)
+  ├─ L2: 3-Way Merge ─── Three-way merge with base blob
+  ├─ L3: Regenerated ─── ⭐ Anchor-line positioning + context rebuild
+  ├─ L4: Conflict-Adapted  Hunk-level conflict analysis + adaptation
+  └─ L5: AI-Generated ── 🤖 LLM-assisted patch generation (optional)
+```
+
+**Level 3 (Regenerated)** introduces two breakthrough algorithms:
+- **Anchor-Line Positioning** — Single-line search immune to context sequence interruption by injected enterprise code
+- **Line-by-Line Voting** — Statistical mode-based sequence positioning using per-line position estimates
+- **Cross-Hunk Offset Propagation** — Accumulated offset from prior hunks improves subsequent search precision
+
+### Multi-Dimensional Code Semantic Matching
+
+When all context-based strategies fail, **Level 8** strategy triggers semantic matching:
+
+$$\text{score} = 0.5 \times S_{\text{structure}} + 0.3 \times S_{\text{identifier}} + 0.2 \times S_{\text{keyword}}$$
+
+Combines edit-distance structural similarity, identifier set Jaccard coefficient, and keyword sequence matching — independent of context continuity.
+
+### Diff Containment Algorithm
+
+Purpose-built for enterprise kernels where multiple upstream patches are squashed into single commits:
+
+```
+Community Patch (3 lines)          Enterprise Commit (200 lines)
+  +line_a                            +unrelated_1
+  +line_b              ──────►       +line_a    ✓
+  -line_c                            +line_b    ✓
+                                     -line_c    ✓
+                                     +unrelated_2
+
+  Containment: 100% (3/3)    vs    Similarity: ~30% (traditional fails)
+```
+
+### Closed-Loop Validation Framework
+
+Non-destructive `git worktree`-based regression testing: auto-creates pre-fix snapshots, runs full pipeline, compares against ground truth, outputs Precision/Recall/F1 metrics with optional LLM root-cause analysis.
+
+---
+
+## Architecture
+
+```
+                        ┌──────────────────────┐
+                        │   Pipeline Orchestrator│
+                        └──────────┬───────────┘
+               ┌───────────┬───────┴───────┬────────────┐
+               ▼           ▼               ▼            ▼
+          ┌─────────┐ ┌──────────┐ ┌────────────┐ ┌──────────┐
+          │ Crawler  │ │ Analysis │ │ Dependency  │ │  DryRun  │
+          │  Agent   │ │  Agent   │ │   Agent     │ │  Agent   │
+          └────┬─────┘ └────┬─────┘ └─────┬──────┘ └────┬─────┘
+               │            │             │              │
+          MITRE API    3-Level Search  Hunk-Level    5-Level
+          git.kernel   ID→Subject→Diff  Overlap     Adaptive
+          googlesource SequenceMatcher  Analysis    DryRun
+                       FTS5 Index      Scoring      Engine
+```
+
+### Agent Responsibilities
+
+| Agent | Input | Output | Key Algorithm |
+|-------|-------|--------|---------------|
+| **Crawler** | CVE ID | `CveInfo` + `PatchInfo` | 3-level source fallback + partial merge |
+| **Analysis** | Patch + Target repo | `SearchResult` | L1 exact ID → L2 subject → L3 diff/containment |
+| **Dependency** | Fix patch + Intro search | `List[PrerequisitePatch]` | Hunk overlap + function overlap + 3-tier grading |
+| **DryRun** | Patch + Target repo | `DryRunResult` | 5-level adaptive + anchor positioning + semantic match |
+
+---
+
+## Capabilities
+
+### `analyze` — Full CVE Analysis Pipeline
+
+End-to-end: intelligence → intro detection → fix location → dependency → dry-run.
 
 ```bash
 python cli.py analyze --cve CVE-2024-26633 --target 5.10-hulk
 ```
 
-### 2. 漏洞引入检测 (`check-intro`)
+### `check-intro` — Vulnerability Introduction Detection
 
-判断 mainline 引入 commit 在目标仓库中是否存在对应提交，确认漏洞是否影响本地内核。
+Determines if the vulnerability-introducing commit exists in your kernel.
 
 ```bash
 python cli.py check-intro --cve CVE-2024-26633 --target 5.10-hulk
 ```
 
-### 3. 修复补丁检测 (`check-fix`)
+### `check-fix` — Fix Patch Detection
 
-判断修复补丁是否已合入目标仓库，给出明确的"已修复 / 需 backport"结论。
+Determines if the fix has already been merged, with clear "fixed / needs backport" verdict.
 
 ```bash
 python cli.py check-fix --cve CVE-2024-26633 --target 5.10-hulk
 ```
 
-### 4. Commit 缓存构建 (`build-cache`)
+### `validate` — Tool Accuracy Verification
 
-对百万级 commit 仓库建立 SQLite + FTS5 缓存，加速全部搜索能力。
-
-```bash
-# 增量更新（默认）
-python cli.py build-cache --target 5.10-hulk
-
-# 强制全量重建
-python cli.py build-cache --target 5.10-hulk --full
-```
-
-### 5. 工具准确度验证 (`validate`)
-
-选取已修复的 CVE，通过 `git worktree` 回退到修复前状态，运行完整 Pipeline，与真实合入记录进行对比。
+Rolls back to pre-fix state via `git worktree`, runs pipeline, compares against ground truth.
 
 ```bash
 python cli.py validate \
-  --cve CVE-2024-26633 \
-  --target 5.10-hulk \
+  --cve CVE-2024-26633 --target 5.10-hulk \
   --known-fix da23bd709b46
 ```
 
-### 6. 批量基准测试 (`benchmark`)
+### `benchmark` — Batch Accuracy Assessment
 
-从 YAML 文件批量加载已修复 CVE 集合，逐一执行回退验证，汇总工具整体准确度。
+Runs validation on a YAML-defined CVE suite, outputs aggregate metrics.
 
 ```bash
 python cli.py benchmark --file benchmarks.yaml --target 5.10-hulk
 ```
 
+### `build-cache` — Commit Cache Construction
+
+Builds SQLite + FTS5 index for multi-million commit repos. Supports incremental updates.
+
+```bash
+python cli.py build-cache --target 5.10-hulk          # incremental (default)
+python cli.py build-cache --target 5.10-hulk --full    # full rebuild
+```
+
 ---
 
-## 🏗️ 架构
+## <a name="quick-start"></a>Quick Start
+
+**Runtime**: Python 3.8+
+
+```bash
+# Install dependencies
+pip install -r requirements.txt
+
+# Configure repository path
+# Edit config.yaml:
+#   repositories:
+#     "5.10-hulk":
+#       path: "/path/to/linux"
+#       branch: "linux-5.10.y"
+
+# Build commit cache (one-time, incremental updates afterward)
+python cli.py build-cache --target 5.10-hulk
+
+# Analyze a CVE
+python cli.py analyze --cve CVE-2024-26633 --target 5.10-hulk
+```
+
+---
+
+## <a name="benchmarks"></a>Performance
+
+| Metric | Value | Notes |
+|--------|-------|-------|
+| Supported repo scale | 10M+ commits | SQLite + FTS5 + WAL + mmap |
+| Single CVE analysis | 15-30s | Including network requests |
+| Cache sync (incremental) | < 5s | Auto-detects rebase, falls back to full |
+| Hunk positioning (avg) | < 100ms | Anchor-line + offset propagation |
+| Search coverage | L1 + L2 + L3 | ID → Subject → Diff/Containment |
+| Path mappings | 8+ built-in | Extensible via config |
+| DryRun strategies | 5 levels | Strict → C1 → 3way → Regen → Adapted |
+| Validation framework | P/R/F1 | git worktree non-destructive rollback |
+
+---
+
+## Project Structure
 
 ```
 cve_backporting/
-├── core/                     # 基础设施层
-│   ├── models.py             #   数据模型
-│   ├── config.py             #   YAML 配置加载
-│   ├── git_manager.py        #   Git 仓库操作 + SQLite 缓存
-│   ├── matcher.py            #   相似度算法 + 依赖图
-│   ├── code_matcher.py       #   代码语义匹配 (Level 8)
-│   ├── ai_patch_generator.py #   AI 辅助补丁生成
-│   ├── function_analyzer.py  #   函数定义和调用链分析
-│   └── ui.py                 #   Rich 终端 UI 组件
-├── agents/                   # 核心 Agent 层
-│   ├── crawler.py            #   Crawler Agent — CVE 情报 + 补丁获取
-│   ├── analysis.py           #   Analysis Agent — 三级 commit 搜索
-│   ├── dependency.py         #   Dependency Agent — 前置依赖分析
-│   └── dryrun.py             #   DryRun Agent — git apply 试应用
-├── pipeline.py               # Pipeline 编排器
-├── cli.py                    # CLI 入口
-├── config.yaml               # 配置文件
-├── benchmarks.example.yaml   # 基准测试集示例
+├── core/                          # Infrastructure Layer
+│   ├── models.py                  #   Data models (CveInfo, PatchInfo, DryRunResult, ...)
+│   ├── config.py                  #   YAML configuration loader
+│   ├── git_manager.py             #   Git operations + SQLite/FTS5 cache engine
+│   ├── matcher.py                 #   Similarity algorithms + PathMapper
+│   ├── code_matcher.py            #   Code semantic matching (Level 8)
+│   ├── search_report.py           #   Detailed search process reports
+│   ├── ai_patch_generator.py      #   AI-assisted patch generation (Level 5)
+│   ├── function_analyzer.py       #   C function definition + call chain analysis
+│   ├── llm_analyzer.py            #   LLM-powered root cause analysis
+│   └── ui.py                      #   Rich TUI components
+├── agents/                        # Core Agent Layer
+│   ├── crawler.py                 #   Crawler Agent — CVE intelligence + patch retrieval
+│   ├── analysis.py                #   Analysis Agent — 3-level commit search
+│   ├── dependency.py              #   Dependency Agent — prerequisite analysis
+│   └── dryrun.py                  #   DryRun Agent — 5-level adaptive engine
+├── pipeline.py                    # Pipeline Orchestrator
+├── cli.py                         # CLI entry point
+├── config.yaml                    # Configuration
+├── benchmarks.example.yaml        # Benchmark suite example
 ├── requirements.txt
 ├── tests/
-│   └── test_agents.py        # 测试套件
+│   └── test_agents.py
 └── docs/
-    ├── TECHNICAL.md          # 技术文档
-    └── ADAPTIVE_DRYRUN.md    # 五级自适应算法详解
+    ├── TECHNICAL.md               # Complete technical documentation
+    ├── ADAPTIVE_DRYRUN.md         # 5-level adaptive algorithm deep-dive
+    └── MULTI_LEVEL_ALGORITHM.md   # Multi-level algorithm detailed reference
 ```
 
 ---
 
-## 🔧 快速开始
+## Algorithm Highlights
 
-### 安装
+### 1. Unidirectional Diff Containment
 
-```bash
-pip install -r requirements.txt
-```
+First application of multiset containment detection in CVE backport tooling — solves the squash commit matching problem that defeats traditional bidirectional similarity.
 
-### 配置
+### 2. Two-Layer Hunk Positioning Architecture
 
-编辑 `config.yaml`，填入本地仓库路径和分支名：
+**Layer 1**: Anchor-line positioning — single-line search immune to context interruption.
+**Layer 2**: Seven-strategy sequence search — exact → function-name → line-window → fuzzy → context-retry → voting → longest-line.
+
+### 3. Direct-Read Patch Reconstruction
+
+Reads context directly from target file at the located change point — eliminates alignment drift caused by walking hunk_lines with injected extra lines.
+
+### 4. Cross-Hunk Offset Propagation
+
+Accumulated positioning offset from earlier hunks automatically refines search hints for later hunks in the same file.
+
+### 5. Closed-Loop Validation
+
+`git worktree`-based non-destructive rollback, Precision/Recall/F1 quantification, optional LLM root-cause analysis for failures.
+
+### 6. Cross-Version Path Mapping
+
+Bidirectional path translation across search, comparison, and DryRun — resolves directory restructuring blind spots.
+
+### 7. Code Semantic Matching
+
+Multi-dimensional similarity (structure + identifiers + keywords) — independent of context sequence continuity.
+
+---
+
+## AI Integration
+
+| Component | Technology | Purpose | Default |
+|-----------|-----------|---------|---------|
+| **Level 5: AI-Generated** | LLM (GPT-4o / DeepSeek / etc.) | Generate adapted patches when rules fail | Disabled |
+| **LLM Root-Cause Analysis** | LLM | Analyze validation failures | Disabled |
+| **Code Semantic Matching** | SequenceMatcher + Set ops | Multi-dimensional code similarity | Enabled (pure algorithm) |
+| **Diff Containment** | Multiset counting | Detect patches in squash commits | Enabled (pure algorithm) |
+
+Core algorithms (Level 0-4) are **fully deterministic** — no AI model inference, complete reproducibility and explainability. AI features are opt-in enhancements.
 
 ```yaml
-repositories:
-  "5.10-hulk":
-    path: "/path/to/linux"
-    branch: "linux-5.10.y"
+# config.yaml — AI configuration
+llm:
+  enabled: true
+  provider: "openai"
+  api_key: ""                    # or LLM_API_KEY env var
+  base_url: "https://api.openai.com/v1"
+  model: "gpt-4o"
+
+ai_patch_generation:
+  enabled: false
 ```
 
-### 构建缓存
+---
+
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| **[TECHNICAL.md](docs/TECHNICAL.md)** | Complete architecture, algorithms, data models, agent specifications |
+| **[ADAPTIVE_DRYRUN.md](docs/ADAPTIVE_DRYRUN.md)** | 5-level adaptive DryRun engine — algorithm principles and formal specification |
+| **[MULTI_LEVEL_ALGORITHM.md](docs/MULTI_LEVEL_ALGORITHM.md)** | Multi-level algorithm reference with mathematical foundations |
+
+---
+
+## Verified Test Cases
+
+| CVE | Status | Verification Points |
+|-----|--------|-------------------|
+| CVE-2024-26633 | Fixed | L1 intro detection, L2 fix backport location |
+| CVE-2025-40198 | N/A | Mainline identification accuracy (7 version mappings correct) |
+| CVE-2024-50154 | Fixed | L1 intro + L2 fix + DryRun conflict detection |
+| CVE-2024-26633 | Validated | Worktree rollback: fix detection ✔ intro L1 ✔ DryRun 3way ✔ |
+| CVE-2025-40196 | Unfixed | Intro L2 ✔, stable backport auto-selection, DryRun 3way ✔ |
+
+---
+
+## Testing
 
 ```bash
-python cli.py build-cache --target 5.10-hulk
-```
-
-### 分析 CVE
-
-```bash
-python cli.py analyze --cve CVE-2024-26633 --target 5.10-hulk
+python -m tests.test_agents                      # Full suite
+python -m tests.test_agents CVE-2024-26633       # Single CVE
+python -m tests.test_agents mainline             # Mainline identification
+python -m tests.test_agents full CVE-2024-26633  # End-to-end with dry-run
 ```
 
 ---
 
-## 📈 性能指标
+## Known Limitations
 
-| 指标 | 数据 |
-|------|------|
-| 支持仓库规模 | 千万级 commit |
-| 单 CVE 分析耗时 | 15-30 秒（含网络请求） |
-| Commit 搜索覆盖率 | L1 (ID) + L2 (Subject) + L3 (Diff + 包含度) 三级渐进 |
-| 路径映射 | 内置 8 组规则，支持自定义扩展 |
-| DryRun 冲突分析 | 精确到行的 expected vs actual 对比 |
-| 补丁获取容错 | 三级回退 + 部分结果互补合并 |
-| 验证框架 | git worktree 非破坏性回退，Precision/Recall/F1 量化 |
+1. L3 diff matching requires per-commit diff retrieval — slower with large candidate sets
+2. Dependency analysis based on file/function overlap — cannot capture indirect data structure dependencies
+3. `conflict-adapted` patches guarantee applicability but **require human review for semantic correctness**
+4. MITRE API may lack structured affected data for older CVEs
+5. Validation prerequisite comparison relies on ID/Subject matching — cannot cover pure code-semantic equivalence
 
 ---
 
-## 🎓 算法详解
+## Contributing
 
-详见 [`docs/TECHNICAL.md`](docs/TECHNICAL.md) 和 [`docs/ADAPTIVE_DRYRUN.md`](docs/ADAPTIVE_DRYRUN.md)
-
-### 核心创新点
-
-1. **单向包含度检测** — 首次在 CVE backport 场景中应用 Multiset 包含度算法，解决 squash commit 匹配失效问题
-
-2. **两层定位架构 + 锚点行定位** — 锚点行搜索不受 context 序列被额外代码打断的影响，彻底解决"内容相同但 context 不连续"的核心难题；七策略序列搜索兜底处理复杂场景
-
-3. **变更点直读补丁重建** — 不走查 hunk_lines（额外行导致错位），直接从目标文件变更点读取 context，保证补丁对齐正确
-
-4. **五级自适应补丁应用 + 跨 hunk 偏移传播** — 从 strict 到冲突适配的渐进式降级，同文件多 hunk 的偏移量自动传播越来越精准
-
-5. **闭环验证框架** — 基于 git worktree 的非破坏性回退验证，Precision/Recall/F1 量化工具置信度
-
-6. **跨版本路径映射** — 双向路径翻译贯穿搜索、比对、DryRun 全链路，彻底解决目录重组盲区
-
-7. **代码语义匹配** — 多维度相似度（结构 + 标识符 + 关键字），不依赖 context 序列连续性
+Issues and Pull Requests welcome.
 
 ---
 
-## 📝 使用示例
+## License
 
-### 场景 1: 日常 CVE 巡检
-
-```bash
-# 快速检查某个 CVE 是否影响本地内核
-python cli.py check-intro --cve CVE-2024-26633 --target 5.10-hulk
-
-# 检查修复补丁是否已合入
-python cli.py check-fix --cve CVE-2024-26633 --target 5.10-hulk
-```
-
-### 场景 2: 完整分析与决策
-
-```bash
-# 获取完整的分析报告，包括前置依赖和冲突预检
-python cli.py analyze --cve CVE-2024-26633 --target 5.10-hulk
-```
-
-### 场景 3: 工具准确度评估
-
-```bash
-# 验证工具在已修复 CVE 上的准确度
-python cli.py validate \
-  --cve CVE-2024-26633 \
-  --target 5.10-hulk \
-  --known-fix da23bd709b46 \
-  --known-prereqs "commit1,commit2"
-
-# 批量基准测试
-python cli.py benchmark --file benchmarks.yaml --target 5.10-hulk
-```
+MIT License — see [LICENSE](LICENSE)
 
 ---
 
-## 🧪 测试
-
-```bash
-python -m tests.test_agents                           # 完整测试
-python -m tests.test_agents CVE-2024-26633            # 单个 CVE
-python -m tests.test_agents mainline                  # Mainline 识别
-python -m tests.test_agents full CVE-2024-26633       # 端到端（含 dry-run）
-```
-
----
-
-## 📚 文档
-
-- **[TECHNICAL.md](docs/TECHNICAL.md)** — 完整技术文档，包含系统架构、算法详解、数据模型
-- **[ADAPTIVE_DRYRUN.md](docs/ADAPTIVE_DRYRUN.md)** — 五级自适应 DryRun 算法深度解析
-
----
-
-## 🤝 贡献
-
-欢迎提交 Issue 和 Pull Request！
-
----
-
-## 📄 许可证
-
-MIT License — 详见 [LICENSE](LICENSE)
-
----
-
-## 🙏 致谢
-
-感谢 Linux 内核社区和所有贡献者。
-
----
-
-<div align="center">
-
-**Made with ❤️ for Linux Kernel Security**
-
-</div>
+<p align="center">
+  <strong>Built for Linux Kernel Security</strong>
+  <br>
+  <em>Deterministic algorithms. Optional AI. Full traceability.</em>
+</p>

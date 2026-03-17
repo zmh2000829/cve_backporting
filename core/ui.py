@@ -706,99 +706,208 @@ def render_validate_report(result: dict):
         applies = dr_detail.get("applies_cleanly", None)
         method = dr_detail.get("apply_method", "")
         dr_tbl = Table(box=box.SIMPLE_HEAVY, show_header=False, padding=(0, 1),
-                       expand=True, title="[bold]DryRun 详情 (多级自适应)[/]")
-        dr_tbl.add_column("K", width=16, style="bold")
+                       expand=True, title="[bold]DryRun 详情 — 五级自适应补丁应用引擎[/]")
+        dr_tbl.add_column("K", width=20, style="bold")
         dr_tbl.add_column("V", ratio=1)
 
         if applies:
             method_labels = {
-                "strict": "[green]strict — 原始补丁可直接应用[/]",
-                "context-C1": "[cyan]context-C1 — 上下文偏移已适配[/]",
-                "3way": "[cyan]3-way merge — 三方合并成功[/]",
-                "regenerated": "[bold cyan]regenerated — 上下文已重新生成[/]",
+                "strict": "[green bold]strict — 原始补丁可直接应用[/]",
+                "context-C1": "[cyan bold]context-C1 — 上下文偏移已自动适配[/]",
+                "3way": "[cyan bold]3-way merge — 三方合并算法成功[/]",
+                "regenerated": "[bold cyan]regenerated — 上下文已从目标文件重建[/]",
                 "conflict-adapted": "[bold yellow]conflict-adapted — "
-                                    "冲突已适配 (需人工审查语义)[/]",
+                                    "冲突已适配 (需人工审查语义正确性)[/]",
+                "ai-generated": "[bold magenta]ai-generated — AI 辅助生成 "
+                                "(需人工审查)[/]",
             }
             status_text = method_labels.get(method, f"[green]可应用 ({method})[/]")
         else:
-            status_text = "[red]所有策略均失败[/]"
+            status_text = "[red bold]所有策略均失败 — 需人工手动合入[/]"
         dr_tbl.add_row("应用结果", status_text)
 
-        # 详细的策略描述
-        strategy_descriptions = {
+        strategy_full = {
             "strict": {
-                "desc": "标准 Git 补丁应用检查",
-                "principle": "要求 context 行精确匹配，补丁可直接应用",
-                "reason": "补丁来自同一分支或版本，目标文件未经修改，无任何 context 偏移",
+                "level": "Level 0",
+                "name": "Strict — 精确 Context 匹配",
+                "algo": "git apply --check",
+                "principle": (
+                    "调用 Git 原生补丁检查机制，要求补丁中每一行 context（unified diff "
+                    "中以空格开头的行）在目标文件中精确匹配。根据 hunk header 中的行号 "
+                    "@@ -start,count @@ 定位文件区域，逐行比较 context 行和 - 行内容。"
+                ),
+                "success_cond": (
+                    "补丁与目标文件同源或版本差异极小，context 行和 - 行完全匹配，"
+                    "行号偏移在 Git 默认容差 (±3 行) 范围内"
+                ),
+                "fail_cond": (
+                    "目标文件路径不存在，或任一 context/- 行内容不匹配，"
+                    "或中间 commit 修改了补丁相邻代码导致 context 偏移"
+                ),
             },
             "context-C1": {
-                "desc": "降低 context 匹配要求",
-                "principle": "仅需 1 行 context 匹配而非全部，使用 git apply -C1",
-                "reason": "中间 commit 修改了补丁 context 的部分行，但行号偏移不超过几行，补丁核心代码未被修改",
+                "level": "Level 1",
+                "name": "Context-C1 — 降低匹配约束",
+                "algo": "git apply --check -C1",
+                "principle": (
+                    "Git 的 -C 参数控制 context 行匹配严格程度。-C1 将最低匹配行数降为 1 "
+                    "（默认全部），保持 - 行精确匹配不变。Git 以递增偏移量在目标文件中"
+                    "搜索匹配窗口，容许更大的行号偏移。"
+                ),
+                "success_cond": (
+                    "中间 commit 仅修改了补丁 context 区域的部分行，但未触及 - 行（核心代码），"
+                    "且至少 1 行 context 仍能精确匹配"
+                ),
+                "fail_cond": (
+                    "偏移过大导致整个 context 窗口找不到匹配，"
+                    "或补丁 - 行内容在目标文件中已被修改"
+                ),
             },
             "3way": {
-                "desc": "三方合并算法",
-                "principle": "利用 base blob（补丁生成时的原始文件）进行智能冲突解决",
-                "reason": "Base blob 在 Git 对象库中可用，目标文件与 base 有共同祖先，冲突可通过三方合并自动解决",
+                "level": "Level 2",
+                "name": "3-Way Merge — 三方合并算法",
+                "algo": "git apply --check --3way",
+                "principle": (
+                    "经典的三方合并算法：从补丁的 index 行提取 base blob hash，在 Git 对象库"
+                    "中查找原始文件 (base)。分别计算 Base→Theirs (补丁变更) 和 Base→Ours "
+                    "(本地变更) 的差异。若两个差异修改了不同代码区域则可自动合并。"
+                ),
+                "success_cond": (
+                    "Git 对象库中存在补丁的 base blob（共享部分提交历史），"
+                    "且补丁变更与本地变更在代码区域上不重叠"
+                ),
+                "fail_cond": (
+                    "Base blob 不在对象库中（来自独立仓库无共同历史），"
+                    "或变更区域重叠产生冲突标记"
+                ),
             },
             "regenerated": {
-                "desc": "从目标文件重建 context",
-                "principle": "在目标文件中定位补丁变更点，从目标文件提取正确的 context 行，保留补丁的 +/- 行不变",
-                "reason": "Context 严重偏移（中间 commit 修改了多行相邻代码），但补丁核心代码未被修改，行号偏移可通过定位算法精确计算",
+                "level": "Level 3 ⭐",
+                "name": "Regenerated — 上下文重建（核心创新）",
+                "algo": "锚点行定位 + 七策略序列搜索 + 目标文件 context 重建",
+                "principle": (
+                    "补丁 +/- 行（核心修改）通常未被其他 commit 修改，仅 context 行偏移。"
+                    "算法在目标文件中通过锚点行定位（单行搜索不受 context 断裂影响）"
+                    "精确找到变更点位置，从目标文件提取正确的 context 行，"
+                    "保留原始补丁 +/- 行不变，重建兼容目标文件的新补丁。"
+                    "支持跨 hunk 偏移传播：前一个 hunk 的偏移量自动修正后续搜索。"
+                ),
+                "success_cond": (
+                    "Context 严重偏移但补丁核心代码未被修改。锚点行定位或七策略序列搜索"
+                    "（精确→函数名→行号窗口→模糊→context→投票→最长行）成功定位变更点"
+                ),
+                "fail_cond": (
+                    "代码结构大幅改写导致所有定位策略均失败，"
+                    "或补丁 - 行对应代码已被修改"
+                ),
             },
             "conflict-adapted": {
-                "desc": "冲突适配补丁生成",
-                "principle": "用目标文件实际行替换补丁的 - 行，保留 + 行不变，生成适配补丁",
-                "reason": "中间 commit 修改了补丁涉及的同一行代码，修改是局部的，补丁的 + 行（新增代码）仍然有效",
+                "level": "Level 4",
+                "name": "Conflict-Adapted — 冲突适配",
+                "algo": "逐 hunk 冲突分析 + Expected vs Actual 对比 + 适配补丁生成",
+                "principle": (
+                    "补丁 - 行在目标文件中内容已不同。逐 hunk 定位后提取补丁期望行 "
+                    "(expected) 与目标文件实际行 (actual)，逐行计算 SequenceMatcher 相似度。"
+                    "按相似度分级 (L1≥85% / L2≥50% / L3<50%)。对 L1/L2 级冲突，"
+                    "用 actual 替换补丁 - 行，保留 + 行不变，生成适配补丁。"
+                ),
+                "success_cond": (
+                    "冲突为局部差异（L1/L2级），补丁 + 行仍然有效，"
+                    "生成的适配补丁通过 git apply --check 验证"
+                ),
+                "fail_cond": (
+                    "冲突过于严重（L3级）或适配后补丁仍无法通过 git apply --check"
+                ),
+            },
+            "ai-generated": {
+                "level": "Level 5 🤖",
+                "name": "AI-Generated — AI 辅助补丁生成",
+                "algo": "LLM 分析上下文差异 + AI 生成适配补丁 + 格式校验 + 应用性验证",
+                "principle": (
+                    "将原始补丁、目标文件代码、冲突分析结果组装为结构化 prompt，"
+                    "调用大语言模型 (LLM) 分析代码差异语义，生成适配补丁。"
+                    "对 LLM 输出进行 unified diff 格式校验和 git apply --check 验证。"
+                ),
+                "success_cond": (
+                    "LLM 生成的补丁通过格式校验和 git apply --check 验证"
+                ),
+                "fail_cond": (
+                    "AI 未启用，或 LLM 生成补丁不合法，"
+                    "或生成补丁无法通过应用性验证"
+                ),
             },
         }
 
         if method and applies:
             levels = ["strict", "context-C1", "3way",
-                      "regenerated", "conflict-adapted"]
+                      "regenerated", "conflict-adapted", "ai-generated"]
             level_display = []
             for lvl in levels:
                 if lvl == method:
-                    level_display.append(f"[green]✔ {lvl}[/]")
+                    level_display.append(f"[green bold]✔ {lvl}[/]")
                     break
                 else:
                     level_display.append(f"[red]✘ {lvl}[/]")
             dr_tbl.add_row("尝试路径", " → ".join(level_display))
-            
-            # 添加成功策略的详细说明
-            if method in strategy_descriptions:
-                desc_info = strategy_descriptions[method]
+
+            if method in strategy_full:
+                info = strategy_full[method]
                 dr_tbl.add_row("", "")
-                dr_tbl.add_row("[bold cyan]成功策略详解[/]", "")
-                dr_tbl.add_row("  方法", f"[cyan]{desc_info['desc']}[/]")
-                dr_tbl.add_row("  原理", f"[dim]{desc_info['principle']}[/]")
-                dr_tbl.add_row("  成功原因", f"[green]{desc_info['reason']}[/]")
+                dr_tbl.add_row(
+                    "[bold cyan]成功策略[/]",
+                    f"[bold cyan]{info['level']}: {info['name']}[/]")
+                dr_tbl.add_row("  算法", f"[cyan]{info['algo']}[/]")
+                dr_tbl.add_row("  原理", f"{info['principle']}")
+                dr_tbl.add_row("  成功条件", f"[green]{info['success_cond']}[/]")
+
+            failed_levels = []
+            for lvl in levels:
+                if lvl == method:
+                    break
+                failed_levels.append(lvl)
+            if failed_levels:
+                dr_tbl.add_row("", "")
+                dr_tbl.add_row("[dim bold]失败策略分析[/]", "")
+                for fl in failed_levels:
+                    if fl in strategy_full:
+                        fi = strategy_full[fl]
+                        dr_tbl.add_row(
+                            f"  [red]✘ {fi['level']}[/]",
+                            f"[dim]{fi['name']}: {fi['fail_cond']}[/]")
+
         elif not applies:
             dr_tbl.add_row("尝试路径",
-                           "[red]✘ strict → ✘ -C1 → ✘ 3way → "
+                           "[red bold]✘ strict → ✘ -C1 → ✘ 3way → "
                            "✘ regenerated → ✘ conflict-adapted[/]")
-            
-            # 添加失败原因分析
+
             dr_tbl.add_row("", "")
-            dr_tbl.add_row("[bold red]失败分析[/]", "")
-            dr_tbl.add_row("  strict 失败", "[dim]Context 行不匹配或文件路径不存在[/]")
-            dr_tbl.add_row("  -C1 失败", "[dim]Context 偏移超过 1 行或补丁涉及代码被修改[/]")
-            dr_tbl.add_row("  3way 失败", "[dim]Base blob 不可用或三方合并产生冲突[/]")
-            dr_tbl.add_row("  regenerated 失败", "[dim]无法定位变更点或补丁涉及代码被大幅改写[/]")
-            dr_tbl.add_row("  conflict-adapted 失败", "[dim]冲突过于复杂或适配后补丁仍无法应用[/]")
+            dr_tbl.add_row("[bold red]逐级失败分析[/]", "")
+            for lvl_key in ["strict", "context-C1", "3way",
+                            "regenerated", "conflict-adapted"]:
+                if lvl_key in strategy_full:
+                    fi = strategy_full[lvl_key]
+                    dr_tbl.add_row("", "")
+                    dr_tbl.add_row(
+                        f"  [red]✘ {fi['level']}[/]",
+                        f"[bold]{fi['name']}[/]")
+                    dr_tbl.add_row("    算法", f"[dim]{fi['algo']}[/]")
+                    dr_tbl.add_row("    原理", f"[dim]{fi['principle']}[/]")
+                    dr_tbl.add_row(
+                        "    失败原因",
+                        f"[red]{fi['fail_cond']}[/]")
 
         conf_files = dr_detail.get("conflicting_files", [])
         if conf_files:
             dr_tbl.add_row("", "")
-            dr_tbl.add_row("冲突文件", f"[red]{len(conf_files)}[/] 个")
+            dr_tbl.add_row("冲突文件", f"[red bold]{len(conf_files)}[/] 个")
             for cf in conf_files[:10]:
-                dr_tbl.add_row("", f"  [red]{cf}[/]")
+                dr_tbl.add_row("", f"  [red]✘[/] {cf}")
 
         err = dr_detail.get("error_output", "")
         if err:
             err_lines = err.strip().split("\n")[:6]
             dr_tbl.add_row("", "")
-            dr_tbl.add_row("错误详情", "")
+            dr_tbl.add_row("详情", "")
             for el in err_lines:
                 dr_tbl.add_row("", f"[dim]{el}[/]")
 
@@ -813,8 +922,12 @@ def render_validate_report(result: dict):
         has_adapted = dr_detail.get("has_adapted_patch", False)
         if has_adapted:
             dr_tbl.add_row("", "")
-            adapt_msg = ("已生成适配补丁" if method == "conflict-adapted"
-                         else "已生成适配补丁 (context lines 已更新)")
+            if method == "conflict-adapted":
+                adapt_msg = "已生成冲突适配补丁 (- 行已替换为目标文件实际内容, + 行不变)"
+            elif method == "ai-generated":
+                adapt_msg = "已生成 AI 辅助补丁 (需人工审查语义正确性)"
+            else:
+                adapt_msg = "已生成适配补丁 (context lines 已从目标文件重建, 核心改动不变)"
             dr_tbl.add_row("[bold cyan]适配补丁[/]",
                            f"[bold cyan]{adapt_msg}[/]")
 

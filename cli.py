@@ -811,6 +811,7 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
                 "stat_output": dr.stat_output[:500] if dr.stat_output else "",
                 "has_adapted_patch": bool(dr.adapted_patch),
                 "conflict_hunks": dr.conflict_hunks,
+                "search_reports": dr.search_reports if dr.search_reports else [],
             }
 
         # 获取 known_fix 的完整信息(stat + diff)
