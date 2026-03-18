@@ -80,6 +80,98 @@ def _split_hunk_segments(hunk_lines: List[str]):
     return ctx_before, removed, added, ctx_after
 
 
+def _parse_hunk_regions(hunk_lines: List[str]):
+    """
+    将 hunk 解析为有序的区域列表，正确保留多变更区域之间的 context。
+    返回: [{"type": "context", "lines": [...]},
+           {"type": "change",  "removed": [...], "added": [...]},
+           ...]
+    """
+    clean = _clean_hunk_lines(hunk_lines)
+    regions = []
+    current_ctx = []
+    current_removed = []
+    current_added = []
+    in_change = False
+
+    for line in clean:
+        if line.startswith("-"):
+            if not in_change and current_ctx:
+                regions.append({"type": "context", "lines": current_ctx})
+                current_ctx = []
+            in_change = True
+            current_removed.append(line[1:])
+        elif line.startswith("+"):
+            if not in_change and current_ctx:
+                regions.append({"type": "context", "lines": current_ctx})
+                current_ctx = []
+            in_change = True
+            current_added.append(line[1:])
+        else:
+            text = line[1:] if line.startswith(" ") else line
+            if in_change:
+                regions.append({
+                    "type": "change",
+                    "removed": current_removed,
+                    "added": current_added,
+                })
+                current_removed = []
+                current_added = []
+                in_change = False
+            current_ctx.append(text)
+
+    if in_change:
+        regions.append({
+            "type": "change",
+            "removed": current_removed,
+            "added": current_added,
+        })
+    elif current_ctx:
+        regions.append({"type": "context", "lines": current_ctx})
+
+    return regions
+
+
+def _split_to_sub_hunks(hunk_header: str, hunk_lines: List[str]):
+    """
+    将包含多个变更区域的 hunk 拆分为独立的 sub-hunk。
+    每个 sub-hunk 只有一个连续的变更区域和各自的 context。
+    单区域 hunk 原样返回。
+    """
+    regions = _parse_hunk_regions(hunk_lines)
+    change_indices = [i for i, r in enumerate(regions)
+                      if r["type"] == "change"]
+
+    if len(change_indices) <= 1:
+        return [(hunk_header, hunk_lines)]
+
+    sub_hunks = []
+    for ci in change_indices:
+        change = regions[ci]
+
+        ctx_before = []
+        if ci > 0 and regions[ci - 1]["type"] == "context":
+            ctx_before = regions[ci - 1]["lines"][-3:]
+
+        ctx_after = []
+        if ci + 1 < len(regions) and regions[ci + 1]["type"] == "context":
+            ctx_after = regions[ci + 1]["lines"][:3]
+
+        sub_lines = []
+        for l in ctx_before:
+            sub_lines.append(" " + l)
+        for l in change["removed"]:
+            sub_lines.append("-" + l)
+        for l in change["added"]:
+            sub_lines.append("+" + l)
+        for l in ctx_after:
+            sub_lines.append(" " + l)
+
+        sub_hunks.append((hunk_header, sub_lines))
+
+    return sub_hunks
+
+
 class DryRunAgent:
     """补丁试应用Agent — 多级上下文自适应 + 路径映射 + 代码语义匹配"""
 
@@ -689,55 +781,57 @@ class DryRunAgent:
             new_parts.append("\n".join(header_lines))
             file_offset = 0
 
-            for hunk_header, hunk_lines in hunks:
-                hint_line = self._parse_hunk_line_hint(hunk_header)
-                func_name = self._extract_func_from_hunk(hunk_header)
-                adj_hint = ((hint_line + file_offset) if hint_line
-                            else hint_line)
+            for orig_header, orig_lines in hunks:
+                sub_hunks = _split_to_sub_hunks(orig_header, orig_lines)
 
-                change_pos, n_remove = self._locate_hunk(
-                    hunk_lines, target_lines, adj_hint, func_name)
+                for hunk_header, hunk_lines in sub_hunks:
+                    hint_line = self._parse_hunk_line_hint(hunk_header)
+                    func_name = self._extract_func_from_hunk(hunk_header)
+                    adj_hint = ((hint_line + file_offset) if hint_line
+                                else hint_line)
 
-                if change_pos is not None and hint_line:
-                    _, _, _, ctx_after = _split_hunk_segments(hunk_lines)
-                    ctx_before_len = len(_split_hunk_segments(
-                        hunk_lines)[0])
-                    expected_start = hint_line - 1
-                    actual_start = change_pos - ctx_before_len
-                    file_offset = actual_start - expected_start
+                    change_pos, n_remove = self._locate_hunk(
+                        hunk_lines, target_lines, adj_hint, func_name)
 
-                if change_pos is None:
-                    new_parts.append(hunk_header)
-                    new_parts.append("\n".join(hunk_lines))
-                    continue
+                    if change_pos is not None and hint_line:
+                        ctx_before_len = len(
+                            _split_hunk_segments(hunk_lines)[0])
+                        expected_start = hint_line - 1
+                        actual_start = change_pos - ctx_before_len
+                        file_offset = actual_start - expected_start
 
-                _, _, added_lines, _ = _split_hunk_segments(hunk_lines)
-                any_adapted = True
+                    if change_pos is None:
+                        new_parts.append(hunk_header)
+                        new_parts.append("\n".join(hunk_lines))
+                        continue
 
-                # 直接从目标文件构建补丁 (不走查 hunk_lines)
-                ctx_n = 3
-                start = max(0, change_pos - ctx_n)
-                rebuilt = []
-                for i in range(start, change_pos):
-                    rebuilt.append(" " + target_lines[i])
-                for i in range(change_pos,
-                               min(len(target_lines),
-                                   change_pos + n_remove)):
-                    rebuilt.append("-" + target_lines[i])
-                for a in added_lines:
-                    rebuilt.append("+" + a)
-                end = min(len(target_lines),
-                          change_pos + n_remove + ctx_n)
-                for i in range(change_pos + n_remove, end):
-                    rebuilt.append(" " + target_lines[i])
+                    _, _, added_lines, _ = _split_hunk_segments(
+                        hunk_lines)
+                    any_adapted = True
 
-                oc = sum(1 for l in rebuilt
-                         if l.startswith(" ") or l.startswith("-"))
-                nc = sum(1 for l in rebuilt
-                         if l.startswith(" ") or l.startswith("+"))
-                new_parts.append(
-                    f"@@ -{start + 1},{oc} +{start + 1},{nc} @@")
-                new_parts.append("\n".join(rebuilt))
+                    ctx_n = 3
+                    start = max(0, change_pos - ctx_n)
+                    rebuilt = []
+                    for i in range(start, change_pos):
+                        rebuilt.append(" " + target_lines[i])
+                    for i in range(change_pos,
+                                   min(len(target_lines),
+                                       change_pos + n_remove)):
+                        rebuilt.append("-" + target_lines[i])
+                    for a in added_lines:
+                        rebuilt.append("+" + a)
+                    end = min(len(target_lines),
+                              change_pos + n_remove + ctx_n)
+                    for i in range(change_pos + n_remove, end):
+                        rebuilt.append(" " + target_lines[i])
+
+                    oc = sum(1 for l in rebuilt
+                             if l.startswith(" ") or l.startswith("-"))
+                    nc = sum(1 for l in rebuilt
+                             if l.startswith(" ") or l.startswith("+"))
+                    new_parts.append(
+                        f"@@ -{start + 1},{oc} +{start + 1},{nc} @@")
+                    new_parts.append("\n".join(rebuilt))
 
         if not any_adapted:
             return None
@@ -834,95 +928,99 @@ class DryRunAgent:
             adapted_parts.append("\n".join(header_lines))
             file_offset = 0
 
-            for hunk_header, hunk_lines in hunks:
-                ctx_before, expected, added, ctx_after = \
-                    _split_hunk_segments(hunk_lines)
+            for orig_header, orig_lines in hunks:
+                sub_hunks = _split_to_sub_hunks(orig_header, orig_lines)
 
-                hint_line = self._parse_hunk_line_hint(hunk_header)
-                func_name = self._extract_func_from_hunk(hunk_header)
-                adj_hint = ((hint_line + file_offset) if hint_line
-                            else hint_line)
+                for hunk_header, hunk_lines in sub_hunks:
+                    ctx_before, expected, added, ctx_after = \
+                        _split_hunk_segments(hunk_lines)
 
-                change_pos, n_remove = self._locate_hunk(
-                    hunk_lines, file_lines, adj_hint, func_name)
+                    hint_line = self._parse_hunk_line_hint(hunk_header)
+                    func_name = self._extract_func_from_hunk(hunk_header)
+                    adj_hint = ((hint_line + file_offset) if hint_line
+                                else hint_line)
 
-                if change_pos is not None and hint_line:
-                    expected_start = hint_line - 1
-                    actual_start = change_pos - len(ctx_before)
-                    file_offset = actual_start - expected_start
+                    change_pos, n_remove = self._locate_hunk(
+                        hunk_lines, file_lines, adj_hint, func_name)
 
-                if change_pos is None:
+                    if change_pos is not None and hint_line:
+                        expected_start = hint_line - 1
+                        actual_start = change_pos - len(ctx_before)
+                        file_offset = actual_start - expected_start
+
+                    if change_pos is None:
+                        hunk_analyses.append({
+                            "file": file_path, "severity": "L3",
+                            "reason": "无法在目标文件中定位对应代码区域",
+                            "expected": expected[:8], "actual": [],
+                            "added": added[:8], "hint_line": hint_line,
+                            "patch_ctx_before": ctx_before[:5],
+                            "patch_ctx_after": ctx_after[:5],
+                        })
+                        any_l3 = True
+                        adapted_parts.append(hunk_header)
+                        adapted_parts.append("\n".join(hunk_lines))
+                        continue
+
+                    actual = file_lines[change_pos:change_pos + n_remove]
+                    if n_remove > 0:
+                        sim, changed = self._compare_lines(
+                            expected, actual, change_pos)
+                    else:
+                        sim, changed = 1.0, []
+
+                    if n_remove == 0:
+                        sev, reason = "L1", "纯添加 hunk — 已定位插入点"
+                    elif sim >= 0.85:
+                        sev, reason = "L1", "轻微差异 — 可自动适配"
+                    elif sim >= 0.50:
+                        sev, reason = "L2", "中度差异 — 需人工审查"
+                    else:
+                        sev, reason = "L3", "重大差异 — 需人工手动合入"
+
+                    snippet_lo = max(0, change_pos - 3)
+                    snippet_hi = min(len(file_lines),
+                                     change_pos + n_remove + 3)
                     hunk_analyses.append({
-                        "file": file_path, "severity": "L3",
-                        "reason": "无法在目标文件中定位对应代码区域",
-                        "expected": expected[:8], "actual": [],
-                        "added": added[:8], "hint_line": hint_line,
+                        "file": file_path, "severity": sev,
+                        "similarity": round(sim, 3), "reason": reason,
+                        "expected": expected[:10], "actual": actual[:10],
+                        "added": added[:10],
+                        "changed_lines": changed[:6],
+                        "location": change_pos + 1,
                         "patch_ctx_before": ctx_before[:5],
                         "patch_ctx_after": ctx_after[:5],
+                        "target_snippet":
+                            file_lines[snippet_lo:snippet_hi][:12],
                     })
-                    any_l3 = True
-                    adapted_parts.append(hunk_header)
-                    adapted_parts.append("\n".join(hunk_lines))
-                    continue
 
-                actual = file_lines[change_pos:change_pos + n_remove]
-                if n_remove > 0:
-                    sim, changed = self._compare_lines(
-                        expected, actual, change_pos)
-                else:
-                    sim, changed = 1.0, []
-
-                if n_remove == 0:
-                    sev, reason = "L1", "纯添加 hunk — 已定位插入点"
-                elif sim >= 0.85:
-                    sev, reason = "L1", "轻微差异 — 可自动适配"
-                elif sim >= 0.50:
-                    sev, reason = "L2", "中度差异 — 需人工审查"
-                else:
-                    sev, reason = "L3", "重大差异 — 需人工手动合入"
-
-                snippet_lo = max(0, change_pos - 3)
-                snippet_hi = min(len(file_lines),
-                                 change_pos + n_remove + 3)
-                hunk_analyses.append({
-                    "file": file_path, "severity": sev,
-                    "similarity": round(sim, 3), "reason": reason,
-                    "expected": expected[:10], "actual": actual[:10],
-                    "added": added[:10], "changed_lines": changed[:6],
-                    "location": change_pos + 1,
-                    "patch_ctx_before": ctx_before[:5],
-                    "patch_ctx_after": ctx_after[:5],
-                    "target_snippet":
-                        file_lines[snippet_lo:snippet_hi][:12],
-                })
-
-                if sev != "L3":
-                    ctx_n = 3
-                    start = max(0, change_pos - ctx_n)
-                    rebuilt = []
-                    for i in range(start, change_pos):
-                        rebuilt.append(" " + file_lines[i])
-                    for i in range(change_pos,
-                                   min(len(file_lines),
-                                       change_pos + n_remove)):
-                        rebuilt.append("-" + file_lines[i])
-                    for a in added:
-                        rebuilt.append("+" + a)
-                    end = min(len(file_lines),
-                              change_pos + n_remove + ctx_n)
-                    for i in range(change_pos + n_remove, end):
-                        rebuilt.append(" " + file_lines[i])
-                    oc = sum(1 for l in rebuilt
-                             if l.startswith(" ") or l.startswith("-"))
-                    nc = sum(1 for l in rebuilt
-                             if l.startswith(" ") or l.startswith("+"))
-                    adapted_parts.append(
-                        f"@@ -{start+1},{oc} +{start+1},{nc} @@")
-                    adapted_parts.append("\n".join(rebuilt))
-                else:
-                    any_l3 = True
-                    adapted_parts.append(hunk_header)
-                    adapted_parts.append("\n".join(hunk_lines))
+                    if sev != "L3":
+                        ctx_n = 3
+                        start = max(0, change_pos - ctx_n)
+                        rebuilt = []
+                        for i in range(start, change_pos):
+                            rebuilt.append(" " + file_lines[i])
+                        for i in range(change_pos,
+                                       min(len(file_lines),
+                                           change_pos + n_remove)):
+                            rebuilt.append("-" + file_lines[i])
+                        for a in added:
+                            rebuilt.append("+" + a)
+                        end = min(len(file_lines),
+                                  change_pos + n_remove + ctx_n)
+                        for i in range(change_pos + n_remove, end):
+                            rebuilt.append(" " + file_lines[i])
+                        oc = sum(1 for l in rebuilt if
+                                 l.startswith(" ") or l.startswith("-"))
+                        nc = sum(1 for l in rebuilt if
+                                 l.startswith(" ") or l.startswith("+"))
+                        adapted_parts.append(
+                            f"@@ -{start+1},{oc} +{start+1},{nc} @@")
+                        adapted_parts.append("\n".join(rebuilt))
+                    else:
+                        any_l3 = True
+                        adapted_parts.append(hunk_header)
+                        adapted_parts.append("\n".join(hunk_lines))
 
         adapted_diff = None
         if hunk_analyses and not all(
