@@ -688,6 +688,141 @@ def _diagnose_root_cause(diff_cmp: dict, dryrun_detail: dict,
     return causes
 
 
+def _compare_generated_vs_real(generated_patch: str, real_diff: str) -> dict:
+    """
+    比较工具生成的适配补丁与本地真实修复补丁，判断两者是否"本质相同"。
+
+    本质相同的定义：核心修改意图一致（即补丁的 +/- 行语义等价），
+    即使 context 行、行号、空白格式存在差异。
+
+    返回:
+      verdict: "identical" / "essentially_same" / "partially_same" / "different"
+      core_similarity: 核心改动行的相似度
+      detail: 逐文件对比
+    """
+    from core.matcher import diff_similarity
+
+    if not generated_patch or not real_diff:
+        return {
+            "verdict": "no_data",
+            "core_similarity": 0.0,
+            "overall_similarity": 0.0,
+            "detail": [],
+            "diagnosis": "缺少补丁数据，无法比较",
+        }
+
+    gen_files = _parse_diff_by_file(generated_patch)
+    real_files = _parse_diff_by_file(real_diff)
+
+    gen_set = set(gen_files.keys())
+    real_set = set(real_files.keys())
+    common = gen_set & real_set
+    gen_only = sorted(gen_set - real_set)
+    real_only = sorted(real_set - gen_set)
+
+    file_details = []
+    core_sims = []
+    overall_sims = []
+
+    for fpath in sorted(common):
+        overall_sim = diff_similarity(gen_files[fpath], real_files[fpath])
+        overall_sims.append(overall_sim)
+
+        gen_changes = _extract_key_changes(gen_files[fpath], 200)
+        real_changes = _extract_key_changes(real_files[fpath], 200)
+
+        gen_added = [l[1:].strip() for l in gen_changes if l.startswith("+")]
+        gen_removed = [l[1:].strip() for l in gen_changes if l.startswith("-")]
+        real_added = [l[1:].strip() for l in real_changes if l.startswith("+")]
+        real_removed = [l[1:].strip() for l in real_changes if l.startswith("-")]
+
+        gen_add_set = set(gen_added)
+        real_add_set = set(real_added)
+        gen_rm_set = set(gen_removed)
+        real_rm_set = set(real_removed)
+
+        add_common = gen_add_set & real_add_set
+        rm_common = gen_rm_set & real_rm_set
+
+        total_gen = len(gen_add_set) + len(gen_rm_set)
+        total_real = len(real_add_set) + len(real_rm_set)
+        total_common = len(add_common) + len(rm_common)
+
+        if total_gen + total_real > 0:
+            core_sim = (2 * total_common) / (total_gen + total_real)
+        else:
+            core_sim = 1.0 if total_gen == 0 and total_real == 0 else 0.0
+        core_sims.append(core_sim)
+
+        add_only_gen = sorted(gen_add_set - real_add_set)
+        add_only_real = sorted(real_add_set - gen_add_set)
+        rm_only_gen = sorted(gen_rm_set - real_rm_set)
+        rm_only_real = sorted(real_rm_set - gen_rm_set)
+
+        file_details.append({
+            "file": fpath,
+            "core_similarity": round(core_sim, 3),
+            "overall_similarity": round(overall_sim, 3),
+            "gen_added": len(gen_added),
+            "real_added": len(real_added),
+            "common_added": len(add_common),
+            "gen_removed": len(gen_removed),
+            "real_removed": len(real_removed),
+            "common_removed": len(rm_common),
+            "add_only_in_generated": add_only_gen[:5],
+            "add_only_in_real": add_only_real[:5],
+            "rm_only_in_generated": rm_only_gen[:3],
+            "rm_only_in_real": rm_only_real[:3],
+        })
+
+    avg_core = sum(core_sims) / len(core_sims) if core_sims else 0.0
+    avg_overall = sum(overall_sims) / len(overall_sims) if overall_sims else 0.0
+
+    file_coverage = len(common) / max(len(gen_set | real_set), 1)
+
+    if avg_core >= 0.95 and file_coverage >= 0.9:
+        verdict = "identical"
+    elif avg_core >= 0.75 and file_coverage >= 0.7:
+        verdict = "essentially_same"
+    elif avg_core >= 0.40 or file_coverage >= 0.5:
+        verdict = "partially_same"
+    else:
+        verdict = "different"
+
+    diagnosis_parts = []
+    if verdict in ("identical", "essentially_same"):
+        diagnosis_parts.append(
+            f"生成补丁与真实修复本质相同 (核心改动相似度 {avg_core:.0%})")
+        if gen_only:
+            diagnosis_parts.append(f"生成补丁额外修改了: {', '.join(gen_only[:3])}")
+        if real_only:
+            diagnosis_parts.append(f"真实修复额外修改了: {', '.join(real_only[:3])}")
+    elif verdict == "partially_same":
+        diagnosis_parts.append(
+            f"生成补丁与真实修复部分一致 (核心改动相似度 {avg_core:.0%})")
+        for fd in file_details:
+            if fd["core_similarity"] < 0.5:
+                extras = fd["add_only_in_real"][:2]
+                if extras:
+                    diagnosis_parts.append(
+                        f"  {fd['file']}: 真实修复有额外改动 "
+                        f"(如 +{extras[0][:50]})")
+    else:
+        diagnosis_parts.append(
+            f"生成补丁与真实修复差异较大 (核心改动相似度仅 {avg_core:.0%})")
+
+    return {
+        "verdict": verdict,
+        "core_similarity": round(avg_core, 3),
+        "overall_similarity": round(avg_overall, 3),
+        "file_coverage": round(file_coverage, 3),
+        "gen_only_files": gen_only,
+        "real_only_files": real_only,
+        "detail": file_details,
+        "diagnosis": " | ".join(diagnosis_parts),
+    }
+
+
 def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
                          git_mgr=None, show_stages=True):
     """执行单个 CVE 的回退验证，返回结果 dict"""
@@ -868,17 +1003,42 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
 
         recommendations = result.recommendations if result.recommendations else []
 
-        # 输出生成的 patch 文件
+        # ── 输出补丁文件到 analysis_results/ ────────────────
+        output_dir = config.output.output_dir
+        os.makedirs(output_dir, exist_ok=True)
+
         adapted_patch = result.dry_run.adapted_patch if result.dry_run else None
         patch_file = None
+        community_patch_file = None
+        real_fix_patch_file = None
+
+        if community_diff:
+            community_patch_file = os.path.join(
+                output_dir, f"{cve_id}_{tv}_community.patch")
+            with open(community_patch_file, "w") as f:
+                f.write(community_diff)
+            logger.info("社区补丁已保存: %s", community_patch_file)
+
+        if local_diff:
+            real_fix_patch_file = os.path.join(
+                output_dir, f"{cve_id}_{tv}_real_fix.patch")
+            with open(real_fix_patch_file, "w") as f:
+                f.write(local_diff)
+            logger.info("真实修复补丁已保存: %s", real_fix_patch_file)
+
         if adapted_patch:
-            import os
-            output_dir = config.output.output_dir
-            os.makedirs(output_dir, exist_ok=True)
-            patch_file = os.path.join(output_dir, f"{cve_id}_{tv}_adapted.patch")
+            patch_file = os.path.join(
+                output_dir, f"{cve_id}_{tv}_adapted.patch")
             with open(patch_file, "w") as f:
                 f.write(adapted_patch)
-            logger.info(f"生成的适配补丁已保存: {patch_file}")
+            logger.info("适配补丁已保存: %s", patch_file)
+
+        # ── 核心: 生成补丁 vs 真实修复的本质比较 ─────────────
+        generated_vs_real = {}
+        patch_to_compare = adapted_patch or community_diff
+        if patch_to_compare and local_diff:
+            generated_vs_real = _compare_generated_vs_real(
+                patch_to_compare, local_diff)
 
         return {
             "cve_id": cve_id, "known_fix": known_fix, "target": tv,
@@ -891,11 +1051,14 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
             "dryrun_detail": dryrun_detail,
             "known_fix_detail": known_fix_detail,
             "diff_comparison": diff_comparison,
+            "generated_vs_real": generated_vs_real,
             "root_cause": root_cause,
             "tool_prereqs": tool_prereqs_detail,
             "known_prereqs_detail": known_prereqs_detail,
             "recommendations": recommendations,
-            "patch_file": patch_file,  # 新增：patch 文件路径
+            "patch_file": patch_file,
+            "community_patch_file": community_patch_file,
+            "real_fix_patch_file": real_fix_patch_file,
         }
 
     finally:

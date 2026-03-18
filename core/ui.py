@@ -934,40 +934,34 @@ def render_validate_report(result: dict):
         sections.append(dr_tbl)
         sections.append(Text(""))
 
-        # ── 7c) 生成的 Patch 文件 ──────────────────────
+        # ── 7c) 适配补丁内容预览 ──────────────────────
         patch_file = result.get("patch_file")
         if patch_file:
             patch_panel = Text()
-            patch_panel.append("✔ 生成的适配补丁文件\n", style="bold green")
-            patch_panel.append(f"  路径: {patch_file}\n\n", style="cyan")
-            
-            # 读取并显示 patch 内容
             try:
                 with open(patch_file, "r") as f:
-                    patch_content = f.read()
-                    lines = patch_content.split("\n")
-                    
-                    # 显示前 50 行
-                    for line in lines[:50]:
-                        if line.startswith("+++") or line.startswith("---"):
-                            patch_panel.append(f"  {line}\n", style="bold")
-                        elif line.startswith("+"):
-                            patch_panel.append(f"  {line}\n", style="green")
-                        elif line.startswith("-"):
-                            patch_panel.append(f"  {line}\n", style="red")
-                        elif line.startswith("@@"):
-                            patch_panel.append(f"  {line}\n", style="cyan")
-                        else:
-                            patch_panel.append(f"  {line}\n", style="dim")
-                    
-                    if len(lines) > 50:
-                        patch_panel.append(f"\n  ... 还有 {len(lines) - 50} 行\n", style="dim")
-                        patch_panel.append(f"  完整补丁请查看: {patch_file}\n", style="dim")
+                    patch_lines = f.read().split("\n")
+                for line in patch_lines[:50]:
+                    if line.startswith("+++") or line.startswith("---"):
+                        patch_panel.append(f"  {line}\n", style="bold")
+                    elif line.startswith("+"):
+                        patch_panel.append(f"  {line}\n", style="green")
+                    elif line.startswith("-"):
+                        patch_panel.append(f"  {line}\n", style="red")
+                    elif line.startswith("@@"):
+                        patch_panel.append(f"  {line}\n", style="cyan")
+                    else:
+                        patch_panel.append(f"  {line}\n", style="dim")
+                if len(patch_lines) > 50:
+                    patch_panel.append(
+                        f"\n  ... 还有 {len(patch_lines) - 50} 行, "
+                        f"完整内容见: {patch_file}\n", style="dim")
             except Exception as e:
                 patch_panel.append(f"  [red]读取失败: {e}[/]\n", style="")
-            
-            sections.append(Panel(patch_panel, title="[bold green]Patch 文件[/]",
-                                  border_style="green", padding=(0, 2)))
+            sections.append(Panel(
+                patch_panel,
+                title="[bold green]适配补丁内容预览[/]",
+                border_style="green", padding=(0, 2)))
             sections.append(Text(""))
 
         # ── 7a) 详细搜索过程 ─────────────────────────
@@ -1167,7 +1161,119 @@ def render_validate_report(result: dict):
             sections.append(match_tbl)
             sections.append(Text(""))
 
-    # ── 9) LLM 分析 ─────────────────────────────────
+    # ── 9) 生成补丁 vs 真实修复 — 本质比较 ────────────
+    gen_vs_real = result.get("generated_vs_real", {})
+    if gen_vs_real and gen_vs_real.get("verdict") != "no_data":
+        verdict_map = {
+            "identical": ("✔ 本质完全相同", "bold green"),
+            "essentially_same": ("✔ 本质相同", "bold green"),
+            "partially_same": ("△ 部分一致", "bold yellow"),
+            "different": ("✘ 差异较大", "bold red"),
+        }
+        vd = gen_vs_real.get("verdict", "")
+        vd_label, vd_style = verdict_map.get(vd, (vd, "bold"))
+        core_sim = gen_vs_real.get("core_similarity", 0)
+        overall_sim = gen_vs_real.get("overall_similarity", 0)
+        file_cov = gen_vs_real.get("file_coverage", 0)
+
+        gvr_tbl = Table(
+            box=box.HEAVY, show_header=False, padding=(0, 1), expand=True,
+            title="[bold]补丁本质比较 — 生成补丁 vs 真实修复[/]")
+        gvr_tbl.add_column("K", width=20, style="bold")
+        gvr_tbl.add_column("V", ratio=1)
+
+        core_bar = "█" * int(core_sim * 20) + "░" * (20 - int(core_sim * 20))
+        cs_style = "green" if core_sim >= 0.75 else (
+            "yellow" if core_sim >= 0.4 else "red")
+        gvr_tbl.add_row("判定结果", f"[{vd_style}]{vd_label}[/]")
+        gvr_tbl.add_row("核心改动相似度",
+                         f"[{cs_style} bold]{core_sim:.0%}[/]  "
+                         f"[{cs_style}]{core_bar}[/]")
+        gvr_tbl.add_row("整体 Diff 相似度", f"{overall_sim:.0%}")
+        gvr_tbl.add_row("文件覆盖率", f"{file_cov:.0%}")
+
+        gen_only = gen_vs_real.get("gen_only_files", [])
+        real_only = gen_vs_real.get("real_only_files", [])
+        if gen_only:
+            gvr_tbl.add_row("[yellow]仅生成补丁有[/]",
+                             f"[yellow]{', '.join(gen_only[:5])}[/]")
+        if real_only:
+            gvr_tbl.add_row("[cyan]仅真实修复有[/]",
+                             f"[cyan]{', '.join(real_only[:5])}[/]")
+
+        gvr_details = gen_vs_real.get("detail", [])
+        if gvr_details:
+            gvr_tbl.add_row("", "")
+            fd_tbl = Table(box=box.SIMPLE, show_header=True, padding=(0, 1),
+                           expand=True)
+            fd_tbl.add_column("文件", ratio=1, style="dim")
+            fd_tbl.add_column("核心相似", width=10, justify="right")
+            fd_tbl.add_column("生成+行", width=8, justify="right")
+            fd_tbl.add_column("真实+行", width=8, justify="right")
+            fd_tbl.add_column("共同+行", width=8, justify="right")
+            fd_tbl.add_column("生成-行", width=8, justify="right")
+            fd_tbl.add_column("真实-行", width=8, justify="right")
+            fd_tbl.add_column("共同-行", width=8, justify="right")
+            for fd in gvr_details[:10]:
+                fcs = fd["core_similarity"]
+                fc_style = "green" if fcs >= 0.75 else (
+                    "yellow" if fcs >= 0.4 else "red")
+                fd_tbl.add_row(
+                    fd["file"],
+                    f"[{fc_style}]{fcs:.0%}[/]",
+                    str(fd.get("gen_added", 0)),
+                    str(fd.get("real_added", 0)),
+                    f"[green]{fd.get('common_added', 0)}[/]",
+                    str(fd.get("gen_removed", 0)),
+                    str(fd.get("real_removed", 0)),
+                    f"[green]{fd.get('common_removed', 0)}[/]",
+                )
+
+                add_only_gen = fd.get("add_only_in_generated", [])
+                add_only_real = fd.get("add_only_in_real", [])
+                if add_only_gen:
+                    for line in add_only_gen[:2]:
+                        fd_tbl.add_row(
+                            "", "", "", "", "", "", "", "")
+                        sections.append(Text(
+                            f"      生成独有: [yellow]+{line[:70]}[/]"))
+                if add_only_real:
+                    for line in add_only_real[:2]:
+                        sections.append(Text(
+                            f"      真实独有: [cyan]+{line[:70]}[/]"))
+
+            sections.append(gvr_tbl)
+            sections.append(fd_tbl)
+        else:
+            sections.append(gvr_tbl)
+
+        diag = gen_vs_real.get("diagnosis", "")
+        if diag:
+            sections.append(Text(f"  {diag}", style="dim"))
+        sections.append(Text(""))
+
+    # ── 9b) 补丁文件输出 ───────────────────────────────
+    patch_files_info = []
+    for label, key, style in [
+        ("社区补丁", "community_patch_file", "cyan"),
+        ("适配补丁", "patch_file", "green"),
+        ("真实修复", "real_fix_patch_file", "magenta"),
+    ]:
+        fpath = result.get(key)
+        if fpath:
+            patch_files_info.append((label, fpath, style))
+
+    if patch_files_info:
+        pf_text = Text()
+        pf_text.append("已生成的补丁文件:\n", style="bold")
+        for label, fpath, style in patch_files_info:
+            pf_text.append(f"  [{style}]■[/] {label}: ", style="bold")
+            pf_text.append(f"{fpath}\n", style=style)
+        sections.append(Panel(pf_text, title="[bold]Patch 文件输出[/]",
+                              border_style="green", padding=(0, 2)))
+        sections.append(Text(""))
+
+    # ── 10) LLM 分析 ─────────────────────────────────
     llm = result.get("llm_analysis", "")
     llm_status = result.get("llm_status", "")
     if llm:
