@@ -50,6 +50,28 @@ def _clean_hunk_lines(lines: List[str]) -> List[str]:
             if not any(l.startswith(p) for p in _NOISE_PREFIXES)]
 
 
+_TRIVIAL_ANCHORS = frozenset({
+    "return 0;", "return ret;", "return;", "return -1;",
+    "return err;", "return rc;", "return result;",
+    "return NULL;", "return false;", "return true;",
+    "return -EINVAL;", "return -ENOMEM;", "return -EIO;",
+    "break;", "continue;", "default:",
+    "{", "}", "} else {", "else {",
+    "out:", "err:", "error:", "unlock:", "fail:",
+})
+
+
+def _is_trivial_anchor(line: str) -> bool:
+    s = line.strip()
+    if not s or len(s) < 4:
+        return True
+    if s in _TRIVIAL_ANCHORS:
+        return True
+    if s.startswith("//") or s.startswith("/*") or s.startswith("*"):
+        return True
+    return False
+
+
 def _split_hunk_segments(hunk_lines: List[str]):
     """
     拆分 hunk → (ctx_before, removed, added, ctx_after)
@@ -399,35 +421,44 @@ class DryRunAgent:
                               file_lines, hint_line, func_name):
         """
         纯添加 hunk: 找插入点。
-        关键策略: 以 before-context 最后一行或 after-context 第一行做锚点,
-        单行搜索比整段 context 搜索更鲁棒 (不受中间额外行打断影响)。
+        策略 A/B 向 ctx_before/ctx_after 深处搜索非 trivial 锚点，
+        避免用 return 0; / } 等通用行做锚点导致定位到错误函数。
         """
-        # A) before-context 最后一行做锚点 → 插入点 = 锚点 + 1
+        # A) before-context: 从末尾向前迭代，跳过 trivial 行
         if ctx_before:
-            adj = ((hint_line + len(ctx_before) - 1)
-                   if hint_line else hint_line)
-            anchor = self._find_anchor_line(
-                ctx_before[-1], file_lines, adj)
-            if anchor is not None:
-                return anchor + 1, 0
+            for back in range(len(ctx_before)):
+                idx = len(ctx_before) - 1 - back
+                if _is_trivial_anchor(ctx_before[idx]):
+                    continue
+                adj = ((hint_line + idx)
+                       if hint_line else hint_line)
+                anchor = self._find_anchor_line(
+                    ctx_before[idx], file_lines, adj)
+                if anchor is not None:
+                    return anchor + 1 + back, 0
+                break
 
-        # B) after-context 第一行做锚点 → 插入点 = 锚点
+        # B) after-context: 从首行向后迭代，跳过 trivial 行
         if ctx_after:
-            adj = ((hint_line + len(ctx_before))
-                   if hint_line else hint_line)
-            anchor = self._find_anchor_line(
-                ctx_after[0], file_lines, adj)
-            if anchor is not None:
-                return anchor, 0
+            for fwd in range(len(ctx_after)):
+                if _is_trivial_anchor(ctx_after[fwd]):
+                    continue
+                adj = ((hint_line + len(ctx_before) + fwd)
+                       if hint_line else hint_line)
+                anchor = self._find_anchor_line(
+                    ctx_after[fwd], file_lines, adj)
+                if anchor is not None:
+                    return anchor - fwd, 0
+                break
 
-        # C) 整段 before-context 精确/模糊搜索
+        # C) 整段 before-context 精确/模糊搜索 (利用 func_name 约束)
         if ctx_before and len(ctx_before) >= 2:
             pos = self._locate_in_file(
                 ctx_before, ctx_after, file_lines, hint_line, func_name)
             if pos is not None:
                 return pos + len(ctx_before), 0
 
-        # D) 整段 after-context 精确/模糊搜索
+        # D) 整段 after-context 精确/模糊搜索 (利用 func_name 约束)
         if ctx_after and len(ctx_after) >= 2:
             adj = ((hint_line + len(ctx_before))
                    if hint_line else hint_line)
@@ -437,9 +468,6 @@ class DryRunAgent:
                 return pos, 0
 
         # E) 全 hunk 非 + 行投票
-        non_plus = []
-        for l in _clean_hunk_lines([]):
-            pass
         non_plus = [
             l[1:] if (l.startswith("-") or l.startswith(" ")) else l
             for l in _clean_hunk_lines(ctx_before + ctx_after)
@@ -466,7 +494,7 @@ class DryRunAgent:
                           window: int = 300) -> Optional[int]:
         """
         在 hint 附近精确或高阈值模糊查找单行。
-        返回匹配行在 file_lines 中的索引。
+        优先返回离 hint 最近的匹配（而非第一个匹配）。
         """
         ns = line.strip()
         if not ns or len(ns) < 4:
@@ -474,21 +502,32 @@ class DryRunAgent:
         hs = [l.strip() for l in file_lines]
 
         if hint_line and hint_line > 0:
-            lo = max(0, hint_line - 1 - window)
-            hi = min(len(hs), hint_line - 1 + window)
+            center = hint_line - 1
+            lo = max(0, center - window)
+            hi = min(len(hs), center + window)
         else:
             lo, hi = 0, len(hs)
+            center = len(hs) // 2
 
+        best, best_dist = None, float("inf")
         for i in range(lo, hi):
             if hs[i] == ns:
-                return i
+                dist = abs(i - center)
+                if dist < best_dist:
+                    best_dist = dist
+                    best = i
+        if best is not None:
+            return best
 
-        best_pos, best_r = None, 0.0
+        best_pos, best_r, best_fdist = None, 0.0, float("inf")
         for i in range(lo, hi):
             r = difflib.SequenceMatcher(None, ns, hs[i]).ratio()
-            if r > best_r and r >= 0.85:
-                best_r = r
-                best_pos = i
+            if r >= 0.85:
+                dist = abs(i - center)
+                if r > best_r or (r == best_r and dist < best_fdist):
+                    best_r = r
+                    best_pos = i
+                    best_fdist = dist
         return best_pos
 
     # ─── 序列定位算法 ────────────────────────────────────────────
