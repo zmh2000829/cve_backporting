@@ -1092,17 +1092,17 @@ def render_validate_report(result: dict):
                     f"  ... 还有 {len(conflict_hunks) - 8} 个 hunk 未展示",
                     style="dim"))
 
-    # ── 6) 工具推荐的前置依赖 vs 真实前置依赖 ────────
+    # ── 6) 前置依赖分析 ──────────────────────────────
     tool_prereqs = result.get("tool_prereqs", [])
     known_prereqs = result.get("known_prereqs_detail", [])
+    has_known = checks.get("has_known_prereqs", False)
 
-    if tool_prereqs or known_prereqs:
-        cmp_tbl = Table(box=box.ROUNDED, show_header=True, padding=(0, 1),
-                        expand=True, title="[bold]前置依赖对比[/]")
-
+    if has_known and (tool_prereqs or known_prereqs):
+        # 有 known_prereqs → 显示完整对比 (验证项)
         if tool_prereqs:
             tp_tbl = Table(box=box.SIMPLE, show_header=True, padding=(0, 1),
-                           expand=True, title="[bold cyan]工具推荐[/]")
+                           expand=True,
+                           title="[bold cyan]工具推荐的前置依赖[/]")
             tp_tbl.add_column("#", width=3)
             tp_tbl.add_column("Commit", width=14, style="cyan")
             tp_tbl.add_column("Subject", ratio=1)
@@ -1124,13 +1124,15 @@ def render_validate_report(result: dict):
                     funcs if funcs else "-",
                 )
             if len(tool_prereqs) > 15:
-                tp_tbl.add_row("...", f"+{len(tool_prereqs)-15}", "", "", "", "", "")
+                tp_tbl.add_row(
+                    "...", f"+{len(tool_prereqs)-15}", "", "", "", "", "")
             sections.append(tp_tbl)
             sections.append(Text(""))
 
         if known_prereqs:
             kp_tbl = Table(box=box.SIMPLE, show_header=True, padding=(0, 1),
-                           expand=True, title="[bold green]真实合入记录[/]")
+                           expand=True,
+                           title="[bold green]真实合入的前置依赖[/]")
             kp_tbl.add_column("#", width=3)
             kp_tbl.add_column("Commit", width=14, style="green")
             kp_tbl.add_column("Subject", ratio=1)
@@ -1142,23 +1144,60 @@ def render_validate_report(result: dict):
             sections.append(kp_tbl)
             sections.append(Text(""))
 
-        # TP/FP/FN 详情
         if prereq_m:
             tp_ids = prereq_m.get("true_positives", [])
             fp_ids = prereq_m.get("false_positives", [])
             fn_ids = prereq_m.get("false_negatives", [])
-            match_tbl = Table(box=box.SIMPLE, show_header=True, padding=(0, 1),
-                              expand=True, title="[bold]匹配详情[/]")
+            match_tbl = Table(
+                box=box.SIMPLE, show_header=True, padding=(0, 1),
+                expand=True, title="[bold]前置依赖匹配详情[/]")
             match_tbl.add_column("类别", width=18, style="bold")
             match_tbl.add_column("数量", width=6)
             match_tbl.add_column("Commit IDs", ratio=1)
-            match_tbl.add_row("[green]正确推荐 (TP)[/]", f"[green]{len(tp_ids)}[/]",
-                              ", ".join(s[:12] for s in tp_ids[:8]))
-            match_tbl.add_row("[red]误报 (FP)[/]", f"[red]{len(fp_ids)}[/]",
-                              ", ".join(s[:12] for s in fp_ids[:8]))
-            match_tbl.add_row("[yellow]漏报 (FN)[/]", f"[yellow]{len(fn_ids)}[/]",
-                              ", ".join(s[:12] for s in fn_ids[:8]))
+            match_tbl.add_row(
+                "[green]正确推荐 (TP)[/]", f"[green]{len(tp_ids)}[/]",
+                ", ".join(s[:12] for s in tp_ids[:8]))
+            match_tbl.add_row(
+                "[red]误报 (FP)[/]", f"[red]{len(fp_ids)}[/]",
+                ", ".join(s[:12] for s in fp_ids[:8]))
+            match_tbl.add_row(
+                "[yellow]漏报 (FN)[/]", f"[yellow]{len(fn_ids)}[/]",
+                ", ".join(s[:12] for s in fn_ids[:8]))
             sections.append(match_tbl)
+            sections.append(Text(""))
+
+    elif tool_prereqs and not has_known:
+        # 没有 known_prereqs → 仅展示 strong/medium 作为参考
+        strong_medium = [p for p in tool_prereqs
+                         if p.get("grade") in ("strong", "medium")]
+        if strong_medium:
+            hint = Text()
+            hint.append(
+                "  以下前置依赖为工具推荐（未提供 --known-prereqs 无法验证准确性）\n",
+                style="dim italic")
+            hint.append(
+                "  含义: 若要将修复补丁合入目标分支，"
+                "建议先合入这些前置 commit\n",
+                style="dim")
+            sections.append(hint)
+
+            ref_tbl = Table(
+                box=box.SIMPLE, show_header=True, padding=(0, 1),
+                expand=True,
+                title="[bold dim]前置依赖推荐 (参考)[/]")
+            ref_tbl.add_column("#", width=3)
+            ref_tbl.add_column("Commit", width=14, style="cyan")
+            ref_tbl.add_column("Subject", ratio=1)
+            ref_tbl.add_column("等级", width=8)
+            for i, p in enumerate(strong_medium[:10], 1):
+                grade = p.get("grade", "")
+                gs = {"strong": "bold red",
+                      "medium": "yellow"}.get(grade, "")
+                ref_tbl.add_row(
+                    str(i), p.get("commit_id", ""),
+                    p.get("subject", "")[:60],
+                    f"[{gs}]{grade}[/]" if gs else grade)
+            sections.append(ref_tbl)
             sections.append(Text(""))
 
     # ── 9) 生成补丁 vs 真实修复 — 本质比较 ────────────
@@ -1185,7 +1224,16 @@ def render_validate_report(result: dict):
         core_bar = "█" * int(core_sim * 20) + "░" * (20 - int(core_sim * 20))
         cs_style = "green" if core_sim >= 0.75 else (
             "yellow" if core_sim >= 0.4 else "red")
+        compare_src = gen_vs_real.get("compare_source", "")
+        src_label = {
+            "adapted_patch": "适配补丁 (L3 重建, 行号对齐目标文件)",
+            "community_patch": "社区原始补丁 (行号为 mainline 版本)",
+        }.get(compare_src, compare_src)
         gvr_tbl.add_row("判定结果", f"[{vd_style}]{vd_label}[/]")
+        gvr_tbl.add_row("对比来源", f"[dim]{src_label}[/]")
+        note = gen_vs_real.get("note", "")
+        if note:
+            gvr_tbl.add_row("", f"[yellow dim]⚠ {note}[/]")
         gvr_tbl.add_row("核心改动相似度",
                          f"[{cs_style} bold]{core_sim:.0%}[/]  "
                          f"[{cs_style}]{core_bar}[/]")

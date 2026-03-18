@@ -116,6 +116,7 @@ class DryRunAgent:
             r0.apply_method = "strict"
             r0.stat_output = self._get_stat(mapped_diff, target_version)
             logger.info("[DryRun] strict 成功: %s", patch.commit_id[:12])
+            self._ensure_adapted_patch(r0, mapped_diff, rp_path)
             return r0
 
         r1 = self._apply_check(mapped_diff, rp_path, ["-C1"])
@@ -126,6 +127,7 @@ class DryRunAgent:
                 f"(严格模式失败, -C1 成功: {len(r0.conflicting_files)} 个文件"
                 " context 偏移)")
             logger.info("[DryRun] -C1 成功: %s", patch.commit_id[:12])
+            self._ensure_adapted_patch(r1, mapped_diff, rp_path)
             return r1
 
         r2 = self._apply_check(mapped_diff, rp_path, ["--3way"])
@@ -134,6 +136,7 @@ class DryRunAgent:
             r2.stat_output = self._get_stat(mapped_diff, target_version)
             r2.error_output = "(3-way merge成功)"
             logger.info("[DryRun] 3-way merge成功: %s", patch.commit_id[:12])
+            self._ensure_adapted_patch(r2, mapped_diff, rp_path)
             return r2
 
         adapted = self._regenerate_patch(mapped_diff, rp_path)
@@ -152,8 +155,7 @@ class DryRunAgent:
         r0.stat_output = self._get_stat(mapped_diff, target_version)
         analysis = self._analyze_conflicts(mapped_diff, rp_path)
         r0.conflict_hunks = analysis["hunks"]
-        
-        # 收集搜索报告
+
         if analysis.get("search_reports"):
             r0.search_reports = analysis["search_reports"]
 
@@ -173,10 +175,31 @@ class DryRunAgent:
                             patch.commit_id[:12])
                 return r4
 
+        # 全部失败时，将 L3 的重建结果（即使不能通过 apply）也作为
+        # adapted_patch 保留，以便 validate 做补丁对比
+        if adapted:
+            r0.adapted_patch = adapted
+            logger.info(
+                "[DryRun] 所有策略均失败, 保留 L3 重建结果用于对比: %s",
+                patch.commit_id[:12])
+        elif analysis.get("adapted_diff"):
+            r0.adapted_patch = analysis["adapted_diff"]
+
         logger.info("[DryRun] 所有策略均失败: %s (%d 文件, %d hunk)",
                     patch.commit_id[:12], len(r0.conflicting_files),
                     len(r0.conflict_hunks))
         return r0
+
+    def _ensure_adapted_patch(self, result: DryRunResult,
+                              diff_text: str, repo_path: str):
+        """L0/L1/L2 成功后，仍执行 L3 重建以生成 adapted_patch。
+        adapted_patch 的行号对齐目标文件，可用于 validate 的补丁本质比较。"""
+        try:
+            adapted = self._regenerate_patch(diff_text, repo_path)
+            if adapted:
+                result.adapted_patch = adapted
+        except Exception as e:
+            logger.debug("[DryRun] _ensure_adapted_patch 跳过: %s", e)
 
     # ─── 路径映射 ─────────────────────────────────────────────────
 

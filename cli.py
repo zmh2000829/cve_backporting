@@ -904,6 +904,9 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
         if known_prereqs:
             checks["prereq_metrics"] = _compare_prereqs(
                 result.prerequisite_patches, known_prereqs, git_mgr, tv)
+            checks["has_known_prereqs"] = True
+        else:
+            checks["has_known_prereqs"] = False
 
         if result.dry_run:
             if known_prereqs:
@@ -919,6 +922,10 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
             issues.append("引入检测未命中")
         if checks.get("dryrun_accurate") is False:
             issues.append("DryRun预测不准")
+
+        prereq_m = checks.get("prereq_metrics")
+        if prereq_m and prereq_m["f1"] < 0.5:
+            issues.append(f"前置依赖 F1 偏低 ({prereq_m['f1']:.0%})")
 
         # ── 收集丰富的诊断数据 ──────────────────────────────
         community_diff = ""
@@ -1035,10 +1042,18 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
 
         # ── 核心: 生成补丁 vs 真实修复的本质比较 ─────────────
         generated_vs_real = {}
-        patch_to_compare = adapted_patch or community_diff
-        if patch_to_compare and local_diff:
+        if adapted_patch and local_diff:
             generated_vs_real = _compare_generated_vs_real(
-                patch_to_compare, local_diff)
+                adapted_patch, local_diff)
+            generated_vs_real["compare_source"] = "adapted_patch"
+        elif community_diff and local_diff:
+            generated_vs_real = _compare_generated_vs_real(
+                community_diff, local_diff)
+            generated_vs_real["compare_source"] = "community_patch"
+            generated_vs_real["note"] = (
+                "未能生成适配补丁，当前使用社区原始补丁对比 "
+                "(行号可能与本地不一致，仅核心改动行有参考意义)"
+            )
 
         return {
             "cve_id": cve_id, "known_fix": known_fix, "target": tv,
