@@ -1223,7 +1223,7 @@ class DryRunAgent:
                         hunks.append((current_hunk_header,
                                       current_hunk_lines))
                     results.append((current_file, header_lines, hunks))
-                m = re.search(r"b/(.*)", line)
+                m = re.search(r" b/(.*)", line)
                 current_file = m.group(1) if m else None
                 header_lines = [line]
                 hunks = []

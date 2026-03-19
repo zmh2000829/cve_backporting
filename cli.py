@@ -512,7 +512,7 @@ def _parse_diff_by_file(diff_text: str) -> dict:
         if line.startswith("diff --git"):
             if current_file:
                 files[current_file] = "\n".join(current_lines)
-            m = re.search(r"b/(.*)", line)
+            m = re.search(r" b/(.*)", line)
             current_file = m.group(1) if m else None
             current_lines = [line]
         elif current_file is not None:
@@ -1110,7 +1110,7 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
         # 此时 L3 重建反而可能因多次匹配而定位到错误位置，
         # 所以 L0-L2 成功时优先用社区原始补丁做比较。
         apply_method = dryrun_detail.get("apply_method", "")
-        l0_l2_methods = {"strict", "C1", "3way"}
+        l0_l2_methods = {"strict", "context-C1", "3way"}
         use_community = (apply_method in l0_l2_methods
                          and community_diff and local_diff)
 
