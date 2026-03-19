@@ -307,13 +307,17 @@ class DryRunAgent:
     def _ensure_adapted_patch(self, result: DryRunResult,
                               diff_text: str, repo_path: str):
         """L0/L1/L2 成功后，仍执行 L3 重建以生成 adapted_patch。
-        adapted_patch 的行号对齐目标文件，可用于 validate 的补丁本质比较。"""
+        adapted_patch 的行号对齐目标文件，可用于 validate 的补丁本质比较。
+        若 L3 重建失败，回退使用社区原始补丁（已确认可 apply）。"""
         try:
             adapted = self._regenerate_patch(diff_text, repo_path)
             if adapted:
                 result.adapted_patch = adapted
+                return
         except Exception as e:
-            logger.debug("[DryRun] _ensure_adapted_patch 跳过: %s", e)
+            logger.debug("[DryRun] _ensure_adapted_patch L3 重建异常: %s", e)
+        result.adapted_patch = diff_text
+        logger.info("[DryRun] L3 重建未成功, 回退使用社区原始补丁作为 adapted_patch")
 
     # ─── 路径映射 ─────────────────────────────────────────────────
 

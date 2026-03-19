@@ -690,6 +690,50 @@ def _diagnose_root_cause(diff_cmp: dict, dryrun_detail: dict,
     return causes
 
 
+def _fuzzy_set_match_count(set_a: set, set_b: set,
+                           threshold: float = 0.75) -> int:
+    """模糊集合交集: 精确匹配优先，未匹配的用 SequenceMatcher 做模糊匹配"""
+    import difflib as _dl
+    exact = set_a & set_b
+    count = len(exact)
+    remain_a = set_a - exact
+    remain_b = list(set_b - exact)
+    used = set()
+    for a in remain_a:
+        best_r, best_idx = 0.0, -1
+        for j, b in enumerate(remain_b):
+            if j in used:
+                continue
+            r = _dl.SequenceMatcher(None, a, b).ratio()
+            if r > best_r:
+                best_r, best_idx = r, j
+        if best_r >= threshold and best_idx >= 0:
+            count += 1
+            used.add(best_idx)
+    return count
+
+
+def _match_files_by_basename(gen_files: dict, real_files: dict,
+                             already_matched: set) -> list:
+    """当精确路径不匹配时，按 basename 回退匹配"""
+    import os
+    gen_remain = {k: v for k, v in gen_files.items() if k not in already_matched}
+    real_remain = {k: v for k, v in real_files.items() if k not in already_matched}
+    gen_by_bn = {}
+    for p in gen_remain:
+        bn = os.path.basename(p)
+        gen_by_bn.setdefault(bn, []).append(p)
+    real_by_bn = {}
+    for p in real_remain:
+        bn = os.path.basename(p)
+        real_by_bn.setdefault(bn, []).append(p)
+    pairs = []
+    for bn in gen_by_bn.keys() & real_by_bn.keys():
+        if len(gen_by_bn[bn]) == 1 and len(real_by_bn[bn]) == 1:
+            pairs.append((gen_by_bn[bn][0], real_by_bn[bn][0]))
+    return pairs
+
+
 def _compare_generated_vs_real(generated_patch: str, real_diff: str) -> dict:
     """
     比较工具生成的适配补丁与本地真实修复补丁，判断两者是否"本质相同"。
@@ -719,19 +763,28 @@ def _compare_generated_vs_real(generated_patch: str, real_diff: str) -> dict:
     gen_set = set(gen_files.keys())
     real_set = set(real_files.keys())
     common = gen_set & real_set
-    gen_only = sorted(gen_set - real_set)
-    real_only = sorted(real_set - gen_set)
+
+    # basename 回退匹配: 社区路径与内部仓路径可能不同
+    # (e.g., fs/cifs/connect.c vs fs/smb/client/connect.c)
+    bn_pairs = _match_files_by_basename(gen_files, real_files, common)
+    bn_mapped_gen = {gp for gp, _ in bn_pairs}
+    bn_mapped_real = {rp for _, rp in bn_pairs}
+
+    gen_only = sorted(gen_set - common - bn_mapped_gen)
+    real_only = sorted(real_set - common - bn_mapped_real)
 
     file_details = []
     core_sims = []
     overall_sims = []
 
-    for fpath in sorted(common):
-        overall_sim = diff_similarity(gen_files[fpath], real_files[fpath])
+    all_pairs = [(f, f) for f in sorted(common)] + bn_pairs
+
+    for gen_path, real_path in all_pairs:
+        overall_sim = diff_similarity(gen_files[gen_path], real_files[real_path])
         overall_sims.append(overall_sim)
 
-        gen_changes = _extract_key_changes(gen_files[fpath], 200)
-        real_changes = _extract_key_changes(real_files[fpath], 200)
+        gen_changes = _extract_key_changes(gen_files[gen_path], 200)
+        real_changes = _extract_key_changes(real_files[real_path], 200)
 
         gen_added = [l[1:].strip() for l in gen_changes if l.startswith("+")]
         gen_removed = [l[1:].strip() for l in gen_changes if l.startswith("-")]
@@ -743,12 +796,12 @@ def _compare_generated_vs_real(generated_patch: str, real_diff: str) -> dict:
         gen_rm_set = set(gen_removed)
         real_rm_set = set(real_removed)
 
-        add_common = gen_add_set & real_add_set
-        rm_common = gen_rm_set & real_rm_set
+        n_add_common = _fuzzy_set_match_count(gen_add_set, real_add_set)
+        n_rm_common = _fuzzy_set_match_count(gen_rm_set, real_rm_set)
 
         total_gen = len(gen_add_set) + len(gen_rm_set)
         total_real = len(real_add_set) + len(real_rm_set)
-        total_common = len(add_common) + len(rm_common)
+        total_common = n_add_common + n_rm_common
 
         if total_gen + total_real > 0:
             core_sim = (2 * total_common) / (total_gen + total_real)
@@ -756,21 +809,24 @@ def _compare_generated_vs_real(generated_patch: str, real_diff: str) -> dict:
             core_sim = 1.0 if total_gen == 0 and total_real == 0 else 0.0
         core_sims.append(core_sim)
 
-        add_only_gen = sorted(gen_add_set - real_add_set)
-        add_only_real = sorted(real_add_set - gen_add_set)
-        rm_only_gen = sorted(gen_rm_set - real_rm_set)
-        rm_only_real = sorted(real_rm_set - gen_rm_set)
+        exact_add = gen_add_set & real_add_set
+        exact_rm = gen_rm_set & real_rm_set
+        add_only_gen = sorted(gen_add_set - exact_add)
+        add_only_real = sorted(real_add_set - exact_add)
+        rm_only_gen = sorted(gen_rm_set - exact_rm)
+        rm_only_real = sorted(real_rm_set - exact_rm)
 
+        display = gen_path if gen_path == real_path else f"{gen_path} ↔ {real_path}"
         file_details.append({
-            "file": fpath,
+            "file": display,
             "core_similarity": round(core_sim, 3),
             "overall_similarity": round(overall_sim, 3),
             "gen_added": len(gen_added),
             "real_added": len(real_added),
-            "common_added": len(add_common),
+            "common_added": n_add_common,
             "gen_removed": len(gen_removed),
             "real_removed": len(real_removed),
-            "common_removed": len(rm_common),
+            "common_removed": n_rm_common,
             "add_only_in_generated": add_only_gen[:5],
             "add_only_in_real": add_only_real[:5],
             "rm_only_in_generated": rm_only_gen[:3],
@@ -780,7 +836,8 @@ def _compare_generated_vs_real(generated_patch: str, real_diff: str) -> dict:
     avg_core = sum(core_sims) / len(core_sims) if core_sims else 0.0
     avg_overall = sum(overall_sims) / len(overall_sims) if overall_sims else 0.0
 
-    file_coverage = len(common) / max(len(gen_set | real_set), 1)
+    total_matched = len(common) + len(bn_pairs)
+    file_coverage = total_matched / max(len(gen_set | real_set), 1)
 
     if avg_core >= 0.95 and file_coverage >= 0.9:
         verdict = "identical"
@@ -1382,13 +1439,14 @@ def cmd_batch_validate(args, config):
     tv = args.target_version
     git_mgr = _make_git_mgr(config, tv)
 
-    entries = []
+    # ── 解析 JSON → 按 CVE 分组 ─────────────────────────────────
+    from collections import OrderedDict
+    cve_groups = OrderedDict()
     skipped = 0
-    seen_cves = set()
     limit = args.limit if args.limit and args.limit > 0 else 0
 
     for cve_id, info in data.items():
-        if limit and len(seen_cves) >= limit:
+        if limit and len(cve_groups) >= limit:
             break
         try:
             if not isinstance(info, dict):
@@ -1396,43 +1454,46 @@ def cmd_batch_validate(args, config):
             hulk_fixes = info.get("hulk_fix_patchs", [])
             if not hulk_fixes or not isinstance(hulk_fixes, list):
                 continue
+            real_cve = info.get("cve_id", cve_id)
+            if limit and real_cve not in cve_groups \
+                    and len(cve_groups) >= limit:
+                continue
+
+            fixes = []
             for fix in hulk_fixes:
                 if not isinstance(fix, dict):
                     continue
                 commit = fix.get("commit", "")
                 if not commit or len(commit) < 8:
                     continue
-                real_cve = info.get("cve_id", cve_id)
-                if limit and real_cve not in seen_cves \
-                        and len(seen_cves) >= limit:
-                    break
-                seen_cves.add(real_cve)
-
-                cve_info = _build_cve_info_from_json(info, real_cve)
-                entries.append({
-                    "cve_id": real_cve,
-                    "known_fix": commit,
+                fixes.append({
+                    "commit": commit,
                     "subject": fix.get("subject", ""),
-                    "cve_info": cve_info,
                 })
+            if fixes:
+                cve_groups[real_cve] = {
+                    "fixes": fixes,
+                    "cve_info": _build_cve_info_from_json(info, real_cve),
+                }
         except Exception as e:
             skipped += 1
             logger.warning("解析 CVE 条目 %s 跳过: %s", cve_id, e)
 
-    if not entries:
+    if not cve_groups:
         console.print("[red]JSON 文件中未找到有效的 CVE 验证条目[/]")
         console.print(
             "[dim]要求: 每个条目需有 hulk_fix_patchs[].commit 字段[/]")
         return
 
-    cve_count = len(set(e["cve_id"] for e in entries))
-    has_mainline = sum(1 for e in entries if e.get("cve_info"))
+    total_patches = sum(len(g["fixes"]) for g in cve_groups.values())
+    has_mainline = sum(1 for g in cve_groups.values() if g.get("cve_info"))
     info_parts = [
-        f"[bold]验证集:[/] {cve_count} 个 CVE / {len(entries)} 个补丁",
+        f"[bold]验证集:[/] {len(cve_groups)} 个 CVE / {total_patches} 个补丁",
         f"[bold]目标分支:[/] {tv}",
         f"[bold]数据文件:[/] {args.file}",
-        f"[bold]Mainline信息:[/] {has_mainline}/{len(entries)} "
-        f"条使用 JSON 提供的 mainline commit (跳过 MITRE 爬取)",
+        f"[bold]Mainline信息:[/] {has_mainline}/{len(cve_groups)} "
+        f"个 CVE 使用 JSON 提供的 mainline commit (跳过 MITRE 爬取)",
+        f"[bold]聚合策略:[/] 同一 CVE 多个 hulk_fix, 任一通过即该 CVE 通过",
     ]
     if limit:
         info_parts.append(f"[bold]限制:[/] 前 {limit} 个 CVE")
@@ -1457,82 +1518,116 @@ def cmd_batch_validate(args, config):
     failed_list = []
     error_list = []
 
-    for i, entry in enumerate(entries, 1):
-        cve_id = entry["cve_id"]
-        known_fix = entry["known_fix"]
+    _PASS_VERDICTS = {"identical", "essentially_same"}
+    _VERDICT_ICONS = {
+        "identical": "[green]✔ 完全一致[/]",
+        "essentially_same": "[green]✔ 本质相同[/]",
+        "partially_same": "[yellow]△ 部分一致[/]",
+        "different": "[red]✘ 差异较大[/]",
+        "no_data": "[dim]- 无数据[/]",
+    }
+
+    for ci, (cve_id, group) in enumerate(cve_groups.items(), 1):
+        fixes = group["fixes"]
+        cve_info = group.get("cve_info")
+        src = "JSON" if cve_info else "MITRE"
 
         console.print(f"\n{'━' * 60}")
-        src = "JSON" if entry.get("cve_info") else "MITRE"
         console.print(
-            f"[bold magenta][{i}/{len(entries)}][/]  {cve_id}  "
-            f"[dim]fix={known_fix[:12]}  mainline={src}[/]"
-            + (f"  [dim italic]{entry['subject'][:50]}[/]"
-               if entry.get("subject") else ""))
+            f"[bold magenta][{ci}/{len(cve_groups)}][/]  {cve_id}  "
+            f"[dim]{len(fixes)} 个 hulk_fix  mainline={src}[/]")
 
-        try:
-            r = _run_single_validate(
-                config, cve_id, tv, known_fix, [],
-                git_mgr=git_mgr, show_stages=True,
-                cve_info=entry.get("cve_info"))
-            results.append(r)
+        best_result = None
+        best_verdict = "no_data"
+        best_core_sim = -1.0
+        cve_error = None
 
-            gvr = r.get("generated_vs_real", {})
-            verdict = gvr.get("verdict", "no_data")
-            core_sim = gvr.get("core_similarity", 0)
-            method = r.get("dryrun_detail", {}).get("apply_method", "-")
+        for fi, fix in enumerate(fixes, 1):
+            known_fix = fix["commit"]
+            if len(fixes) > 1:
+                console.print(
+                    f"  [dim]fix[{fi}/{len(fixes)}] {known_fix[:12]}"
+                    + (f"  {fix['subject'][:40]}" if fix.get("subject") else "")
+                    + "[/]")
+            try:
+                r = _run_single_validate(
+                    config, cve_id, tv, known_fix, [],
+                    git_mgr=git_mgr, show_stages=True,
+                    cve_info=cve_info)
+                results.append(r)
 
-            verdict_icons = {
-                "identical": "[green]✔ 完全一致[/]",
-                "essentially_same": "[green]✔ 本质相同[/]",
-                "partially_same": "[yellow]△ 部分一致[/]",
-                "different": "[red]✘ 差异较大[/]",
-                "no_data": "[dim]- 无数据[/]",
-            }
-            icon = verdict_icons.get(verdict, f"[dim]{verdict}[/]")
-            console.print(
-                f"  {icon}  核心相似度={core_sim:.0%}  方法={method}")
+                gvr = r.get("generated_vs_real", {})
+                verdict = gvr.get("verdict", "no_data")
+                core_sim = gvr.get("core_similarity", 0)
+                method = r.get("dryrun_detail", {}).get("apply_method", "-")
 
-            item = {
-                "cve_id": cve_id,
-                "known_fix": known_fix[:12],
-                "verdict": verdict,
-                "core_similarity": round(core_sim, 3),
-                "method": method,
-                "summary": r.get("summary", ""),
-            }
-            if verdict in ("identical", "essentially_same"):
-                passed_list.append(item)
-            else:
-                reason = r.get("summary", "")
-                if verdict == "no_data":
-                    reason = reason or "无补丁数据可比较"
-                elif verdict == "different":
-                    reason = reason or f"核心相似度仅 {core_sim:.0%}"
-                elif verdict == "partially_same":
-                    reason = reason or f"部分一致 (核心相似度 {core_sim:.0%})"
-                item["reason"] = reason
-                failed_list.append(item)
+                icon = _VERDICT_ICONS.get(verdict, f"[dim]{verdict}[/]")
+                console.print(
+                    f"    {icon}  核心相似度={core_sim:.0%}  方法={method}")
 
-        except Exception as e:
-            logger.exception("batch-validate 异常: %s %s", cve_id, e)
-            console.print(f"  [red]✘ 跳过 (异常: {e})[/]")
-            results.append({
-                "cve_id": cve_id, "known_fix": known_fix, "target": tv,
-                "worktree_commit": "", "checks": {},
-                "overall_pass": False, "summary": f"执行异常: {e}",
-                "dryrun_detail": {},
-                "generated_vs_real": {
-                    "verdict": "error", "core_similarity": 0,
-                    "file_coverage": 0},
-            })
+                if verdict in _PASS_VERDICTS:
+                    best_result = r
+                    best_verdict = verdict
+                    best_core_sim = core_sim
+                    break
+                if core_sim > best_core_sim:
+                    best_result = r
+                    best_verdict = verdict
+                    best_core_sim = core_sim
+
+            except Exception as e:
+                logger.exception("batch-validate 异常: %s %s", cve_id, e)
+                console.print(f"    [red]✘ 跳过 (异常: {e})[/]")
+                if not cve_error:
+                    cve_error = str(e)
+                results.append({
+                    "cve_id": cve_id, "known_fix": known_fix, "target": tv,
+                    "worktree_commit": "", "checks": {},
+                    "overall_pass": False, "summary": f"执行异常: {e}",
+                    "dryrun_detail": {},
+                    "generated_vs_real": {
+                        "verdict": "error", "core_similarity": 0,
+                        "file_coverage": 0},
+                })
+
+        # ── CVE 级别聚合判定 ──────────────────────────────────
+        best_fix = (best_result or {}).get("known_fix", fixes[0]["commit"])
+        best_method = (best_result or {}).get(
+            "dryrun_detail", {}).get("apply_method", "-")
+        item = {
+            "cve_id": cve_id,
+            "known_fix": best_fix[:12] if best_fix else "",
+            "verdict": best_verdict,
+            "core_similarity": round(max(best_core_sim, 0), 3),
+            "method": best_method,
+            "num_fixes": len(fixes),
+            "summary": (best_result or {}).get("summary", ""),
+        }
+        if best_verdict in _PASS_VERDICTS:
+            passed_list.append(item)
+            if len(fixes) > 1:
+                console.print(
+                    f"  [green bold]▸ CVE 判定: 通过[/]"
+                    f" (best fix={best_fix[:12]})")
+        elif best_result is not None:
+            reason = item["summary"]
+            if best_verdict == "no_data":
+                reason = reason or "无补丁数据可比较"
+            elif best_verdict == "different":
+                reason = reason or f"核心相似度仅 {best_core_sim:.0%}"
+            elif best_verdict == "partially_same":
+                reason = reason or f"部分一致 (核心相似度 {best_core_sim:.0%})"
+            item["reason"] = reason
+            failed_list.append(item)
+        else:
             error_list.append({
                 "cve_id": cve_id,
-                "known_fix": known_fix[:12],
-                "reason": str(e),
+                "known_fix": fixes[0]["commit"][:12],
+                "reason": cve_error or "所有 fix 均异常",
             })
 
         _flush_live_report(
-            live_report_path, tv, len(entries),
+            live_report_path, tv, len(cve_groups),
             passed_list, failed_list, error_list)
 
     console.print(f"\n{'━' * 60}\n")
@@ -1543,10 +1638,15 @@ def cmd_batch_validate(args, config):
     with open(full_report_path, "w", encoding="utf-8") as f:
         json.dump({
             "target": tv,
-            "total_cves": cve_count,
-            "total_patches": len(entries),
+            "total_cves": len(cve_groups),
+            "total_patches": total_patches,
             "skipped_parse_errors": skipped,
             "results": results,
+            "cve_summary": {
+                "passed": passed_list,
+                "failed": failed_list,
+                "errors": error_list,
+            },
         }, f, indent=2, ensure_ascii=False, default=str)
     console.print(f"[dim]完整结果: {full_report_path}[/]")
     console.print(f"[dim]实时报告: {live_report_path}[/]")
