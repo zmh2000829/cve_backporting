@@ -1458,7 +1458,7 @@ def render_benchmark_report(results: list, target: str):
 
 
 def render_batch_validate_report(results: list, target: str):
-    """渲染批量验证汇总报告 — 聚焦补丁生成准确度"""
+    """渲染批量验证汇总报告 — CVE 维度统计"""
     total = len(results)
     if total == 0:
         console.print("[yellow]无验证结果[/]")
@@ -1468,6 +1468,7 @@ def render_batch_validate_report(results: list, target: str):
     core_sims = []
     method_counts = {}
     pass_count = 0
+    prereq_recalls = []
 
     for r in results:
         gvr = r.get("generated_vs_real", {})
@@ -1484,20 +1485,27 @@ def render_batch_validate_report(results: list, target: str):
         if r.get("overall_pass"):
             pass_count += 1
 
+        pcv = r.get("prereq_cross_validation", {})
+        if pcv.get("recall") is not None:
+            prereq_recalls.append(pcv["recall"])
+
     accurate = (verdict_counts.get("identical", 0)
                 + verdict_counts.get("essentially_same", 0))
     accuracy_rate = accurate / total if total else 0
     avg_core = sum(core_sims) / len(core_sims) if core_sims else 0
 
-    cve_count = len(set(r.get("cve_id", "") for r in results))
+    total_patches = sum(r.get("num_hulk_fixes", 1) for r in results)
+    multi_fix = sum(1 for r in results
+                    if r.get("num_hulk_fixes", 1) > 1)
 
     summary = Table(box=box.SIMPLE, show_header=False, padding=(0, 1),
                     expand=True)
     summary.add_column("指标", width=26, style="bold")
     summary.add_column("值", ratio=1)
     summary.add_row("验证集规模",
-                    f"[cyan]{cve_count}[/] 个 CVE / "
-                    f"[cyan]{total}[/] 个补丁")
+                    f"[cyan]{total}[/] 个 CVE  "
+                    f"[dim]({total_patches} 个补丁, "
+                    f"{multi_fix} 个含前置补丁)[/]")
     summary.add_row("目标分支", f"[cyan]{target}[/]")
     summary.add_row("", "")
     acc_color = "green" if accuracy_rate >= 0.7 else (
@@ -1512,6 +1520,13 @@ def render_batch_validate_report(results: list, target: str):
     summary.add_row("工具验证通过率",
                     f"[bold]{pass_count}/{total}  "
                     f"({pass_count / total:.1%})[/]")
+    if prereq_recalls:
+        avg_recall = sum(prereq_recalls) / len(prereq_recalls)
+        rc = "green" if avg_recall >= 0.5 else "yellow"
+        summary.add_row(
+            "前置补丁识别 recall",
+            f"[{rc} bold]{avg_recall:.1%}[/{rc} bold]"
+            f"  [dim]({len(prereq_recalls)} 个含前置的 CVE)[/]")
     summary.add_row("", "")
 
     verdict_info = [
@@ -1560,11 +1575,11 @@ def render_batch_validate_report(results: list, target: str):
                    expand=True)
     detail.add_column("#", width=3, justify="right", style="dim")
     detail.add_column("CVE", width=18, style="cyan")
-    detail.add_column("DryRun方法", width=14)
+    detail.add_column("方法", width=12)
     detail.add_column("核心相似度", width=10, justify="right")
     detail.add_column("判定", width=12, justify="center")
-    detail.add_column("文件覆盖", width=8, justify="right")
-    detail.add_column("验证", width=6, justify="center")
+    detail.add_column("前置", width=8, justify="center")
+    detail.add_column("验证", width=5, justify="center")
 
     verdict_style = {
         "identical":        "[green]✔ 完全一致[/]",
@@ -1579,10 +1594,17 @@ def render_batch_validate_report(results: list, target: str):
         gvr = r.get("generated_vs_real", {})
         v = gvr.get("verdict", "no_data")
         cs = gvr.get("core_similarity", 0)
-        fc = gvr.get("file_coverage", 0)
         method = r.get("dryrun_detail", {}).get("apply_method", "-")
         overall = ("[green]✔[/]" if r.get("overall_pass")
                    else "[red]✘[/]")
+
+        pcv = r.get("prereq_cross_validation", {})
+        n_prereqs = pcv.get("known_prereqs", 0)
+        if n_prereqs > 0:
+            n_match = pcv.get("matched", 0)
+            prereq_cell = f"{n_match}/{n_prereqs}"
+        else:
+            prereq_cell = "[dim]-[/]"
 
         cs_color = ("green" if cs >= 0.75 else
                     "yellow" if cs >= 0.5 else "red")
@@ -1593,7 +1615,7 @@ def render_batch_validate_report(results: list, target: str):
             f"[{cs_color}]{cs:.1%}[/{cs_color}]" if v not in (
                 "no_data", "error") else "-",
             verdict_style.get(v, v),
-            f"{fc:.0%}" if v not in ("no_data", "error") else "-",
+            prereq_cell,
             overall,
         )
 

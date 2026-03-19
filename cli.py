@@ -1454,23 +1454,43 @@ def cmd_batch_validate(args, config):
             if not hulk_fixes or not isinstance(hulk_fixes, list):
                 continue
             real_cve = info.get("cve_id", cve_id)
+            cve_info = _build_cve_info_from_json(info, real_cve)
+            mainline_fix_id = (cve_info.mainline_fix_commit
+                               if cve_info else "")
 
-            fixes = []
+            valid_fixes = []
             for fix in hulk_fixes:
                 if not isinstance(fix, dict):
                     continue
                 commit = fix.get("commit", "")
                 if not commit or len(commit) < 8:
                     continue
-                fixes.append({
+                valid_fixes.append({
                     "commit": commit,
                     "subject": fix.get("subject", ""),
+                    "mainline_commit": fix.get("mainline_commit", ""),
                 })
-            if fixes:
-                all_cve_groups[real_cve] = {
-                    "fixes": fixes,
-                    "cve_info": _build_cve_info_from_json(info, real_cve),
-                }
+            if not valid_fixes:
+                continue
+
+            # 识别主修复: mainline_commit 匹配 mainline fix 的 hulk_fix
+            primary_idx = len(valid_fixes) - 1
+            if mainline_fix_id:
+                for idx, f in enumerate(valid_fixes):
+                    if f["mainline_commit"] == mainline_fix_id:
+                        primary_idx = idx
+                        break
+
+            primary_fix = valid_fixes[primary_idx]
+            prereq_fixes = [f for i, f in enumerate(valid_fixes)
+                            if i != primary_idx]
+
+            all_cve_groups[real_cve] = {
+                "primary_fix": primary_fix,
+                "prereq_fixes": prereq_fixes,
+                "all_fixes": valid_fixes,
+                "cve_info": cve_info,
+            }
         except Exception as e:
             skipped += 1
             logger.warning("解析 CVE 条目 %s 跳过: %s", cve_id, e)
@@ -1490,7 +1510,9 @@ def cmd_batch_validate(args, config):
             "[dim]要求: 每个条目需有 hulk_fix_patchs[].commit 字段[/]")
         return
 
-    total_patches = sum(len(g["fixes"]) for g in cve_groups.values())
+    total_patches = sum(len(g["all_fixes"]) for g in cve_groups.values())
+    multi_fix_cves = sum(1 for g in cve_groups.values()
+                         if len(g["prereq_fixes"]) > 0)
     has_mainline = sum(1 for g in cve_groups.values() if g.get("cve_info"))
     range_desc = f"第 {offset + 1}~{offset + len(cve_groups)} 个" \
         if offset else f"共 {len(cve_groups)} 个"
@@ -1501,7 +1523,8 @@ def cmd_batch_validate(args, config):
         f"[bold]数据文件:[/] {args.file}",
         f"[bold]Mainline信息:[/] {has_mainline}/{len(cve_groups)} "
         f"个 CVE 使用 JSON 提供的 mainline commit (跳过 MITRE 爬取)",
-        f"[bold]聚合策略:[/] 同一 CVE 多个 hulk_fix, 任一通过即该 CVE 通过",
+        f"[bold]统计维度:[/] 每 CVE 一次验证 "
+        f"({multi_fix_cves} 个含前置补丁, 额外 fix 作为 known_prereqs)",
     ]
     if offset or limit:
         parts = []
@@ -1526,7 +1549,7 @@ def cmd_batch_validate(args, config):
     console.print(
         f"[dim]实时报告: {live_report_path} (每完成一个 CVE 自动更新)[/]")
 
-    results = []
+    cve_results = []
     passed_list = []
     failed_list = []
     error_list = []
@@ -1541,102 +1564,125 @@ def cmd_batch_validate(args, config):
     }
 
     for ci, (cve_id, group) in enumerate(cve_groups.items(), 1):
-        fixes = group["fixes"]
+        primary = group["primary_fix"]
+        prereqs = group["prereq_fixes"]
         cve_info = group.get("cve_info")
         src = "JSON" if cve_info else "MITRE"
 
         console.print(f"\n{'━' * 60}")
+        fix_desc = f"主修复={primary['commit'][:12]}"
+        if prereqs:
+            fix_desc += f"  前置={len(prereqs)}个"
         console.print(
             f"[bold magenta][{ci}/{len(cve_groups)}][/]  {cve_id}  "
-            f"[dim]{len(fixes)} 个 hulk_fix  mainline={src}[/]")
-
-        best_result = None
-        best_verdict = "no_data"
-        best_core_sim = -1.0
-        cve_error = None
-
-        for fi, fix in enumerate(fixes, 1):
-            known_fix = fix["commit"]
-            if len(fixes) > 1:
+            f"[dim]{fix_desc}  mainline={src}[/]")
+        if prereqs:
+            for pi, pf in enumerate(prereqs, 1):
                 console.print(
-                    f"  [dim]fix[{fi}/{len(fixes)}] {known_fix[:12]}"
-                    + (f"  {fix['subject'][:40]}" if fix.get("subject") else "")
+                    f"  [dim]prereq[{pi}] {pf['commit'][:12]}"
+                    + (f"  {pf['subject'][:40]}" if pf.get("subject") else "")
                     + "[/]")
-            try:
-                r = _run_single_validate(
-                    config, cve_id, tv, known_fix, [],
-                    git_mgr=git_mgr, show_stages=True,
-                    cve_info=cve_info)
-                results.append(r)
 
-                gvr = r.get("generated_vs_real", {})
-                verdict = gvr.get("verdict", "no_data")
-                core_sim = gvr.get("core_similarity", 0)
-                method = r.get("dryrun_detail", {}).get("apply_method", "-")
+        known_prereq_commits = [p["commit"] for p in prereqs]
 
-                icon = _VERDICT_ICONS.get(verdict, f"[dim]{verdict}[/]")
-                console.print(
-                    f"    {icon}  核心相似度={core_sim:.0%}  方法={method}")
+        try:
+            r = _run_single_validate(
+                config, cve_id, tv, primary["commit"],
+                known_prereq_commits,
+                git_mgr=git_mgr, show_stages=True,
+                cve_info=cve_info)
 
-                if verdict in _PASS_VERDICTS:
-                    best_result = r
-                    best_verdict = verdict
-                    best_core_sim = core_sim
-                    break
-                if core_sim > best_core_sim:
-                    best_result = r
-                    best_verdict = verdict
-                    best_core_sim = core_sim
+            gvr = r.get("generated_vs_real", {})
+            verdict = gvr.get("verdict", "no_data")
+            core_sim = gvr.get("core_similarity", 0)
+            method = r.get("dryrun_detail", {}).get("apply_method", "-")
 
-            except Exception as e:
-                logger.exception("batch-validate 异常: %s %s", cve_id, e)
-                console.print(f"    [red]✘ 跳过 (异常: {e})[/]")
-                if not cve_error:
-                    cve_error = str(e)
-                results.append({
-                    "cve_id": cve_id, "known_fix": known_fix, "target": tv,
-                    "worktree_commit": "", "checks": {},
-                    "overall_pass": False, "summary": f"执行异常: {e}",
-                    "dryrun_detail": {},
-                    "generated_vs_real": {
-                        "verdict": "error", "core_similarity": 0,
-                        "file_coverage": 0},
-                })
+            # ── 前置补丁交叉验证 ──────────────────────────────
+            prereq_validation = {}
+            if prereqs and r.get("dryrun_detail"):
+                tool_prereqs = r.get("tool_prereqs", [])
+                tool_prereq_ids = set()
+                for tp in tool_prereqs:
+                    cid = tp.get("commit_id", "")
+                    if cid:
+                        tool_prereq_ids.add(cid[:12])
 
-        # ── CVE 级别聚合判定 ──────────────────────────────────
-        best_fix = (best_result or {}).get("known_fix", fixes[0]["commit"])
-        best_method = (best_result or {}).get(
-            "dryrun_detail", {}).get("apply_method", "-")
-        item = {
-            "cve_id": cve_id,
-            "known_fix": best_fix[:12] if best_fix else "",
-            "verdict": best_verdict,
-            "core_similarity": round(max(best_core_sim, 0), 3),
-            "method": best_method,
-            "num_fixes": len(fixes),
-            "summary": (best_result or {}).get("summary", ""),
-        }
-        if best_verdict in _PASS_VERDICTS:
-            passed_list.append(item)
-            if len(fixes) > 1:
-                console.print(
-                    f"  [green bold]▸ CVE 判定: 通过[/]"
-                    f" (best fix={best_fix[:12]})")
-        elif best_result is not None:
-            reason = item["summary"]
-            if best_verdict == "no_data":
-                reason = reason or "无补丁数据可比较"
-            elif best_verdict == "different":
-                reason = reason or f"核心相似度仅 {best_core_sim:.0%}"
-            elif best_verdict == "partially_same":
-                reason = reason or f"部分一致 (核心相似度 {best_core_sim:.0%})"
-            item["reason"] = reason
-            failed_list.append(item)
-        else:
+                known_ids = {c[:12] for c in known_prereq_commits}
+
+                matched = tool_prereq_ids & known_ids
+                tool_only = tool_prereq_ids - known_ids
+                known_only = known_ids - tool_prereq_ids
+
+                prereq_validation = {
+                    "known_prereqs": len(known_ids),
+                    "tool_recommended": len(tool_prereq_ids),
+                    "matched": len(matched),
+                    "matched_ids": sorted(matched),
+                    "tool_only": sorted(tool_only),
+                    "known_only": sorted(known_only),
+                }
+                if known_ids:
+                    recall = len(matched) / len(known_ids)
+                    prereq_validation["recall"] = round(recall, 3)
+
+                recall_v = prereq_validation.get("recall", -1)
+                if recall_v >= 0:
+                    rc = "[green]" if recall_v >= 0.5 else "[yellow]"
+                    console.print(
+                        f"  [dim]前置补丁:[/] "
+                        f"已知={len(known_ids)} 工具推荐={len(tool_prereq_ids)} "
+                        f"命中={len(matched)}  "
+                        f"{rc}recall={recall_v:.0%}[/]")
+
+            r["prereq_cross_validation"] = prereq_validation
+            r["num_hulk_fixes"] = len(group["all_fixes"])
+            cve_results.append(r)
+
+            icon = _VERDICT_ICONS.get(verdict, f"[dim]{verdict}[/]")
+            console.print(
+                f"  {icon}  核心相似度={core_sim:.0%}  方法={method}")
+
+            item = {
+                "cve_id": cve_id,
+                "known_fix": primary["commit"][:12],
+                "verdict": verdict,
+                "core_similarity": round(core_sim, 3),
+                "method": method,
+                "num_fixes": len(group["all_fixes"]),
+                "num_prereqs": len(prereqs),
+                "prereq_recall": prereq_validation.get("recall", None),
+                "summary": r.get("summary", ""),
+            }
+            if verdict in _PASS_VERDICTS:
+                passed_list.append(item)
+            else:
+                reason = r.get("summary", "")
+                if verdict == "no_data":
+                    reason = reason or "无补丁数据可比较"
+                elif verdict == "different":
+                    reason = reason or f"核心相似度仅 {core_sim:.0%}"
+                elif verdict == "partially_same":
+                    reason = reason or f"部分一致 (核心相似度 {core_sim:.0%})"
+                item["reason"] = reason
+                failed_list.append(item)
+
+        except Exception as e:
+            logger.exception("batch-validate 异常: %s %s", cve_id, e)
+            console.print(f"  [red]✘ 跳过 (异常: {e})[/]")
+            cve_results.append({
+                "cve_id": cve_id, "known_fix": primary["commit"],
+                "target": tv, "worktree_commit": "", "checks": {},
+                "overall_pass": False, "summary": f"执行异常: {e}",
+                "dryrun_detail": {},
+                "generated_vs_real": {
+                    "verdict": "error", "core_similarity": 0,
+                    "file_coverage": 0},
+                "num_hulk_fixes": len(group["all_fixes"]),
+            })
             error_list.append({
                 "cve_id": cve_id,
-                "known_fix": fixes[0]["commit"][:12],
-                "reason": cve_error or "所有 fix 均异常",
+                "known_fix": primary["commit"][:12],
+                "reason": str(e),
             })
 
         _flush_live_report(
@@ -1644,7 +1690,7 @@ def cmd_batch_validate(args, config):
             passed_list, failed_list, error_list)
 
     console.print(f"\n{'━' * 60}\n")
-    render_batch_validate_report(results, tv)
+    render_batch_validate_report(cve_results, tv)
 
     full_report_path = os.path.join(
         out_dir, f"batch_validate_{tv}_{ts}_full.json")
@@ -1654,7 +1700,7 @@ def cmd_batch_validate(args, config):
             "total_cves": len(cve_groups),
             "total_patches": total_patches,
             "skipped_parse_errors": skipped,
-            "results": results,
+            "cve_results": cve_results,
             "cve_summary": {
                 "passed": passed_list,
                 "failed": failed_list,
