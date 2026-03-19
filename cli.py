@@ -8,7 +8,7 @@ CVE补丁回溯分析 - 命令行工具
   python cli.py check-intro --cve CVE-2024-26633 --target 5.10-hulk
   python cli.py check-fix --commit <fix_commit_id> --target 5.10-hulk
   python cli.py check-fix --cve CVE-2024-26633 --target 5.10-hulk
-  python cli.py validate --cve CVE-xxx --target 5.10-hulk --known-fix <commit>
+  python cli.py validate --cve CVE-xxx --target 5.10-hulk --known-fix <commit> [--mainline-fix <commit>]
   python cli.py benchmark --file benchmarks.yaml --target 5.10-hulk
   python cli.py batch-validate --file cve_data.json --target 5.10-hulk [--limit N]
   python cli.py build-cache --target 5.10-hulk
@@ -1093,17 +1093,42 @@ def cmd_validate(args, config):
     known_prereqs = [p.strip() for p in args.known_prereqs.split(",")
                      if p.strip()] if args.known_prereqs else []
 
-    console.print(Panel(
-        f"[bold]CVE:[/] {args.cve_id}  [bold]目标:[/] {tv}\n"
-        f"[bold]Known Fix:[/] {args.known_fix[:12]}\n"
+    cve_info = None
+    mainline_fix = getattr(args, "mainline_fix", "") or ""
+    mainline_intro = getattr(args, "mainline_intro", "") or ""
+    if mainline_fix:
+        from core.models import CveInfo
+        fix_commits = [{"commit_id": mainline_fix, "subject": ""}]
+        intro_commits = ([{"commit_id": mainline_intro, "subject": ""}]
+                         if mainline_intro else [])
+        cve_info = CveInfo(
+            cve_id=args.cve_id,
+            fix_commits=fix_commits,
+            mainline_fix_commit=mainline_fix,
+            introduced_commits=intro_commits,
+        )
+
+    info_lines = [
+        f"[bold]CVE:[/] {args.cve_id}  [bold]目标:[/] {tv}",
+        f"[bold]Known Fix:[/] {args.known_fix[:12]}",
         f"[bold]Known Prereqs:[/] {len(known_prereqs)} 个",
+    ]
+    if mainline_fix:
+        info_lines.append(
+            f"[bold]Mainline Fix:[/] {mainline_fix[:12]}  "
+            f"[dim](跳过 MITRE 爬取)[/]")
+    if mainline_intro:
+        info_lines.append(
+            f"[bold]Mainline Intro:[/] {mainline_intro[:12]}")
+    console.print(Panel(
+        "\n".join(info_lines),
         title="[bold magenta]验证框架 — 单CVE回退验证[/]",
         border_style="magenta", padding=(0, 2),
     ))
 
     result = _run_single_validate(
         config, args.cve_id, tv, args.known_fix, known_prereqs,
-        git_mgr=git_mgr, show_stages=True)
+        git_mgr=git_mgr, show_stages=True, cve_info=cve_info)
 
     # LLM 智能分析
     if not result.get("overall_pass"):
@@ -1639,6 +1664,10 @@ def main():
     vp.add_argument("--known-fix", required=True, help="本地仓库中真实修复的commit ID")
     vp.add_argument("--known-prereqs", default="",
                     help="实际先合入的前置commit列表 (逗号分隔)")
+    vp.add_argument("--mainline-fix", default="",
+                    help="社区 mainline 修复 commit ID (提供后跳过 MITRE 爬取)")
+    vp.add_argument("--mainline-intro", default="",
+                    help="社区 mainline 引入 commit ID (可选)")
 
     bmp = sub.add_parser("benchmark", help="批量准确度基准测试", parents=[parent])
     bmp.add_argument("--file", required=True, help="基准测试YAML文件 (benchmarks.yaml)")
