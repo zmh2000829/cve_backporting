@@ -1250,28 +1250,54 @@ def cmd_benchmark(args, config):
 
 def cmd_batch_validate(args, config):
     """批量验证 — 从 JSON 文件加载 CVE 数据并逐一验证补丁生成准确度"""
-    with open(args.file, "r", encoding="utf-8") as f:
-        data = json.load(f)
+    try:
+        with open(args.file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        console.print(f"[red bold]错误:[/] 无法解析 JSON 文件: {e}")
+        return
+
+    if not isinstance(data, dict):
+        console.print("[red bold]错误:[/] JSON 顶层结构应为 dict "
+                      "(key=CVE编号, value=CVE数据)")
+        return
 
     tv = args.target_version
     git_mgr = _make_git_mgr(config, tv)
 
     entries = []
+    skipped = 0
+    seen_cves = set()
+    limit = args.limit if args.limit and args.limit > 0 else 0
+
     for cve_id, info in data.items():
-        if not isinstance(info, dict):
-            continue
-        hulk_fixes = info.get("hulk_fix_patchs", [])
-        if not hulk_fixes:
-            continue
-        for fix in hulk_fixes:
-            commit = fix.get("commit", "")
-            if not commit:
+        if limit and len(seen_cves) >= limit:
+            break
+        try:
+            if not isinstance(info, dict):
                 continue
-            entries.append({
-                "cve_id": info.get("cve_id", cve_id),
-                "known_fix": commit,
-                "subject": fix.get("subject", ""),
-            })
+            hulk_fixes = info.get("hulk_fix_patchs", [])
+            if not hulk_fixes or not isinstance(hulk_fixes, list):
+                continue
+            for fix in hulk_fixes:
+                if not isinstance(fix, dict):
+                    continue
+                commit = fix.get("commit", "")
+                if not commit or len(commit) < 8:
+                    continue
+                real_cve = info.get("cve_id", cve_id)
+                if limit and real_cve not in seen_cves \
+                        and len(seen_cves) >= limit:
+                    break
+                seen_cves.add(real_cve)
+                entries.append({
+                    "cve_id": real_cve,
+                    "known_fix": commit,
+                    "subject": fix.get("subject", ""),
+                })
+        except Exception as e:
+            skipped += 1
+            logger.warning("解析 CVE 条目 %s 跳过: %s", cve_id, e)
 
     if not entries:
         console.print("[red]JSON 文件中未找到有效的 CVE 验证条目[/]")
@@ -1279,15 +1305,18 @@ def cmd_batch_validate(args, config):
             "[dim]要求: 每个条目需有 hulk_fix_patchs[].commit 字段[/]")
         return
 
-    if args.limit and args.limit > 0:
-        entries = entries[:args.limit]
-
     cve_count = len(set(e["cve_id"] for e in entries))
+    info_parts = [
+        f"[bold]验证集:[/] {cve_count} 个 CVE / {len(entries)} 个补丁",
+        f"[bold]目标分支:[/] {tv}",
+        f"[bold]数据文件:[/] {args.file}",
+    ]
+    if limit:
+        info_parts.append(f"[bold]限制:[/] 前 {limit} 个 CVE")
+    if skipped:
+        info_parts.append(f"[yellow]跳过:[/] {skipped} 个解析异常条目")
     console.print(Panel(
-        f"[bold]验证集:[/] {cve_count} 个 CVE / {len(entries)} 个补丁\n"
-        f"[bold]目标分支:[/] {tv}\n"
-        f"[bold]数据文件:[/] {args.file}"
-        + (f"\n[bold]限制:[/] 前 {args.limit} 条" if args.limit else ""),
+        "\n".join(info_parts),
         title="[bold magenta]批量验证 — 补丁生成准确度[/]",
         border_style="magenta", padding=(0, 2),
     ))
@@ -1328,7 +1357,7 @@ def cmd_batch_validate(args, config):
 
         except Exception as e:
             logger.exception("batch-validate 异常: %s %s", cve_id, e)
-            console.print(f"  [red]✘ 异常: {e}[/]")
+            console.print(f"  [red]✘ 跳过 (异常: {e})[/]")
             results.append({
                 "cve_id": cve_id, "known_fix": known_fix, "target": tv,
                 "worktree_commit": "", "checks": {},
@@ -1351,6 +1380,7 @@ def cmd_batch_validate(args, config):
             "target": tv,
             "total_cves": cve_count,
             "total_patches": len(entries),
+            "skipped_parse_errors": skipped,
             "results": results,
         }, f, indent=2, ensure_ascii=False, default=str)
     console.print(f"[dim]批量验证报告已保存: {fp}[/]")
@@ -1508,7 +1538,7 @@ def main():
                      help="CVE 数据 JSON 文件 (含 hulk_fix_patchs)")
     bvp.add_argument("--target", dest="target_version", required=True)
     bvp.add_argument("--limit", type=int, default=0,
-                     help="限制验证条目数 (0=全部)")
+                     help="从前往后读取的 CVE 数量 (0=全部)")
 
     cp = sub.add_parser("build-cache", help="构建commit缓存", parents=[parent])
     cp.add_argument("--target", dest="target_version", required=True)

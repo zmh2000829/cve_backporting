@@ -167,7 +167,37 @@ python cli.py validate \
   --known-fix da23bd709b46
 ```
 
-### `benchmark` — Batch Accuracy Assessment
+### `batch-validate` — Batch Patch Accuracy Assessment
+
+Loads CVE data from a JSON file (containing `hulk_fix_patchs` with known fix commits), runs `validate` for each CVE, and generates an aggregate patch generation accuracy report.
+
+```bash
+# Validate all CVEs in the JSON file
+python cli.py batch-validate --file cve_data.json --target 5.10-hulk
+
+# Validate the first 10 CVEs only
+python cli.py batch-validate --file cve_data.json --target 5.10-hulk --limit 10
+```
+
+**JSON input format** — top-level dict keyed by CVE ID:
+
+```json
+{
+  "CVE-2025-40110": {
+    "cve_id": "CVE-2025-40110",
+    "hulk_fix_patchs": [
+      {
+        "commit": "7745ad3f72ea9bc8671f95a08ba34b4d2cbb4322",
+        "subject": "[Backport] drm/vmwgfx: Fix a null-ptr access"
+      }
+    ]
+  }
+}
+```
+
+**Output report includes**: patch generation accuracy rate (identical + essentially_same), average core similarity, verdict distribution, DryRun method distribution, and per-CVE detail table. Entries that fail parsing or cause runtime errors are automatically skipped without affecting the overall batch.
+
+### `benchmark` — Batch Accuracy Assessment (YAML)
 
 Runs validation on a YAML-defined CVE suite, outputs aggregate metrics.
 
