@@ -10,7 +10,7 @@ CVE补丁回溯分析 - 命令行工具
   python cli.py check-fix --cve CVE-2024-26633 --target 5.10-hulk
   python cli.py validate --cve CVE-xxx --target 5.10-hulk --known-fix <commit> [--mainline-fix <commit>]
   python cli.py benchmark --file benchmarks.yaml --target 5.10-hulk
-  python cli.py batch-validate --file cve_data.json --target 5.10-hulk [--limit N]
+  python cli.py batch-validate --file cve_data.json --target 5.10-hulk [--offset N] [--limit N]
   python cli.py build-cache --target 5.10-hulk
   python cli.py search --commit abc123 --target 5.10-hulk
 """
@@ -1441,13 +1441,12 @@ def cmd_batch_validate(args, config):
 
     # ── 解析 JSON → 按 CVE 分组 ─────────────────────────────────
     from collections import OrderedDict
-    cve_groups = OrderedDict()
+    all_cve_groups = OrderedDict()
     skipped = 0
+    offset = max(args.offset, 0) if hasattr(args, "offset") else 0
     limit = args.limit if args.limit and args.limit > 0 else 0
 
     for cve_id, info in data.items():
-        if limit and len(cve_groups) >= limit:
-            break
         try:
             if not isinstance(info, dict):
                 continue
@@ -1455,9 +1454,6 @@ def cmd_batch_validate(args, config):
             if not hulk_fixes or not isinstance(hulk_fixes, list):
                 continue
             real_cve = info.get("cve_id", cve_id)
-            if limit and real_cve not in cve_groups \
-                    and len(cve_groups) >= limit:
-                continue
 
             fixes = []
             for fix in hulk_fixes:
@@ -1471,13 +1467,22 @@ def cmd_batch_validate(args, config):
                     "subject": fix.get("subject", ""),
                 })
             if fixes:
-                cve_groups[real_cve] = {
+                all_cve_groups[real_cve] = {
                     "fixes": fixes,
                     "cve_info": _build_cve_info_from_json(info, real_cve),
                 }
         except Exception as e:
             skipped += 1
             logger.warning("解析 CVE 条目 %s 跳过: %s", cve_id, e)
+
+    # offset + limit 切片
+    all_keys = list(all_cve_groups.keys())
+    total_available = len(all_keys)
+    sliced_keys = all_keys[offset:]
+    if limit:
+        sliced_keys = sliced_keys[:limit]
+    cve_groups = OrderedDict(
+        (k, all_cve_groups[k]) for k in sliced_keys)
 
     if not cve_groups:
         console.print("[red]JSON 文件中未找到有效的 CVE 验证条目[/]")
@@ -1487,16 +1492,24 @@ def cmd_batch_validate(args, config):
 
     total_patches = sum(len(g["fixes"]) for g in cve_groups.values())
     has_mainline = sum(1 for g in cve_groups.values() if g.get("cve_info"))
+    range_desc = f"第 {offset + 1}~{offset + len(cve_groups)} 个" \
+        if offset else f"共 {len(cve_groups)} 个"
     info_parts = [
-        f"[bold]验证集:[/] {len(cve_groups)} 个 CVE / {total_patches} 个补丁",
+        f"[bold]验证集:[/] {range_desc} CVE / {total_patches} 个补丁"
+        f"  [dim](JSON 共 {total_available} 个 CVE)[/]",
         f"[bold]目标分支:[/] {tv}",
         f"[bold]数据文件:[/] {args.file}",
         f"[bold]Mainline信息:[/] {has_mainline}/{len(cve_groups)} "
         f"个 CVE 使用 JSON 提供的 mainline commit (跳过 MITRE 爬取)",
         f"[bold]聚合策略:[/] 同一 CVE 多个 hulk_fix, 任一通过即该 CVE 通过",
     ]
-    if limit:
-        info_parts.append(f"[bold]限制:[/] 前 {limit} 个 CVE")
+    if offset or limit:
+        parts = []
+        if offset:
+            parts.append(f"offset={offset}")
+        if limit:
+            parts.append(f"limit={limit}")
+        info_parts.append(f"[bold]范围:[/] {', '.join(parts)}")
     if skipped:
         info_parts.append(f"[yellow]跳过:[/] {skipped} 个解析异常条目")
     console.print(Panel(
@@ -1807,8 +1820,10 @@ def main():
     bvp.add_argument("--file", required=True,
                      help="CVE 数据 JSON 文件 (含 hulk_fix_patchs)")
     bvp.add_argument("--target", dest="target_version", required=True)
+    bvp.add_argument("--offset", type=int, default=0,
+                     help="跳过前 N 个 CVE, 从第 N+1 个开始 (默认 0)")
     bvp.add_argument("--limit", type=int, default=0,
-                     help="从前往后读取的 CVE 数量 (0=全部)")
+                     help="处理的 CVE 数量 (0=全部, 与 --offset 配合使用)")
 
     cp = sub.add_parser("build-cache", help="构建commit缓存", parents=[parent])
     cp.add_argument("--target", dest="target_version", required=True)
