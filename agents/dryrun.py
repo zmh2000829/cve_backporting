@@ -417,12 +417,42 @@ class DryRunAgent:
 
         return None, n
 
+    def _check_insertion_context(self, ctx_after: List[str],
+                                file_lines: List[str],
+                                insertion_pos: int) -> bool:
+        """
+        交叉验证：检查 insertion_pos 之后的文件行是否与 ctx_after 匹配。
+        至少需要一行非空 ctx_after 匹配才通过。
+        当 ctx_after 为空时默认通过。
+        """
+        if not ctx_after:
+            return True
+        checked, matched = 0, 0
+        for i, line in enumerate(ctx_after[:4]):
+            s = line.strip()
+            if not s:
+                continue
+            checked += 1
+            fi = insertion_pos + i
+            if 0 <= fi < len(file_lines):
+                if file_lines[fi].strip() == s:
+                    matched += 1
+                elif difflib.SequenceMatcher(
+                    None, s, file_lines[fi].strip()
+                ).ratio() >= 0.80:
+                    matched += 0.5
+        if checked == 0:
+            return True
+        return matched / checked >= 0.4
+
     def _locate_addition_hunk(self, ctx_before, ctx_after, added,
                               file_lines, hint_line, func_name):
         """
         纯添加 hunk: 找插入点。
         策略 A/B 向 ctx_before/ctx_after 深处搜索非 trivial 锚点，
         避免用 return 0; / } 等通用行做锚点导致定位到错误函数。
+        每个策略找到候选后都会用 ctx_after 做交叉验证，
+        防止同名行在文件中多次出现时选错位置。
         """
         # A) before-context: 从末尾向前迭代，跳过 trivial 行
         if ctx_before:
@@ -435,7 +465,10 @@ class DryRunAgent:
                 anchor = self._find_anchor_line(
                     ctx_before[idx], file_lines, adj)
                 if anchor is not None:
-                    return anchor + 1 + back, 0
+                    ins = anchor + 1 + back
+                    if self._check_insertion_context(
+                            ctx_after, file_lines, ins):
+                        return ins, 0
                 break
 
         # B) after-context: 从首行向后迭代，跳过 trivial 行
@@ -448,7 +481,10 @@ class DryRunAgent:
                 anchor = self._find_anchor_line(
                     ctx_after[fwd], file_lines, adj)
                 if anchor is not None:
-                    return anchor - fwd, 0
+                    ins = anchor - fwd
+                    if self._check_insertion_context(
+                            ctx_after, file_lines, ins):
+                        return ins, 0
                 break
 
         # C) 整段 before-context 精确/模糊搜索 (利用 func_name 约束)
@@ -456,7 +492,10 @@ class DryRunAgent:
             pos = self._locate_in_file(
                 ctx_before, ctx_after, file_lines, hint_line, func_name)
             if pos is not None:
-                return pos + len(ctx_before), 0
+                ins = pos + len(ctx_before)
+                if self._check_insertion_context(
+                        ctx_after, file_lines, ins):
+                    return ins, 0
 
         # D) 整段 after-context 精确/模糊搜索 (利用 func_name 约束)
         if ctx_after and len(ctx_after) >= 2:
@@ -465,7 +504,24 @@ class DryRunAgent:
             pos = self._locate_in_file(
                 ctx_after, ctx_before, file_lines, adj, func_name)
             if pos is not None:
-                return pos, 0
+                if self._check_insertion_context(
+                        ctx_after, file_lines, pos):
+                    return pos, 0
+
+        # ── 交叉验证全部失败，使用宽松回退策略 ─────────────────
+        # A-fallback) 锚点搜索不做交叉验证（覆盖面更广）
+        if ctx_before:
+            for back in range(len(ctx_before)):
+                idx = len(ctx_before) - 1 - back
+                if _is_trivial_anchor(ctx_before[idx]):
+                    continue
+                adj = ((hint_line + idx)
+                       if hint_line else hint_line)
+                anchor = self._find_anchor_line(
+                    ctx_before[idx], file_lines, adj)
+                if anchor is not None:
+                    return anchor + 1 + back, 0
+                break
 
         # E) 全 hunk 非 + 行投票
         non_plus = [
@@ -505,6 +561,8 @@ class DryRunAgent:
             center = hint_line - 1
             lo = max(0, center - window)
             hi = min(len(hs), center + window)
+            if hi <= lo:
+                lo, hi = 0, len(hs)
         else:
             lo, hi = 0, len(hs)
             center = len(hs) // 2

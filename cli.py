@@ -1047,8 +1047,24 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
             logger.info("适配补丁已保存: %s", patch_file)
 
         # ── 核心: 生成补丁 vs 真实修复的本质比较 ─────────────
+        # strict/C1/3way (L0-L2) 成功意味着社区补丁已能直接应用，
+        # 此时 L3 重建反而可能因多次匹配而定位到错误位置，
+        # 所以 L0-L2 成功时优先用社区原始补丁做比较。
+        apply_method = dryrun_detail.get("apply_method", "")
+        l0_l2_methods = {"strict", "C1", "3way"}
+        use_community = (apply_method in l0_l2_methods
+                         and community_diff and local_diff)
+
         generated_vs_real = {}
-        if adapted_patch and local_diff:
+        if use_community:
+            generated_vs_real = _compare_generated_vs_real(
+                community_diff, local_diff)
+            generated_vs_real["compare_source"] = "community_patch"
+            generated_vs_real["note"] = (
+                f"apply_method={apply_method}，社区补丁可直接应用，"
+                "使用社区原始补丁做本质比较"
+            )
+        elif adapted_patch and local_diff:
             generated_vs_real = _compare_generated_vs_real(
                 adapted_patch, local_diff)
             generated_vs_real["compare_source"] = "adapted_patch"

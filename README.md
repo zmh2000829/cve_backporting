@@ -162,9 +162,22 @@ python cli.py check-fix --cve CVE-2024-26633 --target 5.10-hulk
 Rolls back to pre-fix state via `git worktree`, runs pipeline, compares against ground truth.
 
 ```bash
+# Basic usage
 python cli.py validate \
   --cve CVE-2024-26633 --target 5.10-hulk \
   --known-fix da23bd709b46
+
+# Provide mainline fix commit directly (skips MITRE crawl)
+python cli.py validate \
+  --cve CVE-2024-26633 --target 5.10-hulk \
+  --known-fix da23bd709b46 \
+  --mainline-fix <community_fix_commit_id>
+
+# Also provide mainline introduced commit
+python cli.py validate \
+  --cve CVE-2024-26633 --target 5.10-hulk \
+  --known-fix da23bd709b46 \
+  --mainline-fix <fix_commit> --mainline-intro <intro_commit>
 ```
 
 ### `batch-validate` — Batch Patch Accuracy Assessment
@@ -195,7 +208,12 @@ python cli.py batch-validate --file cve_data.json --target 5.10-hulk --limit 10
 }
 ```
 
-**Output report includes**: patch generation accuracy rate (identical + essentially_same), average core similarity, verdict distribution, DryRun method distribution, and per-CVE detail table. Entries that fail parsing or cause runtime errors are automatically skipped without affecting the overall batch.
+**Output**:
+- **Real-time JSON report** (`batch_validate_*.json`) — updated after each CVE, includes `progress`, `passed`, `failed`, `errors` lists with reasons
+- **Full JSON report** (`batch_validate_*_full.json`) — final aggregate metrics with per-CVE detail
+- **TUI summary** — patch accuracy rate, average core similarity, verdict distribution, DryRun method distribution, per-CVE table
+
+Mainline fix/intro commits from JSON (`mainline_fix_patchs`, `mainline_import_patchs`) are used directly, skipping MITRE crawl. Entries that fail parsing or cause runtime errors are automatically skipped without affecting the overall batch.
 
 ### `benchmark` — Batch Accuracy Assessment (YAML)
 
@@ -300,6 +318,7 @@ First application of multiset containment detection in CVE backport tooling — 
 
 **Layer 1**: Anchor-line positioning — single-line search immune to context interruption.
 **Layer 2**: Seven-strategy sequence search — exact → function-name → line-window → fuzzy → context-retry → voting → longest-line.
+**Cross-validation**: After finding a candidate position, `ctx_after` content is verified against actual file content to reject false matches when anchor lines (e.g. `spin_unlock(ptl)`) appear multiple times.
 
 ### 3. Direct-Read Patch Reconstruction
 
@@ -389,6 +408,7 @@ python -m tests.test_agents full CVE-2024-26633  # End-to-end with dry-run
 3. `conflict-adapted` patches guarantee applicability but **require human review for semantic correctness**
 4. MITRE API may lack structured affected data for older CVEs
 5. Validation prerequisite comparison relies on ID/Subject matching — cannot cover pure code-semantic equivalence
+6. L0-L2 (strict/C1/3way) success comparison uses community patch directly; only L3+ uses regenerated patches
 
 ---
 
