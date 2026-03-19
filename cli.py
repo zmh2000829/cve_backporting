@@ -826,8 +826,10 @@ def _compare_generated_vs_real(generated_patch: str, real_diff: str) -> dict:
 
 
 def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
-                         git_mgr=None, show_stages=True):
-    """执行单个 CVE 的回退验证，返回结果 dict"""
+                         git_mgr=None, show_stages=True,
+                         cve_info=None):
+    """执行单个 CVE 的回退验证，返回结果 dict。
+    cve_info: 可选的预构建 CveInfo，提供后跳过 MITRE 爬取。"""
     if git_mgr is None:
         git_mgr = _make_git_mgr(config, tv)
 
@@ -877,9 +879,11 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
                     on_stage(key, st, detail)
                     live.update(_layout())
                 result = pipe.analyze(cve_id, tv, enable_dryrun=True,
-                                      on_stage=_update)
+                                      on_stage=_update,
+                                      cve_info=cve_info)
         else:
-            result = pipe.analyze(cve_id, tv, enable_dryrun=True)
+            result = pipe.analyze(cve_id, tv, enable_dryrun=True,
+                                  cve_info=cve_info)
 
         if result.cve_info is None or not result.cve_info.fix_commit_id:
             return {
@@ -1248,6 +1252,65 @@ def cmd_benchmark(args, config):
 
 # ─── batch-validate ──────────────────────────────────────────────────
 
+def _build_cve_info_from_json(info: dict, cve_id: str):
+    """从 JSON 条目构建 CveInfo，使用 mainline_fix_patchs / mainline_import_patchs"""
+    from core.models import CveInfo
+
+    mainline_fixes = info.get("mainline_fix_patchs", [])
+    mainline_intros = info.get("mainline_import_patchs", [])
+
+    fix_commits = []
+    mainline_fix = ""
+    for p in (mainline_fixes if isinstance(mainline_fixes, list) else []):
+        if isinstance(p, dict) and p.get("commit"):
+            fix_commits.append({
+                "commit_id": p["commit"],
+                "subject": p.get("subject", ""),
+            })
+            if not mainline_fix:
+                mainline_fix = p["commit"]
+
+    intro_commits = []
+    for p in (mainline_intros if isinstance(mainline_intros, list) else []):
+        if isinstance(p, dict) and p.get("commit"):
+            intro_commits.append({
+                "commit_id": p["commit"],
+                "subject": p.get("subject", ""),
+            })
+
+    if not mainline_fix:
+        return None
+
+    return CveInfo(
+        cve_id=cve_id,
+        fix_commits=fix_commits,
+        mainline_fix_commit=mainline_fix,
+        introduced_commits=intro_commits,
+    )
+
+
+def _flush_live_report(path: str, target: str, total: int,
+                       passed: list, failed: list, errors: list):
+    """实时写入 JSON 报告，每完成一个 CVE 就更新"""
+    done = len(passed) + len(failed) + len(errors)
+    report = {
+        "target": target,
+        "progress": f"{done}/{total}",
+        "summary": {
+            "total": total,
+            "done": done,
+            "passed": len(passed),
+            "failed": len(failed),
+            "errors": len(errors),
+        },
+        "passed": passed,
+        "failed": failed,
+        "errors": errors,
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(report, f, indent=2, ensure_ascii=False, default=str)
+
+
 def cmd_batch_validate(args, config):
     """批量验证 — 从 JSON 文件加载 CVE 数据并逐一验证补丁生成准确度"""
     try:
@@ -1290,10 +1353,13 @@ def cmd_batch_validate(args, config):
                         and len(seen_cves) >= limit:
                     break
                 seen_cves.add(real_cve)
+
+                cve_info = _build_cve_info_from_json(info, real_cve)
                 entries.append({
                     "cve_id": real_cve,
                     "known_fix": commit,
                     "subject": fix.get("subject", ""),
+                    "cve_info": cve_info,
                 })
         except Exception as e:
             skipped += 1
@@ -1306,10 +1372,13 @@ def cmd_batch_validate(args, config):
         return
 
     cve_count = len(set(e["cve_id"] for e in entries))
+    has_mainline = sum(1 for e in entries if e.get("cve_info"))
     info_parts = [
         f"[bold]验证集:[/] {cve_count} 个 CVE / {len(entries)} 个补丁",
         f"[bold]目标分支:[/] {tv}",
         f"[bold]数据文件:[/] {args.file}",
+        f"[bold]Mainline信息:[/] {has_mainline}/{len(entries)} "
+        f"条使用 JSON 提供的 mainline commit (跳过 MITRE 爬取)",
     ]
     if limit:
         info_parts.append(f"[bold]限制:[/] 前 {limit} 个 CVE")
@@ -1321,22 +1390,36 @@ def cmd_batch_validate(args, config):
         border_style="magenta", padding=(0, 2),
     ))
 
+    out_dir = config.output.output_dir
+    os.makedirs(out_dir, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    live_report_path = os.path.join(
+        out_dir, f"batch_validate_{tv}_{ts}.json")
+    console.print(
+        f"[dim]实时报告: {live_report_path} (每完成一个 CVE 自动更新)[/]")
+
     results = []
+    passed_list = []
+    failed_list = []
+    error_list = []
+
     for i, entry in enumerate(entries, 1):
         cve_id = entry["cve_id"]
         known_fix = entry["known_fix"]
 
         console.print(f"\n{'━' * 60}")
+        src = "JSON" if entry.get("cve_info") else "MITRE"
         console.print(
             f"[bold magenta][{i}/{len(entries)}][/]  {cve_id}  "
-            f"[dim]fix={known_fix[:12]}[/]"
+            f"[dim]fix={known_fix[:12]}  mainline={src}[/]"
             + (f"  [dim italic]{entry['subject'][:50]}[/]"
                if entry.get("subject") else ""))
 
         try:
             r = _run_single_validate(
                 config, cve_id, tv, known_fix, [],
-                git_mgr=git_mgr, show_stages=True)
+                git_mgr=git_mgr, show_stages=True,
+                cve_info=entry.get("cve_info"))
             results.append(r)
 
             gvr = r.get("generated_vs_real", {})
@@ -1355,6 +1438,27 @@ def cmd_batch_validate(args, config):
             console.print(
                 f"  {icon}  核心相似度={core_sim:.0%}  方法={method}")
 
+            item = {
+                "cve_id": cve_id,
+                "known_fix": known_fix[:12],
+                "verdict": verdict,
+                "core_similarity": round(core_sim, 3),
+                "method": method,
+                "summary": r.get("summary", ""),
+            }
+            if verdict in ("identical", "essentially_same"):
+                passed_list.append(item)
+            else:
+                reason = r.get("summary", "")
+                if verdict == "no_data":
+                    reason = reason or "无补丁数据可比较"
+                elif verdict == "different":
+                    reason = reason or f"核心相似度仅 {core_sim:.0%}"
+                elif verdict == "partially_same":
+                    reason = reason or f"部分一致 (核心相似度 {core_sim:.0%})"
+                item["reason"] = reason
+                failed_list.append(item)
+
         except Exception as e:
             logger.exception("batch-validate 异常: %s %s", cve_id, e)
             console.print(f"  [red]✘ 跳过 (异常: {e})[/]")
@@ -1367,15 +1471,22 @@ def cmd_batch_validate(args, config):
                     "verdict": "error", "core_similarity": 0,
                     "file_coverage": 0},
             })
+            error_list.append({
+                "cve_id": cve_id,
+                "known_fix": known_fix[:12],
+                "reason": str(e),
+            })
+
+        _flush_live_report(
+            live_report_path, tv, len(entries),
+            passed_list, failed_list, error_list)
 
     console.print(f"\n{'━' * 60}\n")
     render_batch_validate_report(results, tv)
 
-    out_dir = config.output.output_dir
-    os.makedirs(out_dir, exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    fp = os.path.join(out_dir, f"batch_validate_{tv}_{ts}.json")
-    with open(fp, "w", encoding="utf-8") as f:
+    full_report_path = os.path.join(
+        out_dir, f"batch_validate_{tv}_{ts}_full.json")
+    with open(full_report_path, "w", encoding="utf-8") as f:
         json.dump({
             "target": tv,
             "total_cves": cve_count,
@@ -1383,7 +1494,8 @@ def cmd_batch_validate(args, config):
             "skipped_parse_errors": skipped,
             "results": results,
         }, f, indent=2, ensure_ascii=False, default=str)
-    console.print(f"[dim]批量验证报告已保存: {fp}[/]")
+    console.print(f"[dim]完整结果: {full_report_path}[/]")
+    console.print(f"[dim]实时报告: {live_report_path}[/]")
 
 
 # ─── build-cache ─────────────────────────────────────────────────────

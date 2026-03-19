@@ -45,7 +45,8 @@ class Pipeline:
 
     def analyze(self, cve_id: str, target_version: str,
                 enable_dryrun: bool = True,
-                on_stage: StageCB = None) -> AnalysisResult:
+                on_stage: StageCB = None,
+                cve_info=None) -> AnalysisResult:
         result = AnalysisResult(cve_id=cve_id, target_version=target_version)
 
         def _cb(key, status, detail=""):
@@ -54,7 +55,10 @@ class Pipeline:
 
         # ── Step 1: Crawler - CVE ────────────────────────────────────
         _cb("crawler_cve", "running")
-        cve_info = self.crawler.fetch_cve(cve_id)
+        if cve_info is not None and cve_info.fix_commit_id:
+            logger.info("[Pipeline] 使用预提供的 CveInfo, 跳过 MITRE 爬取")
+        else:
+            cve_info = self.crawler.fetch_cve(cve_id)
         if not cve_info or not cve_info.fix_commit_id:
             _cb("crawler_cve", "fail", "无法获取CVE信息")
             result.recommendations.append(f"无法获取 {cve_id} 的修复commit信息")
