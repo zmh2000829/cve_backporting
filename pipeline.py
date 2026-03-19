@@ -55,7 +55,8 @@ class Pipeline:
 
         # ── Step 1: Crawler - CVE ────────────────────────────────────
         _cb("crawler_cve", "running")
-        if cve_info is not None and cve_info.fix_commit_id:
+        prefer_local = cve_info is not None and cve_info.fix_commit_id
+        if prefer_local:
             logger.info("[Pipeline] 使用预提供的 CveInfo, 跳过 MITRE 爬取")
         else:
             cve_info = self.crawler.fetch_cve(cve_id)
@@ -71,7 +72,9 @@ class Pipeline:
 
         # ── Step 2: Crawler - Patch ──────────────────────────────────
         _cb("crawler_patch", "running")
-        fix_patch = self.crawler.fetch_patch(cve_info.fix_commit_id, target_version)
+        fix_patch = self.crawler.fetch_patch(
+            cve_info.fix_commit_id, target_version,
+            local_first=prefer_local)
         if not fix_patch:
             _cb("crawler_patch", "fail", "获取补丁失败 (远程+本地均不可用)")
             result.recommendations.append("无法获取修复补丁内容 (googlesource不可达且本地仓库无此commit)")
@@ -83,7 +86,9 @@ class Pipeline:
         # ── Step 3: Analysis - 引入commit (启用包含度匹配) ─────────────
         if cve_info.introduced_commit_id:
             _cb("analysis_intro", "running")
-            intro_patch = self.crawler.fetch_patch(cve_info.introduced_commit_id, target_version)
+            intro_patch = self.crawler.fetch_patch(
+                cve_info.introduced_commit_id, target_version,
+                local_first=prefer_local)
             result.introduced_search = self.analysis.search(
                 cve_info.introduced_commit_id,
                 intro_patch.subject if intro_patch else "",

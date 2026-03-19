@@ -61,12 +61,23 @@ class CrawlerAgent:
                      len(info.fix_commits), len(info.introduced_commits))
         return info
 
-    def fetch_patch(self, commit_id: str, target_version: str = None) -> Optional[PatchInfo]:
+    def fetch_patch(self, commit_id: str, target_version: str = None,
+                    local_first: bool = False) -> Optional[PatchInfo]:
         """
         获取补丁元数据+diff。
-        优先级: git.kernel.org > googlesource.com > 本地 git 仓库
+        local_first=False (默认): kernel.org > googlesource > 本地
+        local_first=True:  本地 > kernel.org > googlesource
+            适用于 batch-validate 等场景，commit 大概率已在本地对象库中，
+            跳过网络请求可节省数十秒/个。
         """
-        logger.info("[Crawler] 获取 patch %s ...", commit_id[:12])
+        logger.info("[Crawler] 获取 patch %s (local_first=%s) ...",
+                    commit_id[:12], local_first)
+
+        if local_first and self.git_mgr and target_version:
+            patch_local = self._fetch_patch_local(commit_id, target_version)
+            if patch_local and patch_local.subject and patch_local.diff_code:
+                logger.info("[Crawler] 本地仓库命中: %s", commit_id[:12])
+                return patch_local
 
         patch = self._fetch_from_kernel_org(commit_id)
         if patch and patch.subject and patch.diff_code:
@@ -80,7 +91,7 @@ class CrawlerAgent:
         if patch and patch.subject and patch.diff_code:
             return patch
 
-        if self.git_mgr and target_version:
+        if self.git_mgr and target_version and not local_first:
             logger.info("[Crawler] 远程不可用, 回退到本地仓库")
             patch_local = self._fetch_patch_local(commit_id, target_version)
             if patch_local:
