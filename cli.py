@@ -10,6 +10,7 @@ CVE补丁回溯分析 - 命令行工具
   python cli.py check-fix --cve CVE-2024-26633 --target 5.10-hulk
   python cli.py validate --cve CVE-xxx --target 5.10-hulk --known-fix <commit>
   python cli.py benchmark --file benchmarks.yaml --target 5.10-hulk
+  python cli.py batch-validate --file cve_data.json --target 5.10-hulk [--limit N]
   python cli.py build-cache --target 5.10-hulk
   python cli.py search --commit abc123 --target 5.10-hulk
 """
@@ -34,6 +35,7 @@ from core.ui import (
     console, StageTracker, make_header, render_report,
     render_recommendations, render_multi_strategy, make_cache_progress,
     render_validate_report, render_benchmark_report,
+    render_batch_validate_report,
 )
 from pipeline import Pipeline, STAGES
 
@@ -1244,6 +1246,116 @@ def cmd_benchmark(args, config):
     console.print(f"[dim]基准测试报告已保存: {fp}[/]")
 
 
+# ─── batch-validate ──────────────────────────────────────────────────
+
+def cmd_batch_validate(args, config):
+    """批量验证 — 从 JSON 文件加载 CVE 数据并逐一验证补丁生成准确度"""
+    with open(args.file, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    tv = args.target_version
+    git_mgr = _make_git_mgr(config, tv)
+
+    entries = []
+    for cve_id, info in data.items():
+        if not isinstance(info, dict):
+            continue
+        hulk_fixes = info.get("hulk_fix_patchs", [])
+        if not hulk_fixes:
+            continue
+        for fix in hulk_fixes:
+            commit = fix.get("commit", "")
+            if not commit:
+                continue
+            entries.append({
+                "cve_id": info.get("cve_id", cve_id),
+                "known_fix": commit,
+                "subject": fix.get("subject", ""),
+            })
+
+    if not entries:
+        console.print("[red]JSON 文件中未找到有效的 CVE 验证条目[/]")
+        console.print(
+            "[dim]要求: 每个条目需有 hulk_fix_patchs[].commit 字段[/]")
+        return
+
+    if args.limit and args.limit > 0:
+        entries = entries[:args.limit]
+
+    cve_count = len(set(e["cve_id"] for e in entries))
+    console.print(Panel(
+        f"[bold]验证集:[/] {cve_count} 个 CVE / {len(entries)} 个补丁\n"
+        f"[bold]目标分支:[/] {tv}\n"
+        f"[bold]数据文件:[/] {args.file}"
+        + (f"\n[bold]限制:[/] 前 {args.limit} 条" if args.limit else ""),
+        title="[bold magenta]批量验证 — 补丁生成准确度[/]",
+        border_style="magenta", padding=(0, 2),
+    ))
+
+    results = []
+    for i, entry in enumerate(entries, 1):
+        cve_id = entry["cve_id"]
+        known_fix = entry["known_fix"]
+
+        console.print(f"\n{'━' * 60}")
+        console.print(
+            f"[bold magenta][{i}/{len(entries)}][/]  {cve_id}  "
+            f"[dim]fix={known_fix[:12]}[/]"
+            + (f"  [dim italic]{entry['subject'][:50]}[/]"
+               if entry.get("subject") else ""))
+
+        try:
+            r = _run_single_validate(
+                config, cve_id, tv, known_fix, [],
+                git_mgr=git_mgr, show_stages=True)
+            results.append(r)
+
+            gvr = r.get("generated_vs_real", {})
+            verdict = gvr.get("verdict", "no_data")
+            core_sim = gvr.get("core_similarity", 0)
+            method = r.get("dryrun_detail", {}).get("apply_method", "-")
+
+            verdict_icons = {
+                "identical": "[green]✔ 完全一致[/]",
+                "essentially_same": "[green]✔ 本质相同[/]",
+                "partially_same": "[yellow]△ 部分一致[/]",
+                "different": "[red]✘ 差异较大[/]",
+                "no_data": "[dim]- 无数据[/]",
+            }
+            icon = verdict_icons.get(verdict, f"[dim]{verdict}[/]")
+            console.print(
+                f"  {icon}  核心相似度={core_sim:.0%}  方法={method}")
+
+        except Exception as e:
+            logger.exception("batch-validate 异常: %s %s", cve_id, e)
+            console.print(f"  [red]✘ 异常: {e}[/]")
+            results.append({
+                "cve_id": cve_id, "known_fix": known_fix, "target": tv,
+                "worktree_commit": "", "checks": {},
+                "overall_pass": False, "summary": f"执行异常: {e}",
+                "dryrun_detail": {},
+                "generated_vs_real": {
+                    "verdict": "error", "core_similarity": 0,
+                    "file_coverage": 0},
+            })
+
+    console.print(f"\n{'━' * 60}\n")
+    render_batch_validate_report(results, tv)
+
+    out_dir = config.output.output_dir
+    os.makedirs(out_dir, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    fp = os.path.join(out_dir, f"batch_validate_{tv}_{ts}.json")
+    with open(fp, "w", encoding="utf-8") as f:
+        json.dump({
+            "target": tv,
+            "total_cves": cve_count,
+            "total_patches": len(entries),
+            "results": results,
+        }, f, indent=2, ensure_ascii=False, default=str)
+    console.print(f"[dim]批量验证报告已保存: {fp}[/]")
+
+
 # ─── build-cache ─────────────────────────────────────────────────────
 
 def cmd_build_cache(args, config):
@@ -1390,6 +1502,14 @@ def main():
     bmp.add_argument("--file", required=True, help="基准测试YAML文件 (benchmarks.yaml)")
     bmp.add_argument("--target", dest="target_version", required=True)
 
+    bvp = sub.add_parser("batch-validate",
+                         help="批量验证补丁生成准确度 (JSON)", parents=[parent])
+    bvp.add_argument("--file", required=True,
+                     help="CVE 数据 JSON 文件 (含 hulk_fix_patchs)")
+    bvp.add_argument("--target", dest="target_version", required=True)
+    bvp.add_argument("--limit", type=int, default=0,
+                     help="限制验证条目数 (0=全部)")
+
     cp = sub.add_parser("build-cache", help="构建commit缓存", parents=[parent])
     cp.add_argument("--target", dest="target_version", required=True)
     cp.add_argument("--full", action="store_true", help="强制全量重建缓存（默认增量）")
@@ -1412,6 +1532,7 @@ def main():
         "check-fix": cmd_check_fix,
         "validate": cmd_validate,
         "benchmark": cmd_benchmark,
+        "batch-validate": cmd_batch_validate,
         "build-cache": cmd_build_cache,
         "search": cmd_search,
     }

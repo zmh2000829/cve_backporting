@@ -1457,6 +1457,156 @@ def render_benchmark_report(results: list, target: str):
     console.print(p)
 
 
+def render_batch_validate_report(results: list, target: str):
+    """渲染批量验证汇总报告 — 聚焦补丁生成准确度"""
+    total = len(results)
+    if total == 0:
+        console.print("[yellow]无验证结果[/]")
+        return
+
+    verdict_counts = {}
+    core_sims = []
+    method_counts = {}
+    pass_count = 0
+
+    for r in results:
+        gvr = r.get("generated_vs_real", {})
+        v = gvr.get("verdict", "no_data")
+        verdict_counts[v] = verdict_counts.get(v, 0) + 1
+
+        cs = gvr.get("core_similarity", 0)
+        if v not in ("no_data", "error"):
+            core_sims.append(cs)
+
+        method = r.get("dryrun_detail", {}).get("apply_method", "N/A")
+        method_counts[method] = method_counts.get(method, 0) + 1
+
+        if r.get("overall_pass"):
+            pass_count += 1
+
+    accurate = (verdict_counts.get("identical", 0)
+                + verdict_counts.get("essentially_same", 0))
+    accuracy_rate = accurate / total if total else 0
+    avg_core = sum(core_sims) / len(core_sims) if core_sims else 0
+
+    cve_count = len(set(r.get("cve_id", "") for r in results))
+
+    summary = Table(box=box.SIMPLE, show_header=False, padding=(0, 1),
+                    expand=True)
+    summary.add_column("指标", width=26, style="bold")
+    summary.add_column("值", ratio=1)
+    summary.add_row("验证集规模",
+                    f"[cyan]{cve_count}[/] 个 CVE / "
+                    f"[cyan]{total}[/] 个补丁")
+    summary.add_row("目标分支", f"[cyan]{target}[/]")
+    summary.add_row("", "")
+    acc_color = "green" if accuracy_rate >= 0.7 else (
+        "yellow" if accuracy_rate >= 0.5 else "red")
+    summary.add_row(
+        "[bold]补丁生成准确率[/]",
+        f"[{acc_color} bold]{accurate}/{total}  "
+        f"({accuracy_rate:.1%})[/{acc_color} bold]"
+        f"  [dim](identical + essentially_same)[/]")
+    summary.add_row("平均核心相似度",
+                    f"[bold]{avg_core:.1%}[/]")
+    summary.add_row("工具验证通过率",
+                    f"[bold]{pass_count}/{total}  "
+                    f"({pass_count / total:.1%})[/]")
+    summary.add_row("", "")
+
+    verdict_info = [
+        ("identical",        "完全一致", "green"),
+        ("essentially_same", "本质相同", "green"),
+        ("partially_same",   "部分一致", "yellow"),
+        ("different",        "差异较大", "red"),
+        ("no_data",          "无数据",   "dim"),
+        ("error",            "执行异常", "red"),
+    ]
+    verdict_parts = []
+    for key, label, color in verdict_info:
+        cnt = verdict_counts.get(key, 0)
+        if cnt:
+            pct = cnt / total
+            verdict_parts.append(f"[{color}]{label}: {cnt} ({pct:.0%})[/{color}]")
+    summary.add_row("补丁判定分布", "  ".join(verdict_parts))
+
+    method_order = ["strict", "context-C1", "3way", "regenerated",
+                    "conflict-adapted", "ai-generated", "N/A"]
+    method_parts = []
+    for m in method_order:
+        cnt = method_counts.get(m, 0)
+        if cnt:
+            method_parts.append(f"{m}: {cnt} ({cnt / total:.0%})")
+    for m, cnt in sorted(method_counts.items()):
+        if m not in method_order and cnt:
+            method_parts.append(f"{m}: {cnt}")
+    summary.add_row("DryRun 方法分布", "  ".join(method_parts))
+
+    sim_buckets = {">=90%": 0, "75-89%": 0, "50-74%": 0, "<50%": 0}
+    for s in core_sims:
+        if s >= 0.9:
+            sim_buckets[">=90%"] += 1
+        elif s >= 0.75:
+            sim_buckets["75-89%"] += 1
+        elif s >= 0.5:
+            sim_buckets["50-74%"] += 1
+        else:
+            sim_buckets["<50%"] += 1
+    if core_sims:
+        bucket_parts = [f"{k}: {v}" for k, v in sim_buckets.items() if v]
+        summary.add_row("相似度分布", "  ".join(bucket_parts))
+
+    detail = Table(box=box.ROUNDED, show_header=True, padding=(0, 1),
+                   expand=True)
+    detail.add_column("#", width=3, justify="right", style="dim")
+    detail.add_column("CVE", width=18, style="cyan")
+    detail.add_column("DryRun方法", width=14)
+    detail.add_column("核心相似度", width=10, justify="right")
+    detail.add_column("判定", width=12, justify="center")
+    detail.add_column("文件覆盖", width=8, justify="right")
+    detail.add_column("验证", width=6, justify="center")
+
+    verdict_style = {
+        "identical":        "[green]✔ 完全一致[/]",
+        "essentially_same": "[green]✔ 本质相同[/]",
+        "partially_same":   "[yellow]△ 部分一致[/]",
+        "different":        "[red]✘ 差异较大[/]",
+        "no_data":          "[dim]- 无数据[/]",
+        "error":            "[red]✘ 异常[/]",
+    }
+
+    for i, r in enumerate(results, 1):
+        gvr = r.get("generated_vs_real", {})
+        v = gvr.get("verdict", "no_data")
+        cs = gvr.get("core_similarity", 0)
+        fc = gvr.get("file_coverage", 0)
+        method = r.get("dryrun_detail", {}).get("apply_method", "-")
+        overall = ("[green]✔[/]" if r.get("overall_pass")
+                   else "[red]✘[/]")
+
+        cs_color = ("green" if cs >= 0.75 else
+                    "yellow" if cs >= 0.5 else "red")
+        detail.add_row(
+            str(i),
+            r.get("cve_id", "?"),
+            method,
+            f"[{cs_color}]{cs:.1%}[/{cs_color}]" if v not in (
+                "no_data", "error") else "-",
+            verdict_style.get(v, v),
+            f"{fc:.0%}" if v not in ("no_data", "error") else "-",
+            overall,
+        )
+
+    from rich.console import Group
+    p = Panel(
+        Group(summary, Text(""), detail),
+        title="[bold]Batch Validate Report — 补丁生成准确度[/]",
+        border_style="magenta",
+        padding=(1, 2),
+    )
+    console.print(p)
+
+
 def make_cache_progress(known_total: bool = True) -> Progress:
     if known_total:
         return Progress(
