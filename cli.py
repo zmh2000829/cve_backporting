@@ -933,6 +933,8 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
         if prereq_m and prereq_m["f1"] < 0.5:
             issues.append(f"前置依赖 F1 偏低 ({prereq_m['f1']:.0%})")
 
+        # generated_vs_real 在后面计算完成后会回填到 issues，见 ★ 标记处
+
         # ── 收集丰富的诊断数据 ──────────────────────────────
         community_diff = ""
         fix_patch_detail = {}
@@ -1076,6 +1078,17 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
                 "未能生成适配补丁，当前使用社区原始补丁对比 "
                 "(行号可能与本地不一致，仅核心改动行有参考意义)"
             )
+
+        # ★ 将补丁本质比较结果纳入 overall 判定
+        gvr_verdict = generated_vs_real.get("verdict", "")
+        gvr_core = generated_vs_real.get("core_similarity", 0)
+        if gvr_verdict == "different":
+            issues.append(
+                f"补丁本质差异大 (verdict={gvr_verdict}, "
+                f"核心相似度 {gvr_core:.0%})")
+        elif gvr_verdict == "partially_same" and gvr_core < 0.5:
+            issues.append(
+                f"补丁仅部分一致 (核心相似度 {gvr_core:.0%})")
 
         return {
             "cve_id": cve_id, "known_fix": known_fix, "target": tv,
