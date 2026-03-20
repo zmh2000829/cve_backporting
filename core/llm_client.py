@@ -31,11 +31,11 @@ class LLMClient:
 
         self.enabled = config.enabled
         self._api_key = config.api_key or os.environ.get("LLM_API_KEY", "")
-        self._base_url = config.base_url.rstrip("/")
-        self._model = config.model
-        self._max_tokens = config.max_tokens
-        self._temperature = config.temperature
-        self._timeout = config.timeout
+        self._base_url = (config.base_url or "").rstrip("/")
+        self._model = config.model or ""
+        self._max_tokens = config.max_tokens or 2000
+        self._temperature = config.temperature if config.temperature is not None else 0.3
+        self._timeout = config.timeout or 60
 
         if self.enabled and not self._api_key:
             logger.warning("LLM 已启用但未配置 api_key，自动降级为确定性模式")
@@ -123,5 +123,6 @@ class LLMClient:
 
         choices = data.get("choices", [])
         if choices:
-            return choices[0].get("message", {}).get("content", "").strip()
+            content = choices[0].get("message", {}).get("content")
+            return (content or "").strip()
         return ""

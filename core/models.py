@@ -270,7 +270,8 @@ class MergeRecommendation:
     action: str = ""                  # "merge" / "merge_with_prereqs" /
                                       # "manual_review" / "skip"
     confidence: float = 0.0
-    summary: str = ""                 # 一句话总结
+    summary: str = ""                 # 综合建议
+    dependency_analysis: str = ""     # 关联补丁完整分析
     prerequisite_actions: List[str] = field(default_factory=list)
     review_checklist: List[str] = field(default_factory=list)
     risk_benefit: Optional[RiskBenefitScore] = None

@@ -22,6 +22,44 @@ from core.llm_client import LLMClient
 
 logger = logging.getLogger(__name__)
 
+_C_NOISE = {
+    "static", "inline", "void", "int", "long", "unsigned", "signed",
+    "char", "short", "bool", "const", "struct", "enum", "union",
+    "extern", "register", "volatile", "restrict", "__init", "__exit",
+    "__always_inline", "noinline", "asmlinkage", "notrace",
+    "ssize_t", "size_t", "u8", "u16", "u32", "u64", "s8", "s16",
+    "s32", "s64", "__u8", "__u16", "__u32", "__u64", "loff_t",
+    "noinline_for_stack", "syscall_define", "__net_init", "__net_exit",
+    "define_mutex", "define_spinlock", "define_rwlock", "define_semaphore",
+    "define_per_cpu", "define_ida", "define_idr", "list_head",
+    "declare_wait_queue_head", "export_symbol", "export_symbol_gpl",
+    "module_license", "module_author", "module_description",
+}
+
+
+def _extract_c_func_names(diff: str) -> list:
+    """从 diff hunk header 中提取真正的 C 函数名/标识符"""
+    funcs = set()
+    for m in re.finditer(
+            r'@@\s+-\d+(?:,\d+)?\s+\+\d+(?:,\d+)?\s+@@\s*(.+)', diff):
+        sig = m.group(1).strip()
+        if not sig:
+            continue
+        fm = re.search(r'\b([a-zA-Z_]\w{2,})\s*\(', sig)
+        if fm and fm.group(1).lower() not in _C_NOISE:
+            funcs.add(fm.group(1))
+            continue
+        vm = re.search(r'\b([a-zA-Z_]\w{2,})\s*[=\[]', sig)
+        if vm and vm.group(1).lower() not in _C_NOISE:
+            funcs.add(vm.group(1))
+            continue
+        tokens = re.findall(r'\b([a-zA-Z_]\w+)\b', sig)
+        for tok in reversed(tokens):
+            if tok.lower() not in _C_NOISE and len(tok) > 2:
+                funcs.add(tok)
+                break
+    return sorted(funcs)
+
 # 漏洞类型关键词 → 类型映射
 _VULN_PATTERNS: List[Dict] = [
     {"keywords": ["use-after-free", "use after free", "UAF", "freed memory",
@@ -184,13 +222,7 @@ class VulnAnalysisAgent:
                                     patch: Optional[PatchInfo]) -> List[str]:
         if not patch or not patch.diff_code:
             return []
-        funcs = set()
-        for m in re.finditer(r'^@@.*@@\s+(\w+)', patch.diff_code,
-                             re.MULTILINE):
-            name = m.group(1)
-            if name and len(name) > 2:
-                funcs.add(name)
-        return sorted(funcs)
+        return _extract_c_func_names(patch.diff_code)
 
     def _deterministic_root_cause(self, cve_info: CveInfo,
                                   patch: Optional[PatchInfo],

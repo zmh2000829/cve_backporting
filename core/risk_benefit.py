@@ -198,7 +198,7 @@ class RiskBenefitAnalyzer:
         val = min(c, 1.0)
         lv = _level(val)
         detail = (
-            f"合入复杂度: {lv} ({val:.2f}/1.00)。"
+            f"合入复杂度: {lv}。"
             + "".join(f"{s}。" for s in parts)
         )
         return val, detail
@@ -269,7 +269,7 @@ class RiskBenefitAnalyzer:
         val = min(r, 1.0)
         lv = _level(val)
         detail = (
-            f"回归风险: {lv} ({val:.2f}/1.00)。"
+            f"回归风险: {lv}。"
             + "".join(f"{s}。" for s in parts)
         )
         return val, detail
@@ -313,8 +313,8 @@ class RiskBenefitAnalyzer:
         val = min(s, 1.0)
         lv = _level(val)
         detail = (
-            f"变更范围: {lv} ({val:.2f}/1.00)。"
-            + "".join(f"{s}。" for s in parts)
+            f"变更范围: {lv}。"
+            + "".join(f"{p}。" for p in parts)
         )
         return val, detail
 
@@ -376,8 +376,8 @@ class RiskBenefitAnalyzer:
                 lv = label
                 break
         detail = (
-            f"安全收益: {lv} ({val:.2f}/1.00)。"
-            + "".join(f"{s}。" for s in parts)
+            f"安全收益: {lv}。"
+            + "".join(f"{p}。" for p in parts)
         )
         return val, detail
 
@@ -403,8 +403,7 @@ class RiskBenefitAnalyzer:
             "极低": "不建议合入或优先级极低",
         }
         parts: List[str] = [
-            f"综合评估: {action_hint.get(lv, '待评估')} "
-            f"(评分 {score.overall_score:.2f}/1.00)"
+            f"综合评估: {action_hint.get(lv, '待评估')}"
         ]
 
         if vuln:

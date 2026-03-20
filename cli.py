@@ -203,6 +203,140 @@ def _analyze_deep(pipe, cve_id: str, target: str, out_dir: str):
     console.print(f"[dim]深度分析报告已保存: {fp}[/]")
 
 
+def _render_dep_analysis(console, v2):
+    """渲染关联补丁分析面板 — 无论有无关联补丁都输出完整分析"""
+    from rich.panel import Panel
+    from rich.text import Text
+
+    base = v2.base
+    if not base:
+        return
+
+    dep_text = Text()
+    prereqs = base.prerequisite_patches or []
+    post = v2.post_patches or []
+    review = v2.patch_review
+    dr = base.dry_run
+    fix = base.fix_patch
+
+    strong = [p for p in prereqs if p.grade == "strong"]
+    medium = [p for p in prereqs if p.grade == "medium"]
+    weak = [p for p in prereqs if p.grade == "weak"]
+
+    # ── 前置补丁 ──────────────────────
+    dep_text.append("前置补丁分析\n", style="bold underline")
+
+    if not prereqs:
+        dep_text.append("  未检测到前置依赖补丁\n", style="green")
+        reasons = []
+        if dr and dr.applies_cleanly:
+            reasons.append(
+                "补丁可在目标版本干净应用，代码上下文与上游一致，"
+                "无因缺失前置补丁导致的文本冲突")
+        if fix and fix.modified_files and len(fix.modified_files) <= 2:
+            reasons.append(
+                f"仅修改 {len(fix.modified_files)} 个文件，"
+                f"改动范围集中")
+        has_ds = (review and review.data_structures
+                  and len(review.data_structures) > 0)
+        if not has_ds:
+            reasons.append(
+                "未引入或依赖新的数据结构定义")
+        elif has_ds:
+            ds_names = [d.get("name", d["type"])
+                        for d in review.data_structures[:3]]
+            reasons.append(
+                f"涉及的数据结构 ({', '.join(ds_names)}) "
+                f"在目标版本中已存在")
+        for r in reasons:
+            dep_text.append(f"  • {r}\n", style="dim")
+        dep_text.append(
+            "  结论: 该补丁可独立合入，不依赖其他前置改动\n\n",
+            style="green")
+    else:
+        dep_text.append(
+            f"  检测到 {len(prereqs)} 个关联补丁 "
+            f"(强依赖 {len(strong)} / 中依赖 {len(medium)} "
+            f"/ 弱关联 {len(weak)})\n",
+            style="yellow")
+        if strong:
+            dep_text.append(
+                "  强依赖 — 缺失将导致编译失败或语义错误:\n",
+                style="red bold")
+            for p in strong[:5]:
+                dep_text.append(f"    {p.commit_id[:12]}", style="red")
+                dep_text.append(f" {p.subject}\n")
+                extra = []
+                if p.overlap_funcs:
+                    extra.append(
+                        f"共享函数: {', '.join(p.overlap_funcs[:3])}")
+                if p.overlap_hunks:
+                    extra.append(f"{p.overlap_hunks} 个重叠代码块")
+                if p.adjacent_hunks:
+                    extra.append(f"{p.adjacent_hunks} 个相邻代码块")
+                if extra:
+                    dep_text.append(
+                        f"      {'; '.join(extra)}\n", style="dim")
+        if medium:
+            dep_text.append(
+                "  中依赖 — 建议评估是否需要先合入:\n",
+                style="yellow bold")
+            for p in medium[:3]:
+                dep_text.append(f"    {p.commit_id[:12]}", style="yellow")
+                dep_text.append(f" {p.subject}\n")
+                if p.overlap_funcs:
+                    dep_text.append(
+                        f"      重叠函数: "
+                        f"{', '.join(p.overlap_funcs[:3])}\n",
+                        style="dim")
+
+        if dr and dr.applies_cleanly:
+            dep_text.append(
+                "  注: 补丁本身可干净应用，前置补丁提供的是"
+                "编译/运行时依赖 (数据结构、API)，非文本冲突\n",
+                style="dim italic")
+        dep_text.append("\n")
+
+    # ── 后置补丁 ──────────────────────
+    dep_text.append("后置补丁分析\n", style="bold underline")
+
+    if not post:
+        dep_text.append("  未检测到后续关联补丁\n", style="green")
+        dep_text.append(
+            "  结论: 该修复在上游社区是自包含的，"
+            "无需额外的追加修正\n", style="green")
+    else:
+        followups = [p for p in post if p.relation == "followup_fix"]
+        same_func = [p for p in post if p.relation == "same_function"]
+        dep_text.append(
+            f"  检测到 {len(post)} 个后置关联补丁\n", style="yellow")
+        if followups:
+            dep_text.append(
+                f"  后续修复 (Fixes: 标签引用本补丁，共 "
+                f"{len(followups)} 个):\n", style="yellow bold")
+            for p in followups[:5]:
+                dep_text.append(f"    {p.commit_id[:12]}", style="yellow")
+                dep_text.append(f" {p.subject}\n")
+            dep_text.append(
+                "    → 建议一并合入这些后续修复\n", style="dim")
+        if same_func:
+            dep_text.append(
+                f"  同函数修改 (共 {len(same_func)} 个):\n",
+                style="cyan bold")
+            for p in same_func[:5]:
+                dep_text.append(f"    {p.commit_id[:12]}", style="cyan")
+                dep_text.append(f" {p.subject}\n")
+                if p.description:
+                    dep_text.append(
+                        f"      {p.description}\n", style="dim")
+            dep_text.append(
+                "    → 建议评估是否影响修复补丁正确性\n", style="dim")
+
+    console.print(Panel(dep_text, title="关联补丁分析",
+                        border_style="cyan"))
+    console.print()
+
+
 def _render_deep_report(v2):
     """TUI 渲染 v2 深度分析结果 — 详细文本面板"""
     from rich.table import Table
@@ -315,16 +449,8 @@ def _render_deep_report(v2):
         console.print(tbl)
         console.print()
 
-    # ── 后置关联补丁 ──────────────────────────────────────────────
-    if v2.post_patches:
-        tbl = Table(title="后置关联补丁", box=box.SIMPLE, padding=(0, 1))
-        tbl.add_column("Commit", width=14)
-        tbl.add_column("关系", width=16)
-        tbl.add_column("Subject")
-        for pp in v2.post_patches[:10]:
-            tbl.add_row(pp.commit_id[:12], pp.relation, pp.subject[:60])
-        console.print(tbl)
-        console.print()
+    # ── 关联补丁分析 (前置 + 后置) ──────────────────────────────────
+    _render_dep_analysis(console, v2)
 
     # ── 风险收益评估 (详细文本) ────────────────────────────────────
     rec = v2.merge_recommendation
