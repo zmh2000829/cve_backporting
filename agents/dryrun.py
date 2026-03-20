@@ -225,39 +225,38 @@ class DryRunAgent:
         diff_text = self._extract_pure_diff(patch.diff_code)
         mapped_diff = self._rewrite_diff_paths(diff_text)
 
-        r0 = self._apply_check(mapped_diff, rp_path, [])
-        if r0.applies_cleanly:
-            r0.apply_method = "strict"
-            r0.stat_output = self._get_stat(mapped_diff, target_version)
-            logger.info("[DryRun] strict 成功: %s", patch.commit_id[:12])
-            self._ensure_adapted_patch(r0, mapped_diff, rp_path)
-            return r0
-
-        r1 = self._apply_check(mapped_diff, rp_path, ["-C1"])
-        if r1.applies_cleanly:
-            r1.apply_method = "context-C1"
-            r1.stat_output = self._get_stat(mapped_diff, target_version)
-            r1.error_output = (
-                f"(严格模式失败, -C1 成功: {len(r0.conflicting_files)} 个文件"
-                " context 偏移)")
-            logger.info("[DryRun] -C1 成功: %s", patch.commit_id[:12])
-            self._ensure_adapted_patch(r1, mapped_diff, rp_path)
-            return r1
-
-        r2 = self._apply_check(mapped_diff, rp_path, ["--3way"])
-        if r2.applies_cleanly:
-            r2.apply_method = "3way"
-            r2.stat_output = self._get_stat(mapped_diff, target_version)
-            r2.error_output = "(3-way merge成功)"
-            logger.info("[DryRun] 3-way merge成功: %s", patch.commit_id[:12])
-            self._ensure_adapted_patch(r2, mapped_diff, rp_path)
-            return r2
+        _quick_levels = [
+            ([], "strict"),
+            (["--ignore-whitespace"], "ignore-ws"),
+            (["-C1"], "context-C1"),
+            (["-C1", "--ignore-whitespace"], "C1-ignore-ws"),
+            (["--3way"], "3way"),
+        ]
+        first_err = None
+        for opts, label in _quick_levels:
+            r = self._apply_check(mapped_diff, rp_path, opts)
+            if first_err is None and not r.applies_cleanly:
+                first_err = r
+            if r.applies_cleanly:
+                r.apply_method = label
+                r.stat_output = self._get_stat(
+                    mapped_diff, target_version)
+                if label != "strict":
+                    r.error_output = f"(通过 {label} 成功适配)"
+                logger.info("[DryRun] %s 成功: %s",
+                            label, patch.commit_id[:12])
+                self._ensure_adapted_patch(r, mapped_diff, rp_path)
+                return r
+        r0 = first_err or DryRunResult()
 
         adapted = self._regenerate_patch(mapped_diff, rp_path)
         if adapted:
-            for l3_opts, l3_label in [([], "strict"),
-                                      (["-C1"], "-C1"),
-                                      (["--3way"], "3way")]:
+            for l3_opts, l3_label in [
+                    ([], "strict"),
+                    (["--ignore-whitespace"], "ignore-ws"),
+                    (["-C1"], "-C1"),
+                    (["-C1", "--ignore-whitespace"], "C1-ign-ws"),
+                    (["--3way"], "3way")]:
                 r3 = self._apply_check(adapted, rp_path, l3_opts)
                 if r3.applies_cleanly:
                     r3.apply_method = "regenerated"
@@ -279,9 +278,12 @@ class DryRunAgent:
             r0.search_reports = analysis["search_reports"]
 
         if analysis.get("adapted_diff"):
-            for l4_opts, l4_label in [([], "strict"),
-                                      (["-C1"], "-C1"),
-                                      (["--3way"], "3way")]:
+            for l4_opts, l4_label in [
+                    ([], "strict"),
+                    (["--ignore-whitespace"], "ignore-ws"),
+                    (["-C1"], "-C1"),
+                    (["-C1", "--ignore-whitespace"], "C1-ign-ws"),
+                    (["--3way"], "3way")]:
                 r4 = self._apply_check(
                     analysis["adapted_diff"], rp_path, l4_opts)
                 if r4.applies_cleanly:
@@ -947,6 +949,96 @@ class DryRunAgent:
                 return name
         return None
 
+    # ─── 符号映射与缩进适配 ──────────────────────────────────────
+
+    @staticmethod
+    def _extract_symbol_mapping(expected_lines: List[str],
+                                actual_lines: List[str]) -> dict:
+        """
+        逐 token 对比 expected（社区补丁 - 行）与 actual（目标文件实际行），
+        提取一致的标识符重命名映射。
+        仅当映射完全一致（同一旧 token 始终映射到同一新 token）时返回。
+        """
+        mapping = {}
+        for exp, act in zip(expected_lines, actual_lines):
+            exp_tokens = re.findall(r'[A-Za-z_]\w{2,}', exp.strip())
+            act_tokens = re.findall(r'[A-Za-z_]\w{2,}', act.strip())
+            if len(exp_tokens) != len(act_tokens):
+                continue
+            for et, at in zip(exp_tokens, act_tokens):
+                if et == at:
+                    continue
+                if et in mapping:
+                    if mapping[et] != at:
+                        return {}
+                else:
+                    mapping[et] = at
+        return mapping
+
+    @staticmethod
+    def _apply_symbol_mapping(lines: List[str],
+                              mapping: dict) -> List[str]:
+        if not mapping:
+            return lines
+        result = []
+        for line in lines:
+            for old, new in sorted(mapping.items(),
+                                   key=lambda x: -len(x[0])):
+                line = re.sub(r'\b' + re.escape(old) + r'\b', new, line)
+            result.append(line)
+        return result
+
+    @staticmethod
+    def _adapt_indentation(added_lines: List[str],
+                           expected_removed: List[str],
+                           actual_removed: List[str]) -> List[str]:
+        """
+        将 + 行的缩进风格从社区补丁适配到目标文件:
+        检测 expected removed 与 actual removed 之间的缩进映射（如 space→tab），
+        对 added lines 应用相同的转换。
+        """
+        if (not added_lines or not expected_removed
+                or not actual_removed):
+            return added_lines
+
+        space_to_tab = False
+        tab_to_space = False
+        tab_width = 8
+
+        for exp, act in zip(expected_removed, actual_removed):
+            ews = exp[:len(exp) - len(exp.lstrip())]
+            aws = act[:len(act) - len(act.lstrip())]
+            if not ews and not aws:
+                continue
+            if '\t' not in ews and '\t' in aws:
+                space_to_tab = True
+                nsp = len(ews)
+                ntab = aws.count('\t')
+                if ntab > 0 and nsp > 0:
+                    tab_width = max(1, round(nsp / ntab))
+            elif '\t' in ews and '\t' not in aws:
+                tab_to_space = True
+                ntab = ews.count('\t')
+                nsp = len(aws)
+                if ntab > 0 and nsp > 0:
+                    tab_width = max(1, round(nsp / ntab))
+
+        if not space_to_tab and not tab_to_space:
+            return added_lines
+
+        result = []
+        for line in added_lines:
+            ws_end = len(line) - len(line.lstrip())
+            ws = line[:ws_end]
+            body = line[ws_end:]
+            if space_to_tab and '\t' not in ws and ' ' in ws:
+                n = len(ws)
+                ws = '\t' * (n // tab_width) + ' ' * (n % tab_width)
+            elif tab_to_space and '\t' in ws:
+                ws = ws.replace('\t', ' ' * tab_width)
+            result.append(ws + body)
+        return result
+
     # ─── 上下文重生成 (L3) ────────────────────────────────────────
 
     def _regenerate_patch(self, diff_text: str,
@@ -1024,9 +1116,22 @@ class DryRunAgent:
                         new_parts.append("\n".join(hunk_lines))
                         continue
 
-                    _, _, added_lines, _ = _split_hunk_segments(
-                        hunk_lines)
+                    _, expected_rm, added_lines, _ = \
+                        _split_hunk_segments(hunk_lines)
                     adapted_hunks += 1
+
+                    actual_rm = target_lines[
+                        change_pos:change_pos + n_remove]
+
+                    sym_map = self._extract_symbol_mapping(
+                        expected_rm, actual_rm)
+                    if sym_map:
+                        added_lines = self._apply_symbol_mapping(
+                            added_lines, sym_map)
+                        logger.debug("[L3] 符号映射: %s", sym_map)
+
+                    added_lines = self._adapt_indentation(
+                        added_lines, expected_rm, actual_rm)
 
                     ctx_n = 3
                     start = max(0, change_pos - ctx_n)
@@ -1220,6 +1325,15 @@ class DryRunAgent:
                     })
 
                     if sev != "L3":
+                        sym_map = self._extract_symbol_mapping(
+                            expected, actual)
+                        adapted_added = added
+                        if sym_map:
+                            adapted_added = self._apply_symbol_mapping(
+                                added, sym_map)
+                        adapted_added = self._adapt_indentation(
+                            adapted_added, expected, actual)
+
                         ctx_n = 3
                         start = max(0, change_pos - ctx_n)
                         rebuilt = []
@@ -1229,7 +1343,7 @@ class DryRunAgent:
                                        min(len(file_lines),
                                            change_pos + n_remove)):
                             rebuilt.append("-" + file_lines[i])
-                        for a in added:
+                        for a in adapted_added:
                             rebuilt.append("+" + a)
                         end = min(len(file_lines),
                                   change_pos + n_remove + ctx_n)

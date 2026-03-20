@@ -623,8 +623,12 @@ def _diagnose_root_cause(diff_cmp: dict, dryrun_detail: dict,
             "核心修复逻辑相同")
         if applies and method and method != "strict":
             method_desc = {
+                "ignore-ws": "原始补丁存在空白格式差异 (tab/space), "
+                             "通过 --ignore-whitespace 成功适配",
                 "context-C1": "原始补丁的 context lines 有偏移 (中间 commit 修改了"
                               "相邻行), 已通过放宽 context 匹配 (-C1) 成功适配",
+                "C1-ignore-ws": "原始补丁 context 偏移且存在空白差异, "
+                                "通过 -C1 + --ignore-whitespace 成功适配",
                 "3way": "原始补丁 context 偏移, 已通过 3-way merge 成功适配",
                 "regenerated": "原始补丁 context 严重偏移, 已从目标文件重新生成 "
                                "context lines, 核心 +/- 改动行完全不变",
@@ -1110,7 +1114,8 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
         # 此时 L3 重建反而可能因多次匹配而定位到错误位置，
         # 所以 L0-L2 成功时优先用社区原始补丁做比较。
         apply_method = dryrun_detail.get("apply_method", "")
-        l0_l2_methods = {"strict", "context-C1", "3way"}
+        l0_l2_methods = {"strict", "ignore-ws", "context-C1",
+                         "C1-ignore-ws", "3way"}
         use_community = (apply_method in l0_l2_methods
                          and community_diff and local_diff)
 
