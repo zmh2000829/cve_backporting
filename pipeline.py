@@ -45,8 +45,14 @@ class Pipeline:
 
     def analyze(self, cve_id: str, target_version: str,
                 enable_dryrun: bool = True,
+                force_dryrun: bool = False,
                 on_stage: StageCB = None,
                 cve_info=None) -> AnalysisResult:
+        """
+        force_dryrun: 即使检测到 fix 已合入也强制执行 DryRun。
+        用于 validate 场景 — worktree 在 known_fix~1 但共享 git 对象库
+        导致 subject_match 可能误判 fix 已存在。
+        """
         result = AnalysisResult(cve_id=cve_id, target_version=target_version)
 
         def _cb(key, status, detail=""):
@@ -125,60 +131,76 @@ class Pipeline:
             result.recommendations.append(
                 f"修复补丁已合入 ({result.fix_search.target_commit[:12]}), "
                 f"置信度 {result.fix_search.confidence:.0%}")
-            _cb("analysis_bp", "skip", "已修复")
-            _cb("dependency", "skip", "已修复")
-            _cb("dryrun", "skip", "已修复")
-            return result
-
-        _cb("analysis_fix", "warn", "未合入")
-
-        # 尝试stable backport
-        _cb("analysis_bp", "running")
-        bp = self._try_stable_backport(cve_info, target_version)
-        if bp:
-            result.is_fixed = True
-            result.fix_search = bp
-            _cb("analysis_bp", "success", f"backport已合入 {bp.target_commit[:12]}")
-            result.recommendations.append(f"stable backport已合入 ({bp.target_commit[:12]})")
-            _cb("dependency", "skip", "已修复")
-            _cb("dryrun", "skip", "已修复")
-            return result
-        _cb("analysis_bp", "warn", "无可用backport")
-
-        # ── Step 5: Dependency ───────────────────────────────────────
-        _cb("dependency", "running")
-        dep = self.dependency.analyze(
-            fix_patch, cve_info, target_version,
-            fix_search=result.fix_search,
-            intro_search=result.introduced_search,
-        )
-        result.prerequisite_patches = dep["prerequisite_patches"]
-        result.conflict_files = dep["conflict_files"]
-        result.recommendations.extend(dep["recommendations"])
-        n_pre = len(result.prerequisite_patches)
-        if n_pre > 0:
-            n_s = sum(1 for p in result.prerequisite_patches if p.grade == "strong")
-            n_m = sum(1 for p in result.prerequisite_patches if p.grade == "medium")
-            parts = []
-            if n_s:
-                parts.append(f"{n_s}强")
-            if n_m:
-                parts.append(f"{n_m}中")
-            parts.append(f"共{n_pre}个")
-            _cb("dependency", "success", " / ".join(parts))
+            if not force_dryrun:
+                _cb("analysis_bp", "skip", "已修复")
+                _cb("dependency", "skip", "已修复")
+                _cb("dryrun", "skip", "已修复")
+                return result
+            logger.info("[Pipeline] fix 已检测到, 但 force_dryrun=True, "
+                        "继续执行 DryRun")
+            _cb("analysis_bp", "skip", "force-dryrun")
+            _cb("dependency", "skip", "force-dryrun")
         else:
-            _cb("dependency", "warn", "无前置依赖")
+            _cb("analysis_fix", "warn", "未合入")
+
+            # 尝试stable backport
+            _cb("analysis_bp", "running")
+            bp = self._try_stable_backport(cve_info, target_version)
+            if bp:
+                result.is_fixed = True
+                result.fix_search = bp
+                _cb("analysis_bp", "success",
+                    f"backport已合入 {bp.target_commit[:12]}")
+                result.recommendations.append(
+                    f"stable backport已合入 ({bp.target_commit[:12]})")
+                if not force_dryrun:
+                    _cb("dependency", "skip", "已修复")
+                    _cb("dryrun", "skip", "已修复")
+                    return result
+                logger.info("[Pipeline] backport 已检测到, "
+                            "但 force_dryrun=True, 继续执行 DryRun")
+                _cb("dependency", "skip", "force-dryrun")
+            else:
+                _cb("analysis_bp", "warn", "无可用backport")
+
+                # ── Step 5: Dependency ───────────────────────────────
+                _cb("dependency", "running")
+                dep = self.dependency.analyze(
+                    fix_patch, cve_info, target_version,
+                    fix_search=result.fix_search,
+                    intro_search=result.introduced_search,
+                )
+                result.prerequisite_patches = dep["prerequisite_patches"]
+                result.conflict_files = dep["conflict_files"]
+                result.recommendations.extend(dep["recommendations"])
+                n_pre = len(result.prerequisite_patches)
+                if n_pre > 0:
+                    n_s = sum(1 for p in result.prerequisite_patches
+                              if p.grade == "strong")
+                    n_m = sum(1 for p in result.prerequisite_patches
+                              if p.grade == "medium")
+                    parts = []
+                    if n_s:
+                        parts.append(f"{n_s}强")
+                    if n_m:
+                        parts.append(f"{n_m}中")
+                    parts.append(f"共{n_pre}个")
+                    _cb("dependency", "success", " / ".join(parts))
+                else:
+                    _cb("dependency", "warn", "无前置依赖")
 
         # ── Step 6: DryRun (多级自适应) ──────────────────────────────
-        if enable_dryrun:
+        if enable_dryrun or force_dryrun:
             _cb("dryrun", "running")
-            # 优先使用 stable backport 补丁 (路径和 context 更匹配目标分支)
             dryrun_patch = fix_patch
-            bp_patch = self._find_stable_patch(cve_info, target_version)
-            if bp_patch and bp_patch.diff_code:
-                dryrun_patch = bp_patch
-                logger.info("[Pipeline] DryRun 使用 stable backport 补丁: %s",
-                            bp_patch.commit_id[:12])
+            if not result.is_fixed:
+                bp_patch = self._find_stable_patch(
+                    cve_info, target_version)
+                if bp_patch and bp_patch.diff_code:
+                    dryrun_patch = bp_patch
+                    logger.info(
+                        "[Pipeline] DryRun 使用 stable backport: %s",
+                        bp_patch.commit_id[:12])
             result.dry_run = self.dryrun.check_adaptive(
                 dryrun_patch, target_version)
             dr = result.dry_run
@@ -189,8 +211,10 @@ class Pipeline:
                     "3way": "3-way merge成功",
                     "regenerated": "上下文重生成成功",
                     "conflict-adapted": "冲突已适配 (需人工审查)",
+                    "verified-direct": "直接验证成功 (绕过git apply)",
                 }
-                label = method_labels.get(dr.apply_method, dr.apply_method)
+                label = method_labels.get(
+                    dr.apply_method, dr.apply_method)
                 if dr.apply_method == "strict":
                     _cb("dryrun", "success", label)
                 else:
@@ -198,7 +222,8 @@ class Pipeline:
                 result.recommendations.append(f"Dry-run: {label}")
                 if dr.adapted_patch:
                     result.recommendations.append(
-                        "已生成适配后的补丁 (原始改动不变, 仅更新 context lines)")
+                        "已生成适配后的补丁 "
+                        "(原始改动不变, 仅更新 context lines)")
             else:
                 nc = len(dr.conflicting_files)
                 nh = len(dr.conflict_hunks)
@@ -209,21 +234,27 @@ class Pipeline:
                         s = h.get("severity", "L3")
                         sev_counts[s] = sev_counts.get(s, 0) + 1
                     sev_str = " / ".join(
-                        f"{v}×{k}" for k, v in sorted(sev_counts.items()))
+                        f"{v}×{k}" for k, v in sorted(
+                            sev_counts.items()))
                     _cb("dryrun", "fail",
-                        f"{nc} 文件冲突, {nh} hunk 已分析 ({sev_str})")
+                        f"{nc} 文件冲突, {nh} hunk 已分析 "
+                        f"({sev_str})")
                     result.recommendations.append(
                         f"Dry-run: {nc} 个文件冲突, "
                         f"冲突分析: {sev_str}")
                 else:
-                    _cb("dryrun", "fail", f"{nc} 个文件冲突: {cf}")
+                    _cb("dryrun", "fail",
+                        f"{nc} 个文件冲突: {cf}")
                     result.recommendations.append(
-                        f"Dry-run: 补丁无法直接应用, {nc} 个文件冲突")
+                        f"Dry-run: 补丁无法直接应用, "
+                        f"{nc} 个文件冲突")
         else:
             _cb("dryrun", "skip", "已跳过")
 
-        not_merged = f"修复补丁 {cve_info.fix_commit_id[:12]} 未合入"
-        result.recommendations.insert(0, not_merged)
+        if not result.is_fixed:
+            not_merged = (
+                f"修复补丁 {cve_info.fix_commit_id[:12]} 未合入")
+            result.recommendations.insert(0, not_merged)
 
         return result
 

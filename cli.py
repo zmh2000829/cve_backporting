@@ -943,10 +943,12 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
                     on_stage(key, st, detail)
                     live.update(_layout())
                 result = pipe.analyze(cve_id, tv, enable_dryrun=True,
+                                      force_dryrun=True,
                                       on_stage=_update,
                                       cve_info=cve_info)
         else:
             result = pipe.analyze(cve_id, tv, enable_dryrun=True,
+                                  force_dryrun=True,
                                   cve_info=cve_info)
 
         if result.cve_info is None or not result.cve_info.fix_commit_id:
