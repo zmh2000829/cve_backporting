@@ -182,3 +182,132 @@ class AnalysisResult:
     conflict_files: List[str] = field(default_factory=list)
     dry_run: Optional[DryRunResult] = None
     recommendations: List[str] = field(default_factory=list)
+
+
+# ── v2.0 深度分析模型 ─────────────────────────────────────────────
+
+
+@dataclass
+class CommunityDiscussion:
+    """社区讨论记录 (lore.kernel.org / bugzilla / CVE 引用)"""
+    source: str = ""              # "lore" / "bugzilla" / "cve_ref"
+    url: str = ""
+    title: str = ""
+    date: str = ""
+    author: str = ""
+    snippet: str = ""             # 关键内容摘要 (确定性截取或 LLM 摘要)
+    relevance: str = ""           # "direct_fix" / "discussion" / "related"
+
+
+@dataclass
+class VulnAnalysis:
+    """漏洞深度分析"""
+    vuln_type: str = ""           # "UAF" / "OOB" / "NULL_deref" / "race" / ...
+    severity: str = ""            # "critical" / "high" / "medium" / "low"
+    cvss_score: float = 0.0
+    affected_subsystem: str = ""
+    affected_functions: List[str] = field(default_factory=list)
+    root_cause: str = ""          # 技术根因描述
+    trigger_path: str = ""        # 触发路径
+    exploit_conditions: str = ""  # 利用条件
+    impact_description: str = ""  # 影响描述
+    detection_method: str = ""    # 漏洞判断方法
+    llm_enhanced: bool = False    # 是否经过 LLM 增强
+
+
+@dataclass
+class CodeReviewItem:
+    """代码检视条目"""
+    category: str = ""        # "lock" / "refcount" / "null_check" / "overflow" /
+                              # "error_handling" / "race_condition"
+    location: str = ""        # "file:function:line"
+    description: str = ""
+    severity: str = "info"    # "critical" / "warning" / "info"
+
+
+@dataclass
+class PatchReview:
+    """修复补丁逻辑分析"""
+    fix_summary: str = ""                 # 修复补丁做了什么
+    trigger_analysis: str = ""            # 原始漏洞如何触发
+    prevention_mechanism: str = ""        # 修复方案如何预防
+    modified_functions: List[str] = field(default_factory=list)
+    call_topology: Dict = field(default_factory=dict)  # {func: [callers/callees]}
+    data_structures: List[Dict] = field(default_factory=list)  # 涉及的锁/结构体
+    code_review_items: List[CodeReviewItem] = field(default_factory=list)
+    security_patterns: List[str] = field(default_factory=list)  # 检测到的安全模式
+    llm_enhanced: bool = False
+
+
+@dataclass
+class PostPatch:
+    """后置关联补丁"""
+    commit_id: str = ""
+    subject: str = ""
+    relation: str = ""        # "followup_fix" / "same_function" / "same_subsystem"
+    description: str = ""
+
+
+@dataclass
+class RiskBenefitScore:
+    """风险收益量化评分 — 每个维度附带等级标签和详细文字解释"""
+    merge_complexity: float = 0.0
+    merge_complexity_detail: str = ""
+    regression_risk: float = 0.0
+    regression_risk_detail: str = ""
+    change_scope: float = 0.0
+    change_scope_detail: str = ""
+    security_benefit: float = 0.0
+    security_benefit_detail: str = ""
+    overall_score: float = 0.0
+    overall_detail: str = ""
+    factors: List[str] = field(default_factory=list)
+
+
+@dataclass
+class MergeRecommendation:
+    """合入建议"""
+    action: str = ""                  # "merge" / "merge_with_prereqs" /
+                                      # "manual_review" / "skip"
+    confidence: float = 0.0
+    summary: str = ""                 # 一句话总结
+    prerequisite_actions: List[str] = field(default_factory=list)
+    review_checklist: List[str] = field(default_factory=list)
+    risk_benefit: Optional[RiskBenefitScore] = None
+    llm_enhanced: bool = False
+
+
+@dataclass
+class AnalysisResultV2:
+    """v2.0 深度分析结果 (扩展 AnalysisResult)"""
+    base: Optional[AnalysisResult] = None   # v1 基础分析结果
+    community: List[CommunityDiscussion] = field(default_factory=list)
+    vuln_analysis: Optional[VulnAnalysis] = None
+    patch_review: Optional[PatchReview] = None
+    post_patches: List[PostPatch] = field(default_factory=list)
+    merge_recommendation: Optional[MergeRecommendation] = None
+
+    def to_dict(self) -> Dict:
+        """序列化为 JSON 友好的 dict"""
+        import dataclasses
+        d: Dict = {}
+        if self.base:
+            d["cve_id"] = self.base.cve_id
+            d["target_version"] = self.base.target_version
+        if self.community:
+            d["community_discussions"] = [
+                dataclasses.asdict(c) for c in self.community
+            ]
+        if self.vuln_analysis:
+            d["vuln_analysis"] = dataclasses.asdict(self.vuln_analysis)
+        if self.patch_review:
+            d["patch_review"] = dataclasses.asdict(self.patch_review)
+        if self.post_patches:
+            d["post_patches"] = [
+                dataclasses.asdict(p) for p in self.post_patches
+            ]
+        if self.merge_recommendation:
+            d["merge_recommendation"] = dataclasses.asdict(
+                self.merge_recommendation
+            )
+        return d

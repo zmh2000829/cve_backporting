@@ -2,18 +2,25 @@
 Pipeline 编排器
 串联四个Agent完成端到端CVE补丁回溯分析：
   Crawler -> Analysis -> Dependency -> DryRun
+v2.0 扩展: --deep 模式触发深度分析 (Community/Vuln/PatchReview/RiskBenefit/MergeAdvisor)
 """
 
 import logging
 from typing import Optional, Callable
 
-from core.models import AnalysisResult
+from core.models import AnalysisResult, AnalysisResultV2
 from core.git_manager import GitRepoManager
 from core.matcher import PathMapper
+from core.llm_client import LLMClient
 from agents.crawler import CrawlerAgent
 from agents.analysis import AnalysisAgent
 from agents.dependency import DependencyAgent
 from agents.dryrun import DryRunAgent
+from agents.community import CommunityAgent
+from agents.vuln_analysis import VulnAnalysisAgent
+from agents.patch_review import PatchReviewAgent
+from agents.merge_advisor import MergeAdvisorAgent
+from core.risk_benefit import RiskBenefitAnalyzer
 
 logger = logging.getLogger(__name__)
 
@@ -30,18 +37,33 @@ STAGES = [
     ("dryrun",        "DryRun   │ 补丁试应用"),
 ]
 
+STAGES_DEEP = STAGES + [
+    ("community",     "Community│ 社区讨论收集"),
+    ("vuln_analysis", "VulnAnaly│ 漏洞深度分析"),
+    ("patch_review",  "PatchRevw│ 补丁逻辑检视"),
+    ("risk_benefit",  "RiskBnft │ 风险收益评估"),
+    ("merge_advice",  "Advisor  │ 合入建议生成"),
+]
+
 
 class Pipeline:
     """CVE补丁回溯分析流水线"""
 
     def __init__(self, git_mgr: GitRepoManager, api_timeout: int = 30,
-                 path_mappings: list = None):
+                 path_mappings: list = None, llm_config=None):
         pm = PathMapper(path_mappings) if path_mappings else PathMapper()
         self.crawler = CrawlerAgent(api_timeout=api_timeout, git_mgr=git_mgr)
         self.analysis = AnalysisAgent(git_mgr, path_mapper=pm)
         self.dependency = DependencyAgent(git_mgr, path_mapper=pm)
         self.dryrun = DryRunAgent(git_mgr, path_mapper=pm)
         self.git_mgr = git_mgr
+
+        self.llm = LLMClient(llm_config) if llm_config else LLMClient()
+        self.community_agent = CommunityAgent(self.llm)
+        self.vuln_agent = VulnAnalysisAgent(self.llm)
+        self.patch_review_agent = PatchReviewAgent(git_mgr, self.llm)
+        self.risk_benefit = RiskBenefitAnalyzer(git_mgr, self.llm)
+        self.merge_advisor = MergeAdvisorAgent(self.llm)
 
     def analyze(self, cve_id: str, target_version: str,
                 enable_dryrun: bool = True,
@@ -301,3 +323,197 @@ class Pipeline:
                 if patch and patch.diff_code:
                     return patch
         return None
+
+    # ── v2.0 深度分析 ─────────────────────────────────────────────────
+
+    def analyze_deep(self, cve_id: str, target_version: str,
+                     on_stage: StageCB = None,
+                     cve_info=None) -> AnalysisResultV2:
+        """
+        深度分析: 先执行 v1 基础分析，再依次执行社区/漏洞/检视/风险/建议。
+        """
+        def _cb(key, status, detail=""):
+            if on_stage:
+                on_stage(key, status, detail)
+
+        base = self.analyze(cve_id, target_version,
+                            enable_dryrun=True,
+                            on_stage=on_stage,
+                            cve_info=cve_info)
+
+        v2 = AnalysisResultV2(base=base)
+        cve = base.cve_info
+        fix_patch = base.fix_patch
+
+        # ── Community ─────────────────────────────────────────────
+        _cb("community", "running")
+        try:
+            if cve:
+                v2.community = self.community_agent.analyze(cve)
+                _cb("community", "success",
+                    f"{len(v2.community)} 条讨论")
+            else:
+                _cb("community", "skip", "无CVE信息")
+        except Exception as e:
+            logger.error("[Pipeline] Community 分析失败: %s", e)
+            _cb("community", "fail", str(e)[:60])
+
+        # ── Vuln Analysis ─────────────────────────────────────────
+        _cb("vuln_analysis", "running")
+        try:
+            if cve:
+                v2.vuln_analysis = self.vuln_agent.analyze(cve, fix_patch)
+                va = v2.vuln_analysis
+                _cb("vuln_analysis", "success",
+                    f"{va.vuln_type} ({va.severity})"
+                    f"{' +LLM' if va.llm_enhanced else ''}")
+            else:
+                _cb("vuln_analysis", "skip", "无CVE信息")
+        except Exception as e:
+            logger.error("[Pipeline] VulnAnalysis 失败: %s", e)
+            _cb("vuln_analysis", "fail", str(e)[:60])
+
+        # ── Patch Review ──────────────────────────────────────────
+        _cb("patch_review", "running")
+        try:
+            if fix_patch:
+                v2.patch_review = self.patch_review_agent.analyze(
+                    fix_patch, target_version
+                )
+                pr = v2.patch_review
+                _cb("patch_review", "success",
+                    f"{len(pr.modified_functions)} funcs, "
+                    f"{len(pr.code_review_items)} items"
+                    f"{' +LLM' if pr.llm_enhanced else ''}")
+            else:
+                _cb("patch_review", "skip", "无补丁")
+        except Exception as e:
+            logger.error("[Pipeline] PatchReview 失败: %s", e)
+            _cb("patch_review", "fail", str(e)[:60])
+
+        # ── Risk/Benefit + PostPatches ────────────────────────────
+        _cb("risk_benefit", "running")
+        try:
+            rb_score = self.risk_benefit.analyze(
+                base, v2.vuln_analysis, v2.patch_review
+            )
+            if fix_patch and cve:
+                v2.post_patches = self.risk_benefit.find_post_patches(
+                    fix_patch, cve, target_version
+                )
+            v2.merge_recommendation = type(
+                'MR', (), {'risk_benefit': rb_score}
+            )()  # temporary holder
+            _cb("risk_benefit", "success",
+                f"overall={rb_score.overall_score:.2f}, "
+                f"{len(v2.post_patches)} post-patches")
+        except Exception as e:
+            logger.error("[Pipeline] RiskBenefit 失败: %s", e)
+            _cb("risk_benefit", "fail", str(e)[:60])
+
+        # ── Merge Advisor ─────────────────────────────────────────
+        _cb("merge_advice", "running")
+        try:
+            temp_rec = getattr(v2.merge_recommendation, 'risk_benefit', None)
+            v2.merge_recommendation = self.merge_advisor.advise(v2)
+            if temp_rec and not v2.merge_recommendation.risk_benefit:
+                v2.merge_recommendation.risk_benefit = temp_rec
+            rec = v2.merge_recommendation
+            _cb("merge_advice", "success",
+                f"{rec.action} (conf={rec.confidence:.0%})"
+                f"{' +LLM' if rec.llm_enhanced else ''}")
+        except Exception as e:
+            logger.error("[Pipeline] MergeAdvisor 失败: %s", e)
+            _cb("merge_advice", "fail", str(e)[:60])
+
+        return v2
+
+    def run_deep_on_base(self, base: AnalysisResult,
+                         on_stage: StageCB = None) -> AnalysisResultV2:
+        """在已有的 v1 AnalysisResult 上执行 v2 深度分析（不重跑基础分析）"""
+        def _cb(key, status, detail=""):
+            if on_stage:
+                on_stage(key, status, detail)
+
+        v2 = AnalysisResultV2(base=base)
+        cve = base.cve_info
+        fix_patch = base.fix_patch
+        target_version = base.target_version
+
+        _cb("community", "running")
+        try:
+            if cve:
+                v2.community = self.community_agent.analyze(cve)
+                _cb("community", "success",
+                    f"{len(v2.community)} 条讨论")
+            else:
+                _cb("community", "skip", "无CVE信息")
+        except Exception as e:
+            logger.error("[Pipeline] Community 分析失败: %s", e)
+            _cb("community", "fail", str(e)[:60])
+
+        _cb("vuln_analysis", "running")
+        try:
+            if cve:
+                v2.vuln_analysis = self.vuln_agent.analyze(cve, fix_patch)
+                va = v2.vuln_analysis
+                _cb("vuln_analysis", "success",
+                    f"{va.vuln_type} ({va.severity})"
+                    f"{' +LLM' if va.llm_enhanced else ''}")
+            else:
+                _cb("vuln_analysis", "skip", "无CVE信息")
+        except Exception as e:
+            logger.error("[Pipeline] VulnAnalysis 失败: %s", e)
+            _cb("vuln_analysis", "fail", str(e)[:60])
+
+        _cb("patch_review", "running")
+        try:
+            if fix_patch:
+                v2.patch_review = self.patch_review_agent.analyze(
+                    fix_patch, target_version
+                )
+                pr = v2.patch_review
+                _cb("patch_review", "success",
+                    f"{len(pr.modified_functions)} funcs, "
+                    f"{len(pr.code_review_items)} items"
+                    f"{' +LLM' if pr.llm_enhanced else ''}")
+            else:
+                _cb("patch_review", "skip", "无补丁")
+        except Exception as e:
+            logger.error("[Pipeline] PatchReview 失败: %s", e)
+            _cb("patch_review", "fail", str(e)[:60])
+
+        _cb("risk_benefit", "running")
+        try:
+            rb_score = self.risk_benefit.analyze(
+                base, v2.vuln_analysis, v2.patch_review
+            )
+            if fix_patch and cve:
+                v2.post_patches = self.risk_benefit.find_post_patches(
+                    fix_patch, cve, target_version
+                )
+            v2.merge_recommendation = type(
+                'MR', (), {'risk_benefit': rb_score}
+            )()
+            _cb("risk_benefit", "success",
+                f"overall={rb_score.overall_score:.2f}, "
+                f"{len(v2.post_patches)} post-patches")
+        except Exception as e:
+            logger.error("[Pipeline] RiskBenefit 失败: %s", e)
+            _cb("risk_benefit", "fail", str(e)[:60])
+
+        _cb("merge_advice", "running")
+        try:
+            temp_rec = getattr(v2.merge_recommendation, 'risk_benefit', None)
+            v2.merge_recommendation = self.merge_advisor.advise(v2)
+            if temp_rec and not v2.merge_recommendation.risk_benefit:
+                v2.merge_recommendation.risk_benefit = temp_rec
+            rec = v2.merge_recommendation
+            _cb("merge_advice", "success",
+                f"{rec.action} (conf={rec.confidence:.0%})"
+                f"{' +LLM' if rec.llm_enhanced else ''}")
+        except Exception as e:
+            logger.error("[Pipeline] MergeAdvisor 失败: %s", e)
+            _cb("merge_advice", "fail", str(e)[:60])
+
+        return v2

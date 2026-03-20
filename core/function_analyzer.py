@@ -218,6 +218,133 @@ class FunctionAnalyzer:
 
         return modified_lines
 
+    def extract_callees(self, func_body: str) -> List[str]:
+        """从函数体中提取被调用的函数名"""
+        callees = set()
+        for m in re.finditer(r'\b([a-zA-Z_]\w*)\s*\(', func_body):
+            name = m.group(1)
+            if name not in self.c_keywords and not name.isupper():
+                callees.add(name)
+        return sorted(callees)
+
+    def extract_function_body(self, lines: List[str],
+                              start_idx: int) -> Tuple[str, int]:
+        """
+        从函数定义行开始，提取完整函数体（通过大括号配对）。
+        返回 (body_text, end_idx)。
+        """
+        depth = 0
+        body_lines: List[str] = []
+        started = False
+
+        for i in range(start_idx, min(start_idx + 500, len(lines))):
+            line = lines[i]
+            body_lines.append(line)
+            for ch in line:
+                if ch == '{':
+                    depth += 1
+                    started = True
+                elif ch == '}':
+                    depth -= 1
+            if started and depth <= 0:
+                return "\n".join(body_lines), i
+        return "\n".join(body_lines), min(start_idx + 500, len(lines) - 1)
+
+    def detect_data_structures(self, code: str) -> List[Dict]:
+        """
+        检测代码中涉及的关键数据结构和同步原语。
+        返回列表: [{"type": "lock/refcount/rcu/...", "name": str, "usage": str}]
+        """
+        results: List[Dict] = []
+        patterns = [
+            (r'\b(spin_lock|spin_unlock|spin_lock_irq(?:save)?|spin_unlock_irq(?:restore)?)\s*\(\s*&?(\w+)',
+             "spinlock"),
+            (r'\b(mutex_lock|mutex_unlock|mutex_lock_interruptible)\s*\(\s*&?(\w+)',
+             "mutex"),
+            (r'\b(rcu_read_lock|rcu_read_unlock|rcu_dereference|rcu_assign_pointer)\b',
+             "rcu"),
+            (r'\b(kref_get|kref_put|refcount_inc|refcount_dec|refcount_set|atomic_inc|atomic_dec)\s*\(\s*&?(\w+)',
+             "refcount"),
+            (r'\b(kfree|kzalloc|kmalloc|kvmalloc|vmalloc|vfree|kvfree)\s*\(',
+             "memory"),
+            (r'\b(get_user|put_user|copy_from_user|copy_to_user)\s*\(',
+             "user_access"),
+        ]
+        seen = set()
+        for pat, dtype in patterns:
+            for m in re.finditer(pat, code):
+                key = (dtype, m.group(0)[:60])
+                if key not in seen:
+                    seen.add(key)
+                    name = m.group(2) if m.lastindex and m.lastindex >= 2 else ""
+                    results.append({
+                        "type": dtype,
+                        "name": name,
+                        "usage": m.group(0).strip()[:80],
+                    })
+        return results
+
+    def detect_security_patterns(self, code: str) -> List[Dict]:
+        """
+        检测常见的安全/漏洞模式。
+        返回 [{"pattern": str, "description": str, "match": str}]
+        """
+        results: List[Dict] = []
+        checks = [
+            (r'\bkfree\s*\([^)]+\)(?:(?!\s*=\s*NULL).)*$',
+             "use_after_free_risk",
+             "kfree 后未置 NULL，可能存在 UAF 风险"),
+            (r'if\s*\(\s*!\s*(\w+)\s*\)(?:(?!return|goto).)*$',
+             "missing_null_check_action",
+             "NULL 检查后可能缺少 return/goto"),
+            (r'(memcpy|memmove|strncpy)\s*\([^,]+,[^,]+,\s*(\w+)\s*\)',
+             "bounded_copy",
+             "有界内存拷贝，需确认长度参数来源"),
+            (r'(copy_from_user|get_user)\s*\(',
+             "user_input",
+             "用户空间输入，需检查边界验证"),
+            (r'(\w+)\s*=\s*(kzalloc|kmalloc|kstrdup)\s*\([^)]*\);\s*\n(?:(?!if\s*\(\s*!\s*\1).)*$',
+             "missing_alloc_check",
+             "内存分配后可能缺少 NULL 检查"),
+        ]
+        for pat, name, desc in checks:
+            for m in re.finditer(pat, code, re.MULTILINE):
+                results.append({
+                    "pattern": name,
+                    "description": desc,
+                    "match": m.group(0).strip()[:100],
+                })
+        return results
+
+    def build_call_topology(self, file_content: str,
+                            file_path: str) -> Dict:
+        """
+        构建文件内的函数调用拓扑。
+        返回: {func_name: {"callers": [...], "callees": [...], "line": int}}
+        """
+        functions = self.extract_functions(file_content, file_path)
+        lines = file_content.split("\n")
+        topo: Dict[str, Dict] = {}
+
+        for func in functions:
+            body, _ = self.extract_function_body(lines, func.line_number - 1)
+            callees = self.extract_callees(body)
+            func.callees = callees
+            topo[func.name] = {
+                "callees": callees,
+                "callers": [],
+                "line": func.line_number,
+                "signature": func.signature,
+            }
+
+        all_names = set(topo.keys())
+        for fname, info in topo.items():
+            for callee in info["callees"]:
+                if callee in all_names and callee != fname:
+                    topo[callee]["callers"].append(fname)
+
+        return topo
+
     def _generate_impact_summary(self, modified_funcs: List[FunctionInfo],
                                  affected_funcs: List[FunctionInfo]) -> str:
         """生成影响摘要"""

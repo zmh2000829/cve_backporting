@@ -76,9 +76,11 @@ class StageTracker:
         return t
 
 
-def make_header(cve_id: str, target: str) -> Panel:
+def make_header(cve_id: str, target: str, extra: str = "") -> Panel:
     title = Text()
     title.append("CVE 补丁回溯分析", style="bold white")
+    if extra:
+        title.append(extra)
     subtitle = Text()
     subtitle.append(f"  {cve_id}", style="bold cyan")
     subtitle.append(f"  →  ", style="dim")
@@ -1571,6 +1573,37 @@ def render_batch_validate_report(results: list, target: str):
         bucket_parts = [f"{k}: {v}" for k, v in sim_buckets.items() if v]
         summary.add_row("相似度分布", "  ".join(bucket_parts))
 
+    has_deep = any(r.get("deep_analysis") is not None for r in results)
+
+    # 深度分析汇总统计
+    if has_deep:
+        deep_actions = {}
+        deep_scores = []
+        for r in results:
+            da = r.get("deep_analysis")
+            if da is None:
+                continue
+            rec = getattr(da, "merge_recommendation", None)
+            if rec and hasattr(rec, "action"):
+                deep_actions[rec.action] = deep_actions.get(
+                    rec.action, 0) + 1
+                rb = getattr(rec, "risk_benefit", None)
+                if rb:
+                    deep_scores.append(rb.overall_score)
+        if deep_actions:
+            _act_cn = {"merge": "直接合入", "merge_with_prereqs": "合入(需前置)",
+                       "manual_review": "需审查", "skip": "无需处理"}
+            act_parts = [f"[cyan]{_act_cn.get(a, a)}: {c}[/]"
+                         for a, c in sorted(deep_actions.items(),
+                                            key=lambda x: -x[1])]
+            summary.add_row("", "")
+            summary.add_row("[bold magenta]深度分析建议分布[/]",
+                            "  ".join(act_parts))
+        if deep_scores:
+            avg_ds = sum(deep_scores) / len(deep_scores)
+            summary.add_row("深度分析平均评分",
+                            f"[bold]{avg_ds:.2f}/1.00[/]")
+
     detail = Table(box=box.ROUNDED, show_header=True, padding=(0, 1),
                    expand=True)
     detail.add_column("#", width=3, justify="right", style="dim")
@@ -1580,6 +1613,8 @@ def render_batch_validate_report(results: list, target: str):
     detail.add_column("判定", width=12, justify="center")
     detail.add_column("前置", width=8, justify="center")
     detail.add_column("验证", width=5, justify="center")
+    if has_deep:
+        detail.add_column("深度建议", width=14, justify="center")
 
     verdict_style = {
         "identical":        "[green]✔ 完全一致[/]",
@@ -1588,6 +1623,13 @@ def render_batch_validate_report(results: list, target: str):
         "different":        "[red]✘ 差异较大[/]",
         "no_data":          "[dim]- 无数据[/]",
         "error":            "[red]✘ 异常[/]",
+    }
+
+    _deep_act_style = {
+        "merge":              "[green bold]直接合入[/]",
+        "merge_with_prereqs": "[yellow bold]合入(需前置)[/]",
+        "manual_review":      "[red bold]需审查[/]",
+        "skip":               "[dim]无需处理[/]",
     }
 
     for i, r in enumerate(results, 1):
@@ -1608,7 +1650,8 @@ def render_batch_validate_report(results: list, target: str):
 
         cs_color = ("green" if cs >= 0.75 else
                     "yellow" if cs >= 0.5 else "red")
-        detail.add_row(
+
+        row = [
             str(i),
             r.get("cve_id", "?"),
             method,
@@ -1617,7 +1660,19 @@ def render_batch_validate_report(results: list, target: str):
             verdict_style.get(v, v),
             prereq_cell,
             overall,
-        )
+        ]
+        if has_deep:
+            da = r.get("deep_analysis")
+            if da is not None:
+                rec = getattr(da, "merge_recommendation", None)
+                if rec and hasattr(rec, "action"):
+                    row.append(_deep_act_style.get(
+                        rec.action, rec.action))
+                else:
+                    row.append("[dim]-[/]")
+            else:
+                row.append("[dim]-[/]")
+        detail.add_row(*row)
 
     from rich.console import Group
     p = Panel(

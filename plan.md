@@ -463,3 +463,72 @@ def compare_prereqs(recommended: List[str], actual: List[str]) -> dict:
   ├─ F.2 多仓库并行
   └─ F.3 + F.4 CVE 订阅 / Web Dashboard
 ```
+
+---
+
+## v2.0 — 深度分析能力扩展 (v1.0 tag 后)
+
+> v1.0 核心算法 (搜索引擎 / DryRun / 依赖分析) 保持不变。v2.0 在 v1 Pipeline 之上新增
+> 5 个深度分析模块，采用 **LLM 增强 + 确定性兜底** 策略：有 LLM 时深度分析，无 LLM 时
+> 输出结构化基础信息。输出集成到 JSON + TUI 报告中，无客户端页面。
+
+### v2.0 新增模块总览
+
+| 用户需求 | 实现模块 | 文件 | LLM 依赖 |
+|---------|---------|------|---------|
+| 漏洞分析 (影响/风险/利用条件/技术原因) | `VulnAnalysisAgent` | `agents/vuln_analysis.py` | 确定性分类 + LLM 深度分析 |
+| 社区演进分析 (mailist/bugzilla) | `CommunityAgent` | `agents/community.py` | 确定性爬取 + LLM 摘要 |
+| 修复补丁逻辑分析 (代码走读/触发方式) | `PatchReviewAgent` | `agents/patch_review.py` | 确定性代码解析 + LLM 走读 |
+| 前后置关联补丁 + 风险收益 | 扩展 Dependency + `RiskBenefitAnalyzer` | `core/risk_benefit.py` | 确定性检测 + LLM 评估 |
+| 合入建议与检视分析 | `MergeAdvisorAgent` | `agents/merge_advisor.py` | 确定性规则 + LLM 综合建议 |
+
+### v2.0 数据流
+
+```
+CVE ID
+  │
+  ├─ v1 Pipeline (不变): Crawler → Analysis → Dependency → DryRun
+  │
+  └─ v2 扩展 (--deep 触发):
+       ├─ CommunityAgent (lore + bugzilla + CVE refs)
+       ├─ VulnAnalysisAgent (漏洞分类 + 深度分析)
+       ├─ PatchReviewAgent (代码走读 + 调用拓扑 + 安全检视)
+       ├─ DependencyAgent 扩展 (后置补丁检测)
+       ├─ RiskBenefitAnalyzer (风险收益量化)
+       └─ MergeAdvisorAgent (汇总→合入建议)
+           │
+           ▼
+       AnalysisResultV2 → JSON 输出 + TUI 报告
+```
+
+### Sprint 1 — 基础设施
+
+| 任务 | 文件 | 说明 |
+|------|------|------|
+| 统一 LLM 客户端 | `core/llm_client.py` (新建) | `LLMClient.chat()` / `.chat_json()` 封装，替代现有两套调用方式 |
+| 新增数据模型 | `core/models.py` (修改) | `CommunityDiscussion` / `VulnAnalysis` / `PatchReview` / `MergeRecommendation` / `AnalysisResultV2` |
+| 增强 FunctionAnalyzer | `core/function_analyzer.py` (修改) | 新增 callees 提取 / 数据结构(锁/引用计数)检测 / 调用拓扑构建 |
+
+### Sprint 2 — 社区 + 漏洞分析
+
+| 任务 | 文件 | 说明 |
+|------|------|------|
+| CommunityAgent | `agents/community.py` (新建) | lore.kernel.org 搜索 + bugzilla 搜索 + CVE 引用链接提取；无 LLM 时输出原文截取 |
+| VulnAnalysisAgent | `agents/vuln_analysis.py` (新建) | 关键词规则分类漏洞类型 + LLM 输出技术根因/触发路径/利用条件/判断方法 |
+
+### Sprint 3 — 补丁检视 + 风险收益
+
+| 任务 | 文件 | 说明 |
+|------|------|------|
+| PatchReviewAgent | `agents/patch_review.py` (新建) | 确定性: 函数修改映射 + 调用拓扑 + 锁/结构体检测 + 常见漏洞模式检测；LLM: 代码走读 + 触发分析 + 安全性分析 |
+| Dependency 扩展 | `agents/dependency.py` (修改) | 新增后置补丁检测 (`Fixes:` 标签反查 + 同函数后续修改) |
+| RiskBenefitAnalyzer | `core/risk_benefit.py` (新建) | 量化合入复杂度 / 回归风险 / 变更范围 / 安全收益 |
+
+### Sprint 4 — 合入建议 + 集成
+
+| 任务 | 文件 | 说明 |
+|------|------|------|
+| MergeAdvisorAgent | `agents/merge_advisor.py` (新建) | 规则引擎判定 action + LLM 综合建议 + 检视 checklist |
+| Pipeline 集成 | `pipeline.py` (修改) | 新增 `analyze_v2()` 编排方法 |
+| CLI 集成 | `cli.py` (修改) | `--deep` 标志 + `vuln-analysis` / `community` 子命令 + JSON 输出扩展 |
+| 文档更新 | `README.md` / `docs/` | 更新架构和功能文档 |

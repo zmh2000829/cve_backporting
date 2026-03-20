@@ -68,7 +68,8 @@ def _make_git_mgr(config, tv: str) -> GitRepoManager:
 
 def cmd_analyze(args, config):
     git_mgr = _make_git_mgr(config, args.target_version)
-    pipe = Pipeline(git_mgr, path_mappings=config.path_mappings)
+    pipe = Pipeline(git_mgr, path_mappings=config.path_mappings,
+                    llm_config=config.llm)
 
     cves = [args.cve_id] if args.cve_id else []
     if args.batch_file:
@@ -81,9 +82,13 @@ def cmd_analyze(args, config):
     out_dir = config.output.output_dir
     os.makedirs(out_dir, exist_ok=True)
 
+    deep = getattr(args, "deep", False)
     for cve_id in cves:
-        _analyze_one(pipe, cve_id, args.target_version,
-                     enable_dryrun=not args.no_dryrun, out_dir=out_dir)
+        if deep:
+            _analyze_deep(pipe, cve_id, args.target_version, out_dir=out_dir)
+        else:
+            _analyze_one(pipe, cve_id, args.target_version,
+                         enable_dryrun=not args.no_dryrun, out_dir=out_dir)
 
 
 def _analyze_one(pipe: Pipeline, cve_id: str, target: str,
@@ -153,6 +158,299 @@ def _analyze_one(pipe: Pipeline, cve_id: str, target: str,
             "analysis_narrative": narrative,
         }, f, indent=2, ensure_ascii=False, default=str)
     console.print(f"[dim]报告已保存: {fp}[/]")
+
+
+# ─── analyze --deep ──────────────────────────────────────────────────
+
+def _analyze_deep(pipe, cve_id: str, target: str, out_dir: str):
+    """深度分析模式: v1 基础 + v2 扩展 (社区/漏洞/检视/风险/建议)"""
+    from pipeline import STAGES_DEEP
+
+    tracker = StageTracker(STAGES_DEEP)
+    header = make_header(cve_id, target, extra="[bold magenta] DEEP[/]")
+
+    def on_stage(key, status, detail=""):
+        tracker.start(key) if status == "running" else tracker.done(key, status, detail)
+
+    def _layout():
+        return Group(header, tracker.render())
+
+    with Live(_layout(), console=console, refresh_per_second=8) as live:
+        def _update(key, status, detail=""):
+            on_stage(key, status, detail)
+            live.update(_layout())
+
+        v2 = pipe.analyze_deep(cve_id, target, on_stage=_update)
+
+    console.print()
+
+    base = v2.base
+    if base:
+        console.print(render_report(base))
+        console.print(render_recommendations(base))
+
+    _render_deep_report(v2)
+
+    if base and base.dry_run and base.dry_run.adapted_patch:
+        patch_file = os.path.join(out_dir, f"{cve_id}_{target}_adapted.patch")
+        with open(patch_file, "w") as f:
+            f.write(base.dry_run.adapted_patch)
+        console.print(f"\n[green]✔ 生成的适配补丁已保存:[/] [cyan]{patch_file}[/]")
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    fp = os.path.join(out_dir, f"{cve_id}_{target}_deep_{ts}.json")
+    _save_deep_json(v2, fp)
+    console.print(f"[dim]深度分析报告已保存: {fp}[/]")
+
+
+def _render_deep_report(v2):
+    """TUI 渲染 v2 深度分析结果 — 详细文本面板"""
+    from rich.table import Table
+
+    # ── 漏洞深度分析 ──────────────────────────────────────────────
+    if v2.vuln_analysis:
+        va = v2.vuln_analysis
+        vuln_text = Text()
+        _sev_colors = {"critical": "red bold", "high": "yellow bold",
+                       "medium": "yellow", "low": "dim"}
+        _sev_cn = {"critical": "严重", "high": "高危",
+                   "medium": "中危", "low": "低危"}
+        sev_color = _sev_colors.get(va.severity, "")
+        sev_cn = _sev_cn.get(va.severity, va.severity)
+
+        vuln_text.append("漏洞类型: ", style="bold cyan")
+        vuln_text.append(f"{va.vuln_type}\n", style="bold")
+        vuln_text.append("严重度: ", style="bold cyan")
+        vuln_text.append(f"{sev_cn}\n", style=sev_color)
+        vuln_text.append("子系统: ", style="bold cyan")
+        vuln_text.append(f"{va.affected_subsystem}\n")
+        if va.affected_functions:
+            vuln_text.append("影响函数: ", style="bold cyan")
+            vuln_text.append(f"{', '.join(va.affected_functions[:8])}\n")
+
+        vuln_text.append("\n")
+        vuln_text.append("技术根因分析\n", style="bold underline")
+        vuln_text.append(f"{va.root_cause or '待分析'}\n")
+
+        if va.trigger_path:
+            vuln_text.append("\n")
+            vuln_text.append("触发路径\n", style="bold underline")
+            vuln_text.append(f"{va.trigger_path}\n")
+
+        if va.exploit_conditions:
+            vuln_text.append("\n")
+            vuln_text.append("利用条件\n", style="bold underline")
+            vuln_text.append(f"{va.exploit_conditions}\n")
+
+        if va.impact_description:
+            vuln_text.append("\n")
+            vuln_text.append("影响评估\n", style="bold underline")
+            vuln_text.append(f"{va.impact_description}\n")
+
+        if va.detection_method:
+            vuln_text.append("\n")
+            vuln_text.append("检测与验证方法\n", style="bold underline")
+            vuln_text.append(f"{va.detection_method}\n")
+
+        vuln_text.append("\n")
+        vuln_text.append("分析方式: ", style="dim")
+        vuln_text.append(
+            "LLM 增强分析" if va.llm_enhanced else "确定性规则分析",
+            style="dim")
+
+        console.print(Panel(vuln_text, title="漏洞深度分析",
+                           border_style="red"))
+        console.print()
+
+    # ── 补丁逻辑检视 ──────────────────────────────────────────────
+    if v2.patch_review:
+        pr = v2.patch_review
+        pr_text = Text()
+
+        pr_text.append("修复摘要\n", style="bold underline")
+        pr_text.append(f"{pr.fix_summary or '待分析'}\n")
+
+        pr_text.append("\n")
+        pr_text.append("原始漏洞触发分析\n", style="bold underline")
+        pr_text.append(f"{pr.trigger_analysis or '待分析'}\n")
+
+        pr_text.append("\n")
+        pr_text.append("修复预防机制\n", style="bold underline")
+        pr_text.append(f"{pr.prevention_mechanism or '待分析'}\n")
+
+        pr_text.append("\n")
+        pr_text.append("分析方式: ", style="dim")
+        pr_text.append(
+            "LLM 增强分析" if pr.llm_enhanced else "确定性规则分析",
+            style="dim")
+
+        console.print(Panel(pr_text, title="补丁逻辑检视",
+                           border_style="cyan"))
+
+        if pr.code_review_items:
+            ri_tbl = Table(title="代码检视条目", box=box.SIMPLE,
+                           padding=(0, 1))
+            ri_tbl.add_column("级别", width=10)
+            ri_tbl.add_column("分类", width=14)
+            ri_tbl.add_column("描述")
+            for item in pr.code_review_items[:10]:
+                sev_style = {"critical": "red bold", "warning": "yellow",
+                             "info": "dim"}.get(item.severity, "")
+                ri_tbl.add_row(
+                    Text(item.severity, style=sev_style),
+                    item.category,
+                    item.description,
+                )
+            console.print(ri_tbl)
+        console.print()
+
+    # ── 社区讨论 ──────────────────────────────────────────────────
+    if v2.community:
+        tbl = Table(title="社区讨论", box=box.SIMPLE, padding=(0, 1))
+        tbl.add_column("来源", width=10)
+        tbl.add_column("标题/URL", ratio=3)
+        tbl.add_column("关联", width=12)
+        for d in v2.community[:8]:
+            tbl.add_row(d.source, d.title or d.url, d.relevance)
+        console.print(tbl)
+        console.print()
+
+    # ── 后置关联补丁 ──────────────────────────────────────────────
+    if v2.post_patches:
+        tbl = Table(title="后置关联补丁", box=box.SIMPLE, padding=(0, 1))
+        tbl.add_column("Commit", width=14)
+        tbl.add_column("关系", width=16)
+        tbl.add_column("Subject")
+        for pp in v2.post_patches[:10]:
+            tbl.add_row(pp.commit_id[:12], pp.relation, pp.subject[:60])
+        console.print(tbl)
+        console.print()
+
+    # ── 风险收益评估 (详细文本) ────────────────────────────────────
+    rec = v2.merge_recommendation
+    rb = None
+    if rec and hasattr(rec, 'risk_benefit') and rec.risk_benefit:
+        rb = rec.risk_benefit
+
+    if rb and (rb.merge_complexity_detail or rb.overall_detail):
+        rb_text = Text()
+
+        _dim_labels = [
+            ("合入复杂度", rb.merge_complexity, rb.merge_complexity_detail),
+            ("回归风险", rb.regression_risk, rb.regression_risk_detail),
+            ("变更范围", rb.change_scope, rb.change_scope_detail),
+            ("安全收益", rb.security_benefit, rb.security_benefit_detail),
+        ]
+        for dim_name, dim_val, dim_detail in _dim_labels:
+            if not dim_detail:
+                continue
+            if dim_name == "安全收益":
+                color = "green" if dim_val >= 0.5 else (
+                    "yellow" if dim_val >= 0.3 else "red")
+            else:
+                color = "green" if dim_val < 0.3 else (
+                    "yellow" if dim_val < 0.5 else "red")
+            rb_text.append(f"\n{dim_detail}\n", style=color)
+
+        if rb.overall_detail:
+            rb_text.append("\n")
+            rb_text.append(f"{rb.overall_detail}\n", style="bold")
+
+        console.print(Panel(rb_text, title="风险收益评估",
+                           border_style="magenta"))
+        console.print()
+
+    # ── 合入建议 ──────────────────────────────────────────────────
+    if rec and hasattr(rec, 'action'):
+        _action_cn = {
+            "merge": "直接合入",
+            "merge_with_prereqs": "合入 (需先处理前置依赖)",
+            "manual_review": "需人工审查",
+            "skip": "无需处理",
+        }
+        action_colors = {
+            "merge": "green bold", "merge_with_prereqs": "yellow bold",
+            "manual_review": "red bold", "skip": "dim",
+        }
+        color = action_colors.get(rec.action, "")
+        action_cn = _action_cn.get(rec.action, rec.action)
+
+        panel_content = Text()
+        panel_content.append("建议操作: ", style="bold")
+        panel_content.append(f"{action_cn}", style=color)
+        panel_content.append(f" (置信度 {rec.confidence:.0%})\n")
+
+        if rec.summary:
+            panel_content.append(f"\n{rec.summary}\n")
+
+        if hasattr(rec, 'prerequisite_actions') and rec.prerequisite_actions:
+            panel_content.append("\n前置操作:\n", style="bold underline")
+            for a in rec.prerequisite_actions:
+                panel_content.append(f"  • {a}\n")
+
+        if hasattr(rec, 'review_checklist') and rec.review_checklist:
+            panel_content.append("\n检视清单:\n", style="bold underline")
+            for c in rec.review_checklist:
+                panel_content.append(f"  □ {c}\n")
+
+        console.print(Panel(panel_content, title="合入建议",
+                           border_style="blue"))
+
+
+def _save_deep_json(v2, filepath: str):
+    """将 v2 深度分析结果保存为 JSON"""
+    from dataclasses import asdict
+
+    base = v2.base
+    data = {}
+
+    if base:
+        prereqs = [asdict(p) for p in base.prerequisite_patches] if base.prerequisite_patches else []
+        dr_detail = {}
+        if base.dry_run:
+            dr = base.dry_run
+            dr_detail = {
+                "applies_cleanly": dr.applies_cleanly,
+                "apply_method": dr.apply_method,
+                "conflicting_files": dr.conflicting_files,
+                "has_adapted_patch": bool(dr.adapted_patch),
+            }
+        data.update({
+            "cve_id": base.cve_id,
+            "target_version": base.target_version,
+            "is_vulnerable": base.is_vulnerable,
+            "is_fixed": base.is_fixed,
+            "dryrun_detail": dr_detail,
+            "prerequisite_patches": prereqs,
+            "recommendations": base.recommendations,
+        })
+
+    data["deep_analysis"] = v2.to_dict()
+
+    os.makedirs(os.path.dirname(filepath) or ".", exist_ok=True)
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False, default=str)
+
+
+def _v2_to_json(v2) -> dict:
+    """将 AnalysisResultV2 序列化为 JSON 友好的 dict"""
+    if v2 is None:
+        return {}
+    try:
+        return v2.to_dict()
+    except Exception:
+        return {}
+
+
+def _prepare_validate_json(result: dict) -> dict:
+    """准备 validate 结果供 JSON 序列化 — 处理 deep_analysis 对象"""
+    out = {}
+    for k, v in result.items():
+        if k == "deep_analysis" and v is not None:
+            out["deep_analysis"] = _v2_to_json(v)
+        else:
+            out[k] = v
+    return out
 
 
 # ─── check-intro ─────────────────────────────────────────────────────
@@ -1290,9 +1588,10 @@ def _compare_generated_vs_real(generated_patch: str, real_diff: str) -> dict:
 
 def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
                          git_mgr=None, show_stages=True,
-                         cve_info=None):
+                         cve_info=None, deep=False):
     """执行单个 CVE 的回退验证，返回结果 dict。
-    cve_info: 可选的预构建 CveInfo，提供后跳过 MITRE 爬取。"""
+    cve_info: 可选的预构建 CveInfo，提供后跳过 MITRE 爬取。
+    deep: 是否同时执行 v2 深度分析。"""
     if git_mgr is None:
         git_mgr = _make_git_mgr(config, tv)
 
@@ -1320,7 +1619,8 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
             {tv: {"path": wt_dir, "branch": "HEAD"}},
             use_cache=False,
         )
-        pipe = Pipeline(wt_mgr, path_mappings=config.path_mappings)
+        pipe = Pipeline(wt_mgr, path_mappings=config.path_mappings,
+                        llm_config=config.llm if deep else None)
 
         if show_stages:
             tracker = StageTracker(STAGES)
@@ -1573,7 +1873,21 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
             logger.debug("构建分析描述异常: %s", e)
             narrative = {"error": str(e)}
 
-        return {
+        # ── v2 深度分析 (--deep) ──────────────────────────
+        deep_analysis = None
+        if deep and result.cve_info:
+            from pipeline import STAGES_DEEP
+            if show_stages:
+                console.print(
+                    "\n[bold magenta]── 深度分析 ──[/]")
+            try:
+                v2 = pipe.run_deep_on_base(result)
+                deep_analysis = v2
+            except Exception as e:
+                logger.error("深度分析失败: %s", e)
+                deep_analysis = None
+
+        out = {
             "cve_id": cve_id, "known_fix": known_fix, "target": tv,
             "worktree_commit": rollback_hash[:16] if rollback_hash else rollback,
             "checks": checks,
@@ -1594,6 +1908,9 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
             "community_patch_file": community_patch_file,
             "real_fix_patch_file": real_fix_patch_file,
         }
+        if deep_analysis is not None:
+            out["deep_analysis"] = deep_analysis
+        return out
 
     finally:
         git_mgr.remove_worktree(tv, wt_dir)
@@ -1639,9 +1956,11 @@ def cmd_validate(args, config):
         border_style="magenta", padding=(0, 2),
     ))
 
+    deep = getattr(args, "deep", False)
     result = _run_single_validate(
         config, args.cve_id, tv, args.known_fix, known_prereqs,
-        git_mgr=git_mgr, show_stages=True, cve_info=cve_info)
+        git_mgr=git_mgr, show_stages=True, cve_info=cve_info,
+        deep=deep)
 
     # LLM 智能分析
     if not result.get("overall_pass"):
@@ -1714,12 +2033,21 @@ def cmd_validate(args, config):
     console.print()
     render_validate_report(result)
 
+    v2 = result.get("deep_analysis")
+    if v2 is not None:
+        console.print()
+        console.print(Panel(
+            "[bold]以下为 v2 深度分析结果 (漏洞/补丁检视/风险收益/合入建议)[/]",
+            border_style="magenta"))
+        _render_deep_report(v2)
+
     out_dir = config.output.output_dir
     os.makedirs(out_dir, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     fp = os.path.join(out_dir, f"validate_{args.cve_id}_{tv}_{ts}.json")
+    save_data = _prepare_validate_json(result)
     with open(fp, "w", encoding="utf-8") as f:
-        json.dump(result, f, indent=2, ensure_ascii=False, default=str)
+        json.dump(save_data, f, indent=2, ensure_ascii=False, default=str)
     console.print(f"[dim]验证报告已保存: {fp}[/]")
 
 
@@ -2013,6 +2341,7 @@ def cmd_batch_validate(args, config):
         known_prereq_commits = [p["commit"] for p in prereqs]
 
         _MAX_RETRIES = 3
+        deep = getattr(args, "deep", False)
         try:
             r = None
             for _attempt in range(1, _MAX_RETRIES + 1):
@@ -2020,7 +2349,7 @@ def cmd_batch_validate(args, config):
                     config, cve_id, tv, primary["commit"],
                     known_prereq_commits,
                     git_mgr=git_mgr, show_stages=True,
-                    cve_info=cve_info)
+                    cve_info=cve_info, deep=deep)
 
                 has_patch = r.get("dryrun_detail", {}).get(
                     "has_adapted_patch", False)
@@ -2080,8 +2409,21 @@ def cmd_batch_validate(args, config):
             cve_results.append(r)
 
             icon = _VERDICT_ICONS.get(verdict, f"[dim]{verdict}[/]")
+            deep_hint = ""
+            v2 = r.get("deep_analysis")
+            if v2 is not None:
+                rec = getattr(v2, "merge_recommendation", None)
+                if rec and hasattr(rec, "action"):
+                    _act_cn = {"merge": "直接合入",
+                               "merge_with_prereqs": "合入(需前置)",
+                               "manual_review": "需人工审查",
+                               "skip": "无需处理"}
+                    deep_hint = (
+                        f"  [magenta]建议={_act_cn.get(rec.action, rec.action)}"
+                        f"[/]")
             console.print(
-                f"  {icon}  核心相似度={core_sim:.0%}  方法={method}")
+                f"  {icon}  核心相似度={core_sim:.0%}  方法={method}"
+                f"{deep_hint}")
 
             item = {
                 "cve_id": cve_id,
@@ -2094,6 +2436,16 @@ def cmd_batch_validate(args, config):
                 "prereq_recall": prereq_validation.get("recall", None),
                 "summary": r.get("summary", ""),
             }
+            if v2 is not None:
+                rec = getattr(v2, "merge_recommendation", None)
+                if rec and hasattr(rec, "action"):
+                    item["deep_action"] = rec.action
+                    item["deep_summary"] = getattr(rec, "summary", "")
+                    rb = getattr(rec, "risk_benefit", None)
+                    if rb:
+                        item["deep_overall_score"] = round(
+                            rb.overall_score, 2)
+                        item["deep_overall_detail"] = rb.overall_detail
             if verdict in _PASS_VERDICTS:
                 passed_list.append(item)
             else:
@@ -2133,6 +2485,8 @@ def cmd_batch_validate(args, config):
     console.print(f"\n{'━' * 60}\n")
     render_batch_validate_report(cve_results, tv)
 
+    serializable_results = [
+        _prepare_validate_json(r) for r in cve_results]
     full_report_path = os.path.join(
         out_dir, f"batch_validate_{tv}_{ts}_full.json")
     with open(full_report_path, "w", encoding="utf-8") as f:
@@ -2141,7 +2495,7 @@ def cmd_batch_validate(args, config):
             "total_cves": len(cve_groups),
             "total_patches": total_patches,
             "skipped_parse_errors": skipped,
-            "cve_results": cve_results,
+            "cve_results": serializable_results,
             "cve_summary": {
                 "passed": passed_list,
                 "failed": failed_list,
@@ -2276,6 +2630,8 @@ def main():
     ap.add_argument("--batch", dest="batch_file")
     ap.add_argument("--target", dest="target_version", required=True)
     ap.add_argument("--no-dryrun", action="store_true", help="跳过dry-run检测")
+    ap.add_argument("--deep", action="store_true",
+                    help="深度分析模式: 漏洞分析+社区讨论+补丁检视+风险收益+合入建议")
 
     ip = sub.add_parser("check-intro", help="检测漏洞引入commit", parents=[parent])
     ip.add_argument("--commit", dest="commit_id", help="mainline引入commit ID")
@@ -2297,6 +2653,8 @@ def main():
                     help="社区 mainline 修复 commit ID (提供后跳过 MITRE 爬取)")
     vp.add_argument("--mainline-intro", default="",
                     help="社区 mainline 引入 commit ID (可选)")
+    vp.add_argument("--deep", action="store_true",
+                    help="深度分析模式: 漏洞分析+补丁检视+风险收益+合入建议")
 
     bmp = sub.add_parser("benchmark", help="批量准确度基准测试", parents=[parent])
     bmp.add_argument("--file", required=True, help="基准测试YAML文件 (benchmarks.yaml)")
@@ -2311,6 +2669,8 @@ def main():
                      help="跳过前 N 个 CVE, 从第 N+1 个开始 (默认 0)")
     bvp.add_argument("--limit", type=int, default=0,
                      help="处理的 CVE 数量 (0=全部, 与 --offset 配合使用)")
+    bvp.add_argument("--deep", action="store_true",
+                     help="深度分析模式: 漏洞分析+补丁检视+风险收益+合入建议")
 
     cp = sub.add_parser("build-cache", help="构建commit缓存", parents=[parent])
     cp.add_argument("--target", dest="target_version", required=True)
