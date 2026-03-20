@@ -960,7 +960,15 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
             }
 
         checks = {}
-        checks["fix_correctly_absent"] = not result.is_fixed
+
+        # fix_correctly_absent: 直接用 git 验证 known_fix 是否在 worktree
+        # HEAD 的历史中, 避免 subject_match 在共享 git 对象库中误判。
+        rc = wt_mgr.run_git_rc(
+            ["git", "merge-base", "--is-ancestor", known_fix, "HEAD"],
+            tv, timeout=10)
+        fix_in_worktree = (rc == 0)
+        checks["fix_correctly_absent"] = not fix_in_worktree
+
         checks["intro_detected"] = result.is_vulnerable
 
         intro_s = ""
