@@ -51,5 +51,3 @@ config.yaml
 
 # Test outputs
 *.log
-
-docs/presentation.md
