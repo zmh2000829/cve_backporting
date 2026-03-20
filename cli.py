@@ -1126,15 +1126,13 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
         elif adapted_patch and local_diff:
             generated_vs_real = _compare_generated_vs_real(
                 adapted_patch, local_diff)
-            generated_vs_real["compare_source"] = "adapted_patch"
+            is_regen = apply_method in ("regenerated", "conflict-adapted")
+            generated_vs_real["compare_source"] = (
+                "adapted_patch" if is_regen else "adapted_patch(community)")
         elif community_diff and local_diff:
             generated_vs_real = _compare_generated_vs_real(
                 community_diff, local_diff)
             generated_vs_real["compare_source"] = "community_patch"
-            generated_vs_real["note"] = (
-                "未能生成适配补丁，当前使用社区原始补丁对比 "
-                "(行号可能与本地不一致，仅核心改动行有参考意义)"
-            )
 
         # ★ 将补丁本质比较结果纳入 overall 判定
         gvr_verdict = generated_vs_real.get("verdict", "")

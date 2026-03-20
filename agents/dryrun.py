@@ -289,8 +289,8 @@ class DryRunAgent:
                             patch.commit_id[:12])
                 return r4
 
-        # 全部失败时，将 L3 的重建结果（即使不能通过 apply）也作为
-        # adapted_patch 保留，以便 validate 做补丁对比
+        # 全部失败时，按优先级保留最佳可用补丁用于 validate 对比:
+        # L3 重建 > L4 冲突适配 > 社区原始补丁 (兜底)
         if adapted:
             r0.adapted_patch = adapted
             logger.info(
@@ -298,6 +298,11 @@ class DryRunAgent:
                 patch.commit_id[:12])
         elif analysis.get("adapted_diff"):
             r0.adapted_patch = analysis["adapted_diff"]
+        else:
+            r0.adapted_patch = mapped_diff
+            logger.info(
+                "[DryRun] L3/L4 均无产出, 使用社区原始补丁作为 adapted_patch: %s",
+                patch.commit_id[:12])
 
         logger.info("[DryRun] 所有策略均失败: %s (%d 文件, %d hunk)",
                     patch.commit_id[:12], len(r0.conflicting_files),
