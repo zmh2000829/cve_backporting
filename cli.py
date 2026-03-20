@@ -121,6 +121,25 @@ def _analyze_one(pipe: Pipeline, cve_id: str, target: str,
     fp = os.path.join(out_dir, f"{cve_id}_{target}_{ts}.json")
     from dataclasses import asdict
     prereqs = [asdict(p) for p in result.prerequisite_patches] if result.prerequisite_patches else []
+
+    dr_detail = {}
+    if result.dry_run:
+        dr = result.dry_run
+        dr_detail = {
+            "applies_cleanly": dr.applies_cleanly,
+            "apply_method": dr.apply_method,
+            "conflicting_files": dr.conflicting_files,
+            "error_output": dr.error_output[:500] if dr.error_output else "",
+            "has_adapted_patch": bool(dr.adapted_patch),
+        }
+
+    try:
+        narrative = _build_analysis_narrative(
+            result, dr_detail, {}, {},
+            is_validate=False)
+    except Exception:
+        narrative = {}
+
     with open(fp, "w", encoding="utf-8") as f:
         json.dump({
             "cve_id": result.cve_id,
@@ -128,8 +147,10 @@ def _analyze_one(pipe: Pipeline, cve_id: str, target: str,
             "is_vulnerable": result.is_vulnerable,
             "is_fixed": result.is_fixed,
             "dry_run_clean": result.dry_run.applies_cleanly if result.dry_run else None,
+            "dryrun_detail": dr_detail,
             "prerequisite_patches": prereqs,
             "recommendations": result.recommendations,
+            "analysis_narrative": narrative,
         }, f, indent=2, ensure_ascii=False, default=str)
     console.print(f"[dim]报告已保存: {fp}[/]")
 
@@ -697,6 +718,384 @@ def _diagnose_root_cause(diff_cmp: dict, dryrun_detail: dict,
     return causes
 
 
+def _build_analysis_narrative(result, dryrun_detail: dict,
+                              generated_vs_real: dict,
+                              diff_comparison: dict,
+                              known_prereqs: list = None,
+                              is_validate: bool = False) -> dict:
+    """
+    生成面向 CVE 补丁开发人员的可读分析过程描述。
+    返回结构化 dict, 每个字段都是中文自然语言描述。
+    """
+    cve_info = result.cve_info
+    dr = result.dry_run
+    prereqs = result.prerequisite_patches or []
+    fix_patch = result.fix_patch
+    recs = result.recommendations or []
+
+    # ── 1. 分析流程 (workflow) ────────────────────────────────
+    workflow = []
+
+    # Step 1: CVE 信息
+    if cve_info:
+        fix_id = cve_info.fix_commit_id or "未知"
+        intro_id = cve_info.introduced_commit_id or "未知"
+        workflow.append(
+            f"1. 获取 CVE 信息: 社区修复 commit 为 {fix_id[:12]}"
+            + (f", 漏洞引入 commit 为 {intro_id[:12]}"
+               if intro_id != "未知" else ""))
+
+    # Step 2: 获取补丁
+    if fix_patch:
+        workflow.append(
+            f"2. 获取社区修复补丁: \"{fix_patch.subject}\", "
+            f"涉及 {len(fix_patch.modified_files)} 个文件 "
+            f"({', '.join(fix_patch.modified_files[:4])})")
+
+    # Step 3: 引入检测
+    if result.introduced_search:
+        s = result.introduced_search
+        if s.found:
+            workflow.append(
+                f"3. 漏洞引入检测: 目标仓库中找到了引入 commit "
+                f"({s.target_commit[:12]}), "
+                f"匹配策略={s.strategy}, "
+                f"说明目标仓库受此漏洞影响")
+        else:
+            workflow.append(
+                "3. 漏洞引入检测: 未在目标仓库中找到引入 commit, "
+                "目标仓库可能不受此漏洞影响")
+    else:
+        workflow.append("3. 漏洞引入检测: 无引入 commit 信息, 默认认为受影响")
+
+    # Step 4: 修复检测
+    if result.fix_search:
+        s = result.fix_search
+        if s.found:
+            workflow.append(
+                f"4. 修复状态检测: 目标仓库中已存在修复 "
+                f"({s.target_commit[:12]}), "
+                f"匹配策略={s.strategy}")
+        else:
+            workflow.append(
+                "4. 修复状态检测: 目标仓库中未找到修复, "
+                "该漏洞尚未被修复")
+
+    # Step 5: 前置依赖
+    prereq_desc = _build_prereq_narrative(prereqs, known_prereqs)
+    workflow.append(f"5. 前置依赖分析: {prereq_desc['conclusion']}")
+
+    # Step 6: DryRun
+    dryrun_desc = _build_dryrun_narrative(dr, dryrun_detail)
+    workflow.append(f"6. 补丁试应用 (DryRun): {dryrun_desc['conclusion']}")
+
+    # ── 2. 前置依赖详细分析 ───────────────────────────────────
+    # (prereq_desc already built)
+
+    # ── 3. 补丁适用性分析 ─────────────────────────────────────
+    # (dryrun_desc already built)
+
+    # ── 4. 补丁质量评估 (仅 validate) ────────────────────────
+    quality_desc = {}
+    if is_validate and generated_vs_real:
+        quality_desc = _build_quality_narrative(
+            generated_vs_real, diff_comparison)
+
+    # ── 5. 开发者行动建议 ─────────────────────────────────────
+    action = _build_action_suggestion(
+        dr, prereqs, result.is_fixed, result.is_vulnerable)
+
+    narrative = {
+        "workflow": workflow,
+        "prerequisite_analysis": prereq_desc,
+        "patch_applicability": dryrun_desc,
+        "developer_action": action,
+    }
+    if quality_desc:
+        narrative["patch_quality_assessment"] = quality_desc
+    return narrative
+
+
+def _build_prereq_narrative(prereqs, known_prereqs=None):
+    """生成前置依赖分析的详细描述"""
+    if not prereqs:
+        return {
+            "conclusion": "无需前置补丁, 社区修复补丁可独立应用",
+            "reason": (
+                "工具分析了社区补丁涉及的所有文件, "
+                "未发现必须先合入的其他补丁。"
+                "补丁修改的函数/数据结构在目标仓库中均已存在且兼容。"),
+            "details": [],
+        }
+
+    strong = [p for p in prereqs if p.grade == "strong"]
+    medium = [p for p in prereqs if p.grade == "medium"]
+    weak = [p for p in prereqs if p.grade not in ("strong", "medium")]
+
+    parts = []
+    if strong:
+        parts.append(f"{len(strong)} 个强依赖 (必须先合入)")
+    if medium:
+        parts.append(f"{len(medium)} 个中等依赖 (建议先合入)")
+    if weak:
+        parts.append(f"{len(weak)} 个弱依赖 (可选)")
+
+    conclusion = f"发现 {len(prereqs)} 个前置补丁: {', '.join(parts)}"
+    reason = (
+        "工具通过以下方式检测前置依赖: "
+        "(a) 分析社区补丁的 removed 行是否依赖其他 commit 引入的代码; "
+        "(b) 检查补丁修改的函数/结构体是否被其他 commit 修改过; "
+        "(c) 分析相邻 hunk 的交叉引用关系。")
+
+    details = []
+    for p in prereqs[:5]:
+        d = {
+            "commit": p.commit_id[:12],
+            "subject": p.subject,
+            "grade": p.grade,
+            "reason": (
+                f"与修复补丁在 {p.overlap_hunks} 个 hunk 上有代码重叠, "
+                f"{p.adjacent_hunks} 个 hunk 相邻"
+                + (f", 共涉及函数: {', '.join(p.overlap_funcs[:3])}"
+                   if p.overlap_funcs else "")),
+        }
+        details.append(d)
+
+    # 如果有已知前置补丁 (validate 模式), 对比
+    if known_prereqs:
+        found_ids = {p.commit_id[:12] for p in prereqs}
+        known_ids = {k[:12] for k in known_prereqs}
+        matched = found_ids & known_ids
+        missed = known_ids - found_ids
+        extra = found_ids - known_ids
+        if matched:
+            reason += (
+                f"\n与实际前置补丁对比: 命中 {len(matched)} 个 "
+                f"({', '.join(matched)})")
+        if missed:
+            reason += (
+                f", 遗漏 {len(missed)} 个 "
+                f"({', '.join(missed)})")
+        if extra:
+            reason += (
+                f", 多推荐 {len(extra)} 个 "
+                f"({', '.join(extra)})")
+
+    return {
+        "conclusion": conclusion,
+        "reason": reason,
+        "details": details,
+    }
+
+
+def _build_dryrun_narrative(dr, dryrun_detail: dict):
+    """生成补丁试应用的详细描述"""
+    if not dr:
+        return {
+            "conclusion": "未执行 DryRun (可能因修复已检测到)",
+            "method": "",
+            "reason": "Pipeline 检测到修复可能已合入, 跳过了补丁试应用阶段。",
+            "can_apply_directly": None,
+        }
+
+    method = dr.apply_method or ""
+    applies = dr.applies_cleanly
+
+    method_explanations = {
+        "strict": (
+            "社区补丁可以直接应用到目标仓库, 无需任何修改。"
+            "这意味着目标仓库的代码上下文与社区主线完全一致, "
+            "补丁的所有 context 行都能精确匹配。"),
+        "ignore-ws": (
+            "社区补丁与目标仓库存在空白字符差异 (tab/space/缩进), "
+            "但代码逻辑完全一致。通过忽略空白差异后补丁可直接应用。"),
+        "context-C1": (
+            "社区补丁的上下文行与目标仓库有少量偏移 "
+            "(可能是中间有其他 commit 修改了相邻行), "
+            "通过放宽上下文匹配 (-C1) 后补丁可应用。"),
+        "C1-ignore-ws": (
+            "社区补丁同时存在上下文偏移和空白差异, "
+            "通过放宽匹配+忽略空白后补丁可应用。"),
+        "3way": (
+            "社区补丁上下文偏移较大, 通过 3-way merge 成功应用。"
+            "说明目标仓库与主线之间有较多中间修改, "
+            "但不影响此补丁的核心修复逻辑。"),
+        "regenerated": (
+            "社区补丁的上下文行在目标仓库中已显著不同, "
+            "工具在目标文件中精确定位了每个变更点, "
+            "从目标文件重新生成了上下文行, 核心 +/- 改动行完全不变。"
+            "重建后的补丁通过了 git apply 验证。"),
+        "verified-direct": (
+            "社区补丁的上下文行在目标仓库中已显著不同, "
+            "工具在目标文件中直接定位了每个变更点并验证了匹配质量, "
+            "然后在内存中直接修改文件内容生成了补丁。"
+            "此方法完全绕过 git apply, 是最健壮的适配策略。"
+            "核心 +/- 改动行完全不变。"),
+        "conflict-adapted": (
+            "社区补丁涉及的代码行在目标仓库中已被其他 commit 修改, "
+            "工具用目标文件的实际内容替换了补丁的 - 行 (删除行), "
+            "保留了 + 行 (添加行)。此补丁可应用但需人工审查。"),
+    }
+
+    if applies:
+        reason = method_explanations.get(
+            method,
+            f"通过 {method} 策略成功应用。")
+        conclusion = f"补丁可以应用 (策略: {method})"
+    else:
+        nc = len(dr.conflicting_files) if dr.conflicting_files else 0
+        nh = len(dr.conflict_hunks) if dr.conflict_hunks else 0
+        conclusion = f"补丁无法自动应用 ({nc} 个文件冲突, {nh} 个 hunk)"
+        reason = (
+            "工具尝试了多种策略 (严格匹配 → 忽略空白 → 放宽上下文 "
+            "→ 3-way merge → 上下文重建 → 直接验证 → 冲突适配) "
+            "均未成功。")
+        if dr.error_output:
+            err_short = dr.error_output[:200]
+            reason += f"\n最后的错误信息: {err_short}"
+        if nh > 0:
+            sev = {}
+            for h in dr.conflict_hunks:
+                s = h.get("severity", "L3")
+                sev[s] = sev.get(s, 0) + 1
+            sev_str = ", ".join(
+                f"{k}: {v}个" for k, v in sorted(sev.items()))
+            reason += (
+                f"\n冲突分析: {sev_str}。"
+                "其中 L1=轻微可自动适配, L2=中度需审查, "
+                "L3=重大需手动合入。")
+
+    return {
+        "conclusion": conclusion,
+        "method": method,
+        "reason": reason,
+        "can_apply_directly": applies,
+    }
+
+
+def _build_quality_narrative(gvr: dict, diff_cmp: dict):
+    """生成补丁质量评估描述 (validate 模式专用)"""
+    verdict = gvr.get("verdict", "no_data")
+    core_sim = gvr.get("core_similarity", 0)
+    source = gvr.get("compare_source", "")
+
+    verdict_desc = {
+        "identical": "完全一致 — 工具生成的补丁与真实修复的核心改动行完全相同",
+        "essentially_same": (
+            "本质相同 — 核心改动逻辑一致, "
+            "仅存在细微差异 (如注释、空行、格式)"),
+        "partially_same": (
+            "部分一致 — 部分核心改动相同, "
+            "但存在缺失或多余的修改"),
+        "different": "差异较大 — 工具生成的补丁与真实修复有本质区别",
+        "no_data": "无法评估 — 缺少对比数据",
+    }.get(verdict, verdict)
+
+    source_desc = {
+        "community_patch": (
+            "对比基准: 使用社区原始补丁 (因补丁可直接应用, "
+            "无需适配)"),
+        "adapted_patch": (
+            "对比基准: 使用工具适配后的补丁 "
+            "(工具在目标文件中重新定位并重建了补丁)"),
+        "adapted_patch(community)": (
+            "对比基准: 使用社区原始补丁作为回退 "
+            "(工具适配未产生新补丁, 行号可能不一致)"),
+    }.get(source, source)
+
+    conclusion = (
+        f"核心改动相似度 {core_sim:.0%}, "
+        f"评定: {verdict_desc}")
+    reason = source_desc
+
+    detail_parts = []
+    for fd in gvr.get("detail", []):
+        f = fd.get("file", "")
+        cs = fd.get("core_similarity", 0)
+        ga = fd.get("gen_added", 0)
+        ra = fd.get("real_added", 0)
+        ca = fd.get("common_added", 0)
+        add_gen = fd.get("add_only_in_generated", [])
+        add_real = fd.get("add_only_in_real", [])
+        line = f"{f}: 相似度={cs:.0%}, 共同添加行={ca}/{ra}"
+        if add_gen:
+            line += f", 工具多出: {add_gen[0][:50]}"
+        if add_real:
+            line += f", 真实多出: {add_real[0][:50]}"
+        detail_parts.append(line)
+
+    return {
+        "conclusion": conclusion,
+        "reason": reason,
+        "per_file": detail_parts,
+    }
+
+
+def _build_action_suggestion(dr, prereqs, is_fixed, is_vulnerable):
+    """生成面向开发者的具体行动建议"""
+    if is_fixed:
+        return {
+            "action": "无需操作",
+            "reason": "修复补丁已经合入目标仓库。",
+        }
+
+    if not is_vulnerable:
+        return {
+            "action": "建议确认",
+            "reason": (
+                "未在目标仓库中找到漏洞引入 commit, "
+                "目标仓库可能不受此漏洞影响。"
+                "建议通过代码审查确认是否需要合入修复。"),
+        }
+
+    strong_prereqs = [p for p in prereqs if p.grade == "strong"]
+
+    if dr and dr.applies_cleanly:
+        method = dr.apply_method or ""
+        if not prereqs:
+            return {
+                "action": "可直接合入",
+                "reason": (
+                    f"社区修复补丁通过 {method} 策略验证可应用, "
+                    "且无前置依赖。建议直接 cherry-pick 或 "
+                    "使用工具生成的适配补丁。"),
+            }
+        elif strong_prereqs:
+            ids = ", ".join(p.commit_id[:12] for p in strong_prereqs)
+            return {
+                "action": "需先合入前置补丁",
+                "reason": (
+                    f"修复补丁本身可应用, 但依赖 "
+                    f"{len(strong_prereqs)} 个强前置补丁 ({ids})。"
+                    "需按顺序先合入前置补丁, 再合入修复补丁。"),
+            }
+        else:
+            return {
+                "action": "可直接合入 (建议先审查前置依赖)",
+                "reason": (
+                    f"修复补丁通过 {method} 验证可应用。"
+                    f"工具发现 {len(prereqs)} 个可选前置补丁, "
+                    "非强依赖, 但建议审查是否需要。"),
+            }
+
+    if dr and not dr.applies_cleanly:
+        nc = len(dr.conflicting_files) if dr.conflicting_files else 0
+        return {
+            "action": "需人工适配",
+            "reason": (
+                f"社区修复补丁无法自动应用 "
+                f"({nc} 个文件冲突)。"
+                "建议: (1) 参考工具生成的冲突分析定位冲突点; "
+                "(2) 手动修改补丁或 cherry-pick 后解决冲突; "
+                "(3) 检查是否缺少前置补丁。"),
+        }
+
+    return {
+        "action": "需进一步分析",
+        "reason": "DryRun 未执行, 无法判断补丁是否可直接应用。",
+    }
+
+
 def _fuzzy_set_match_count(set_a: set, set_b: set,
                            threshold: float = 0.75) -> int:
     """模糊集合交集: 精确匹配优先，未匹配的用 SequenceMatcher 做模糊匹配"""
@@ -1164,6 +1563,16 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
             issues.append(
                 f"补丁仅部分一致 (核心相似度 {gvr_core:.0%})")
 
+        # ── 构建面向开发人员的详细分析过程描述 ──────────────
+        try:
+            narrative = _build_analysis_narrative(
+                result, dryrun_detail, generated_vs_real,
+                diff_comparison, known_prereqs,
+                is_validate=True)
+        except Exception as e:
+            logger.debug("构建分析描述异常: %s", e)
+            narrative = {"error": str(e)}
+
         return {
             "cve_id": cve_id, "known_fix": known_fix, "target": tv,
             "worktree_commit": rollback_hash[:16] if rollback_hash else rollback,
@@ -1171,6 +1580,7 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
             "overall_pass": overall and not issues,
             "summary": "; ".join(issues) if issues else "验证通过",
             "issues": issues,
+            "analysis_narrative": narrative,
             "fix_patch_detail": fix_patch_detail,
             "dryrun_detail": dryrun_detail,
             "known_fix_detail": known_fix_detail,
