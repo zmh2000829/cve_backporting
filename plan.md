@@ -1,10 +1,8 @@
-# 优化计划
-
-基于项目当前全部代码的审阅，总结已完成的迭代成果，并提出下一阶段优化方向。
+# 项目计划与技术原理
 
 ---
 
-## 已完成迭代总览
+## 一、项目完成状态总览
 
 ### Phase 0 — 基础模块化与核心流程 ✅
 
@@ -26,509 +24,475 @@
 | 前置依赖详情表 | Rich Table 展示 commit/score/hunk 重叠/函数列表 |
 | DryRun 冲突详情 | `--stat` 统计 + 冲突文件列表 + 错误行号 |
 | 搜索过程可视化 | `SearchStep` 记录 L1→L2→L3 每级状态/耗时 |
-| 版本映射展示 | CVE 影响版本-commit 映射表 |
 
 ### Phase 2 — 核心算法增强 ✅
 
 | 完成项 | 说明 |
 |--------|------|
 | Diff Containment 算法 | Multiset 单向包含度，解决 squash commit 场景（传统相似度 ~30% → 包含度 95%+）|
-| `use_containment` 场景区分 | 引入搜索启用包含度，修复搜索仅用双向相似度 |
-| PathMapper 跨版本路径映射 | 8 组内置规则 + 自定义扩展，`expand_files` / `normalize_for_compare` 双向翻译 |
-| 多源补丁获取 | `git.kernel.org` → `googlesource.com`（重试）→ 本地 Git，三级回退 + `_merge_patch` 互补 |
-| check-intro 命令 | 独立漏洞引入检测，三级策略不短路全展示 |
-| check-fix 命令 | 独立修复补丁检测，CVE 模式自动提取 mainline + stable backport |
-| `search_detailed` 参数化 | `use_containment` 参数控制 L3 策略语义 |
-| 增量缓存构建 | `get_latest_cached_commit` + `latest..branch` 增量拉取，rebase 自动降级 |
-| 配置清理 | 移除 `MatchingConfig` / `DependencyConfig` / `PerformanceConfig` 等无用配置类 |
+| PathMapper 跨版本路径映射 | 8 组内置规则 + 自定义扩展 |
+| 多源补丁获取 | `git.kernel.org` → `googlesource.com` → 本地 Git，三级回退 |
+| check-intro / check-fix 独立命令 | 独立漏洞引入/修复检测 |
+| 增量缓存构建 | `get_latest_cached_commit` + 增量拉取 |
 
 ### Phase 3 — 多级自适应 DryRun 引擎 ✅
 
 | 完成项 | 说明 |
 |--------|------|
-| L5 Verified-Direct | 全新策略：绕过 `git apply`，Python 内存中直接读取目标文件、定位 hunk、修改内容、`difflib.unified_diff` 生成标准 diff |
-| L3.5 Zero-Context | 零上下文 diff 策略：仅保留 `-`/`+` 行，配合 `--unidiff-zero` 应用，适用于 context 严重损坏场景 |
-| 符号/宏映射 (Symbol Mapping) | `_extract_symbol_mapping` 自动检测目标文件中的宏/常量重命名（如 `HFSPLUS_UNICODE_MAX_LEN → HFSPLUS_MAX_STRLEN`），`_apply_symbol_mapping` 将映射应用到 `+` 行 |
-| 缩进适配 (Indentation Adaptation) | `_adapt_indentation` 检测 tab↔space 差异，自动调整 `+` 行缩进风格以匹配目标文件 |
-| 空白容忍变体 | L0/L1 各增加 `--ignore-whitespace` 变体（`ignore-ws`、`C1-ignore-ws`），共 5 个快速尝试选项 |
-| 多 hunk 累积偏移修正 | `_regenerate_patch` 跟踪 `cum_delta`，正确计算后续 hunk 的 `+new_start` 行号 |
-| `_ensure_adapted_patch` | L0-L2 成功后也尝试 L5→L3 生成 `adapted_patch`，确保输出补丁行号正确 |
-| Blob Hash 清理 | `_strip_index_lines` 移除 `index <hash>..<hash>` 行，避免目标仓库无法解析 |
+| L0-L4 六级自适应 | strict → C1 → 3way → regenerated → conflict-adapted |
+| L5 Verified-Direct | 绕过 git apply，内存级直接验证 |
+| L3.5 Zero-Context | 零上下文 diff，仅保留 ±行 |
+| 符号/宏映射 | 自动检测重命名并替换 |
+| 缩进适配 | tab↔space 自动调整 |
 
 ### Phase 4 — 批量验证与 CVE 级聚合 ✅
 
 | 完成项 | 说明 |
 |--------|------|
-| `batch-validate` 命令 | 从 JSON 加载 CVE 数据，批量运行 `validate`，实时 JSON 报告输出 |
-| `--offset` / `--limit` 参数 | 支持分页执行：从第 N 个起取 M 个 CVE |
-| CVE 级聚合 | 一个 CVE 有多个 `hulk_fix_patchs` 时，自动识别主修复 vs 前置补丁，以 CVE 为维度统计 |
-| 重试机制 | 未生成 `adapted.patch` 时自动重试最多 3 次（`_MAX_RETRIES`） |
-| 前置补丁交叉验证 | `prereq_cross_validation` 对比工具推荐的前置依赖与 JSON 中已知的 `hulk_fix_patchs`，计算召回率 |
-| 实时 JSON 报告 | 每处理完一个 CVE 立即写入 `batch_validate_*.json`，含 `progress`/`passed`/`failed`/`errors` |
-| JSON 提供 mainline 信息 | 直接使用 JSON 中的 `mainline_fix_patchs` / `mainline_import_patchs`，跳过 MITRE 爬取加速 |
-| `validate` 支持 `--mainline-fix` / `--mainline-intro` | 单条验证也可直接指定社区修复/引入 commit，跳过爬取 |
+| batch-validate 命令 | 从 JSON 批量运行 validate，实时 JSON 报告 |
+| CVE 级聚合 | 自动识别主修复 vs 前置补丁 |
+| 前置补丁交叉验证 | 工具推荐 vs 已知真值的 Precision/Recall |
 
-### Phase 5 — 分析过程可视化 (Analysis Narrative) ✅
+### Phase 5 — 分析过程可视化 ✅
 
 | 完成项 | 说明 |
 |--------|------|
-| `_build_analysis_narrative` | 生成结构化 JSON 叙述：`workflow` / `prerequisite_analysis` / `patch_applicability` / `patch_quality_assessment` / `developer_action` |
-| 集成到 `analyze` 命令 | 输出 JSON 包含 `analysis_narrative` 字段 |
-| 集成到 `validate` / `batch-validate` | 验证模式额外包含 `patch_quality_assessment`（生成补丁 vs 真实修复对比） |
-| 辅助叙述函数 | `_build_prereq_narrative` / `_build_dryrun_narrative` / `_build_quality_narrative` / `_build_action_suggestion` |
+| Analysis Narrative | 结构化 JSON 叙述工具的分析逻辑和结论 |
+| 集成 validate / batch-validate | 验证模式额外包含补丁质量评估 |
 
-### Phase 6 — Validate 模式修复与增强 ✅
+### Phase 6 — Validate 模式修复 ✅
 
 | 完成项 | 说明 |
 |--------|------|
-| `force_dryrun` 参数 | `Pipeline.analyze(force_dryrun=True)` 确保 validate 模式下 DryRun 始终执行，不因 worktree 共享 git 对象库的误判而提前退出 |
-| `fix_correctly_absent` 修正 | 改用 `git merge-base --is-ancestor known_fix HEAD` 直接在 worktree 中验证，替代 `subject_match` 避免共享对象库导致的假阳性 |
-| 补丁比对逻辑修正 | `generated_vs_real` 比对正确识别 `verified-direct` 为再生成方法 |
+| force_dryrun | 确保 validate 模式下 DryRun 始终执行 |
+| worktree 假阳性修正 | `git merge-base --is-ancestor` 替代 subject_match |
+
+### Phase 7 — v2.0 深度分析能力 ✅
+
+| 完成项 | 说明 |
+|--------|------|
+| 统一 LLM 客户端 | `LLMClient` 封装 chat/chat_json，确定性兜底 |
+| VulnAnalysisAgent | 漏洞类型分类、根因分析、触发路径、检测方法 |
+| CommunityAgent | lore.kernel.org + bugzilla + CVE 引用链接收集 |
+| PatchReviewAgent | 函数映射、调用拓扑、数据结构检测、安全模式检视 |
+| RiskBenefitAnalyzer | 四维量化 + 文字等级描述（无裸数值） |
+| MergeAdvisorAgent | 规则引擎 + 关联补丁完整分析 + 检视 checklist |
+| 关联补丁完整分析 | 前置/后置补丁无论有无都给出分析理由和结论 |
+| --deep 标志集成 | analyze / validate / batch-validate 均支持 --deep |
+| C 函数名提取修复 | 跳过 static/int/void 等噪声词，正确提取函数名 |
+| TUI 面板增强 | 关联补丁分析面板、风险收益文字描述面板 |
 
 ---
 
-## P0 — 验证框架与准确度度量 ✅ 已完成
+## 二、核心技术原理：关联补丁发现逻辑
 
-### 核心问题
+> 这是分析人员最关心的问题：工具怎么判断一个补丁需不需要先合入其他补丁？
+> 没有关联补丁的时候，凭什么说"不需要"？
 
-工具对"未修复 CVE"给出的前置依赖推荐**无法验证准确性**，因为只有已修复的 CVE 才有分析人员真实合入的 patch 作为真值。需要一套机制：**利用已修复 CVE 反向验证工具输出，量化工具的置信度。**
+### 2.1 什么是关联补丁
 
-### 实现状态
+在 Linux 内核 CVE 修复的回合 (backporting) 场景中，"关联补丁"指的是：
 
-**已完成（方案 A: git worktree）**，验证通过：
+- **前置补丁 (Prerequisite Patch)**：修复补丁依赖的、必须先合入的其他补丁。缺少它们，修复补丁可能无法应用、无法编译、或产生语义错误。
+- **后置补丁 (Post Patch)**：修复补丁合入之后，上游社区对同一修复的追加修正或增强。
 
-- `validate` 命令：基于 `git worktree add --detach` 创建修复前工作区，运行完整 Pipeline，对比修复检测/引入检测/DryRun/前置依赖
-- `benchmark` 命令：从 YAML 文件批量验证，汇总 Precision/Recall/F1/搜索策略分布
-- `render_validate_report` / `render_benchmark_report` Rich 面板渲染
-- 前置依赖比较支持 ID 精确匹配 + Subject 相似度匹配（80% 阈值）
-- CVE 数据不完整时正确识别并报告 "CVE上游数据不完整"
-- **实测验证**：CVE-2024-26633 (ip6_tunnel) 全部检查项 PASS（修复检测 ✔、引入检测 L1 ✔、DryRun ✔）
+前置补丁产生的根本原因是：**上游主线 (mainline) 和目标内核版本之间的代码已经产生了差异**。上游的修复补丁是基于最新主线写的，它默认周围的代码是最新状态。如果目标版本缺少某些中间改动，修复补丁就可能：
 
----
+1. **文本层面冲突** — 补丁要删除的代码行在目标版本中不存在（已被其他补丁修改过），或要添加代码的上下文不匹配
+2. **编译层面失败** — 补丁引用了新的数据结构字段、新的 API 函数、新的宏定义，这些是由前置补丁引入的
+3. **语义层面错误** — 补丁能应用也能编译，但逻辑不正确，因为它假设了前置补丁已经改变的行为
 
-### P0.1 — `validate` 命令：基于已修复 CVE 的回退验证
+### 2.2 前置补丁发现算法
 
-**场景：** 选取一个已修复的 CVE，将仓库回退到修复前状态，运行工具分析，将工具推荐的结果与**真实合入记录**进行对比。
-
-#### 核心设计
+工具通过以下流程检测前置补丁（`agents/dependency.py`）：
 
 ```
 输入:
-  --cve CVE-2024-26633
-  --target 5.10-hulk
-  --known-fix <本地仓库中实际合入修复的 commit ID>
-  --known-prereqs <实际先合入的前置 commit 列表> (可选, 逗号分隔)
+  - fix_patch: 社区修复补丁 (含 diff、修改的文件列表、commit message)
+  - cve_info: CVE 信息 (含引入 commit、修复 commit)
+  - target_version: 目标内核分支
 
-执行流程:
-  ┌────────────────────────────────────────────────┐
-  │ Step 1: 验证 known-fix 存在于目标分支           │
-  │         git merge-base --is-ancestor            │
-  └──────────────┬─────────────────────────────────┘
-                 ▼
-  ┌────────────────────────────────────────────────┐
-  │ Step 2: 创建回退工作区                          │
-  │   方案A: git worktree add /tmp/validate-xxx     │
-  │          known_fix~1                            │
-  │   方案B: 虚拟HEAD (修改搜索范围为 known_fix~1)   │
-  └──────────────┬─────────────────────────────────┘
-                 ▼
-  ┌────────────────────────────────────────────────┐
-  │ Step 3: 在"修复前"状态运行完整分析              │
-  │   Crawler → Analysis → Dependency → DryRun      │
-  │   预期:                                         │
-  │     - 修复搜索应返回"未合入"                    │
-  │     - 引入搜索应返回"已引入"(如有引入commit)    │
-  │     - Dependency 给出前置依赖列表               │
-  │     - DryRun 检测补丁是否可干净应用             │
-  └──────────────┬─────────────────────────────────┘
-                 ▼
-  ┌────────────────────────────────────────────────┐
-  │ Step 4: 对比工具输出 vs 真实合入记录            │
-  │   对比项见下方"度量指标"                       │
-  └──────────────┬─────────────────────────────────┘
-                 ▼
-  ┌────────────────────────────────────────────────┐
-  │ Step 5: 清理 worktree / 恢复状态               │
-  └────────────────────────────────────────────────┘
+                    ┌─────────────────────────────────┐
+                    │ Step 1: 确定搜索范围 (时间窗口)    │
+                    └──────────┬──────────────────────┘
+                               ▼
+                    ┌─────────────────────────────────┐
+                    │ Step 2: 收集候选 commit           │
+                    │   git log --follow 修改同文件     │
+                    └──────────┬──────────────────────┘
+                               ▼
+                    ┌─────────────────────────────────┐
+                    │ Step 3: 排除已知 commit           │
+                    │   (fix commit / intro commit /   │
+                    │    Fixes: 标签引用)               │
+                    └──────────┬──────────────────────┘
+                               ▼
+                    ┌─────────────────────────────────┐
+                    │ Step 4: Hunk 级精细分析           │
+                    │   逐个候选 ←→ fix_patch 对比     │
+                    └──────────┬──────────────────────┘
+                               ▼
+                    ┌─────────────────────────────────┐
+                    │ Step 5: 评分与分级               │
+                    │   strong / medium / weak         │
+                    └─────────────────────────────────┘
 ```
 
-#### 实现方案对比
+#### Step 1: 时间窗口限定
 
-| 方案 | 原理 | 优点 | 缺点 |
-|------|------|------|------|
-| **A: git worktree (推荐)** | `git worktree add` 在 `known_fix~1` 创建轻量工作区，指向修复前状态 | 非破坏性、可并行、现有代码无需改动（仅改 config 路径） | 需要额外磁盘空间（但 worktree 共享 .git 对象库，开销小）；缓存需为 worktree 单独构建 |
-| **B: 虚拟HEAD** | `GitRepoManager` 增加 `effective_head` 参数，所有 `git log branch` 替换为 `git log known_fix~1` | 无额外磁盘、无需新缓存 | 侵入性强，需修改 `search_by_subject`/`search_by_files`/`find_commit_by_id` 等所有搜索方法；缓存含修复后 commit 需过滤 |
-| **C: checkout 回退** | `git checkout known_fix~1` 后运行，结束后 `checkout` 回来 | 最简单 | 破坏性操作、不能并行、中断后需手动恢复 |
-
-**推荐方案 A（git worktree）**，理由：
-- 现有 Pipeline / Agent 代码完全不需要改动
-- 只需要在 `validate` 命令中：创建 worktree → 构造新 config 指向 worktree 路径 → 调用现有 Pipeline → 比对结果 → 清理
-- worktree 共享 `.git` 对象库，创建和删除都是秒级
-
-#### CLI 设计
-
-```bash
-# 单个 CVE 验证
-python cli.py validate \
-  --cve CVE-2024-26633 \
-  --target 5.10-hulk \
-  --known-fix abc123def456 \
-  --known-prereqs "commit1,commit2,commit3"
-
-# 批量验证（从 YAML 文件）
-python cli.py benchmark \
-  --file benchmarks.yaml \
-  --target 5.10-hulk
-```
-
----
-
-### P0.2 — `benchmark` 命令：批量准确度度量
-
-**场景：** 收集 N 个已修复 CVE 的真实合入记录，批量运行回退验证，计算工具整体准确度。
-
-#### 基准数据集格式 (`benchmarks.yaml`)
-
-```yaml
-benchmarks:
-  - cve_id: CVE-2024-26633
-    known_fix_commit: abc123def456       # 本地仓库中真实修复的 commit
-    known_prereqs:                       # 可选: 真实先合入的前置 commit
-      - 111222333444
-      - 555666777888
-    notes: "ip6_tunnel 漏洞, 分析人员实际合入了2个前置补丁"
-
-  - cve_id: CVE-2024-50154
-    known_fix_commit: def456789012
-    known_prereqs: []                    # 空列表 = 直接合入无前置
-    notes: "可直接 cherry-pick, 无冲突"
-
-  - cve_id: CVE-2025-71235
-    known_fix_commit: 789012abc345
-    # 不提供 known_prereqs = 只验证搜索准确性, 不验证依赖
-```
-
-#### 度量指标体系
-
-```
-单个 CVE 验证指标:
-┌─────────────────────────────────────────────────────────────┐
-│ 1. 引入检测                                                 │
-│    intro_correct: 工具是否正确识别"漏洞已引入"               │
-│    intro_commit_match: 引入commit定位是否匹配(L1/L2/L3命中)  │
-│                                                             │
-│ 2. 修复检测 (回退后)                                        │
-│    fix_correctly_absent: 在修复前状态是否正确返回"未合入"    │
-│    (这一项应该100%正确, 否则说明回退机制有bug)               │
-│                                                             │
-│ 3. 前置依赖 (需提供 known_prereqs)                          │
-│    precision = |推荐 ∩ 真实| / |推荐|  (推荐中有多少是对的) │
-│    recall    = |推荐 ∩ 真实| / |真实|  (真实的有多少被找到)  │
-│    grade_accuracy: 强依赖是否确实是真实需要的                 │
-│    false_positives: 工具推荐但实际不需要的 commit 列表       │
-│    false_negatives: 实际需要但工具未推荐的 commit 列表       │
-│                                                             │
-│ 4. DryRun 准确性                                            │
-│    conflict_prediction: 在修复前状态,                        │
-│      若DryRun报告冲突 → 验证是否确实需要前置补丁             │
-│      若DryRun报告干净 → 验证是否确实可以直接合入             │
-└─────────────────────────────────────────────────────────────┘
-
-批量汇总指标:
-┌─────────────────────────────────────────────────────────────┐
-│ 引入检测准确率 = 正确识别引入的CVE数 / 总CVE数              │
-│ 修复检测准确率 = 正确返回"未合入"的CVE数 / 总CVE数          │
-│ 前置依赖平均精确率 (Avg Precision)                          │
-│ 前置依赖平均召回率 (Avg Recall)                             │
-│ 前置依赖 F1-Score = 2 × P × R / (P + R)                    │
-│ DryRun 预测准确率                                           │
-│ 各级搜索命中率分布 (L1/L2/L3/未命中)                       │
-└─────────────────────────────────────────────────────────────┘
-```
-
-#### CLI 输出设计
-
-```
-╭──────────────────── Benchmark Report ────────────────────╮
-│                                                          │
-│  基准集: 12 个 CVE, 目标: 5.10-hulk                      │
-│                                                          │
-│  引入检测准确率:      11/12  (91.7%)                     │
-│  修复检测准确率:      12/12 (100.0%)                     │
-│  前置依赖精确率:       8/10  (80.0%)                     │
-│  前置依赖召回率:       7/10  (70.0%)                     │
-│  前置依赖 F1:                (74.4%)                     │
-│  DryRun 预测准确率:    9/12  (75.0%)                     │
-│                                                          │
-│  搜索策略分布:                                           │
-│    L1 命中: 3 (25%)  L2 命中: 7 (58%)                    │
-│    L3 命中: 1 (8%)   未命中: 1 (8%)                      │
-│                                                          │
-╰──────────────────────────────────────────────────────────╯
-
-╭─ Per-CVE Detail ─────────────────────────────────────────╮
-│ # │ CVE              │ Intro │ Fix │ Prec │ Recall│ DryRun│
-│ 1 │ CVE-2024-26633   │  ✔    │  ✔  │ 100% │  67%  │  ✔   │
-│ 2 │ CVE-2024-50154   │  ✔    │  ✔  │ 100% │ 100%  │  ✔   │
-│ 3 │ CVE-2025-71235   │  ✘    │  ✔  │  -   │   -   │  ✘   │
-│ ...                                                      │
-╰──────────────────────────────────────────────────────────╯
-```
-
-#### 对比逻辑核心算法
+如果漏洞的引入 commit (introduced commit) 已知，则只搜索**引入 commit 之后**的 commit。
+理由：引入 commit 之前的修改不可能是修复补丁的前置依赖，因为修复补丁针对的是引入 commit 之后的代码状态。
 
 ```python
-def compare_prereqs(recommended: List[str], actual: List[str]) -> dict:
-    """
-    recommended: 工具推荐的前置 commit ID 列表
-    actual:      真实合入的前置 commit ID 列表
-    比较时使用 short_id (前12位) 匹配
-    """
-    rec_set = {c[:12] for c in recommended}
-    act_set = {c[:12] for c in actual}
-
-    tp = rec_set & act_set          # 正确推荐
-    fp = rec_set - act_set          # 误报 (推荐了但实际不需要)
-    fn = act_set - rec_set          # 漏报 (需要但未推荐)
-
-    precision = len(tp) / len(rec_set) if rec_set else 1.0
-    recall = len(tp) / len(act_set) if act_set else 1.0
-    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
-
-    return {
-        "precision": precision,
-        "recall": recall,
-        "f1": f1,
-        "true_positives": sorted(tp),
-        "false_positives": sorted(fp),
-        "false_negatives": sorted(fn),
-    }
+# 确定时间窗口起点
+if intro_search and intro_search.target_commit:
+    after_ts = intro_commit_timestamp  # 从引入时间开始
 ```
 
-#### 实现步骤拆解
+#### Step 2: 收集候选 commit
 
-| 步骤 | 内容 | 状态 |
-|------|------|------|
-| 0.1 | `GitRepoManager` 增加 `create_worktree` / `remove_worktree` 方法 | ✅ 完成 |
-| 0.2 | `cli.py` 新增 `validate` 命令，单 CVE 回退验证 + 对比报告 | ✅ 完成 |
-| 0.3 | `cli.py` 新增 `benchmark` 命令，批量验证 + 汇总统计 | ✅ 完成 |
-| 0.4 | `core/ui.py` 新增 `render_validate_report` / `render_benchmark_report` | ✅ 完成 |
-| 0.5 | 提供 `benchmarks.example.yaml` 示例 + 文档更新 | ✅ 完成 |
-| 0.6 | 收集首批 5-10 个已修复 CVE 构建初始基准集 | 需业务配合 |
+在目标分支上执行 `git log`，查找**修改了同一组文件**的 commit：
 
-#### 已验证的技术决策
+```python
+intervening = git_mgr.search_by_files(
+    modified_files,       # fix_patch 涉及的文件 (+ 路径映射扩展)
+    target_version,       # 目标分支
+    limit=50,             # 最多 50 个候选
+    after_ts=after_ts,    # 时间窗口
+    no_merges=True,       # 排除 merge commit
+)
+```
 
-1. **worktree 缓存策略**：worktree 使用 `use_cache=False`，避免缓存污染。单次验证约 30-40s，性能可接受
-2. **分支指定**：worktree 内 `branch="HEAD"` 确保 `git merge-base --is-ancestor` 正确排除修复后 commit
-3. **回滚点计算**：无 prereqs 时用 `known_fix~1`；有 prereqs 时自动找最早 prereq 的父节点
-4. **前置依赖比较**：同时使用 ID 前缀匹配 (12 chars) 和 Subject 相似度匹配 (≥80%)，覆盖 cherry-pick ID 偏移场景
-5. **CVE 数据缺失处理**：MITRE API 无 fix commit 时标记 "CVE上游数据不完整" 而非误报 FAIL
+- **路径映射** (`PathMapper`)：内核代码经常重命名路径（如 `drivers/usb/core/` → `drivers/usb/common/`），工具通过 8 组内置映射规则 + 自定义扩展，将一个文件路径展开为一组等价路径来搜索
+- **排除大重构**：修改超过 20 个文件的 commit 直接跳过，这类通常是 tree-wide 重构而非功能相关的前置补丁
+
+#### Step 3: 排除已知 commit
+
+从候选中排除：
+- 修复 commit 本身
+- 引入 commit 本身
+- Fixes: 标签引用的 commit（这些是修复补丁的修复目标，不是前置依赖）
+
+#### Step 4: Hunk 级精细分析
+
+这是核心算法。对每个候选 commit，提取其 diff 的 hunk 信息，与 fix_patch 的 hunk 进行**行范围交叉比对**：
+
+```python
+# 每个 hunk 有: file, old_start, old_end, new_start, new_end
+# 两种重叠判定:
+#   直接重叠: 两个 hunk 的行范围在同一文件中有交集
+#   相邻重叠: 行范围在 ±50 行内 (ADJACENT_MARGIN = 50)
+
+for hunk_a in fix_hunks:
+    for hunk_b in candidate_hunks:
+        if 同一文件:
+            if 行范围直接相交:
+                direct_overlaps += 1    # 强信号: 候选补丁修改了修复补丁同一段代码
+            elif 行范围在 ±50 行内:
+                adjacent_overlaps += 1  # 中信号: 修改了相邻代码区域
+```
+
+同时提取函数级重叠：
+
+```python
+func_overlap = fix_functions ∩ candidate_functions
+# 两个补丁修改了同一个函数 → 强信号
+```
+
+#### Step 5: 评分与三级分类
+
+```
+评分公式:
+  score  = min(direct_overlaps × 0.3, 0.6)     # hunk 直接重叠权重最高
+         + min(adjacent_overlaps × 0.1, 0.2)    # 相邻重叠次之
+         + min(len(func_overlap) × 0.15, 0.3)   # 函数重叠
+
+分级规则:
+  strong  ← (direct_overlaps > 0 且 有函数重叠) 或 score ≥ 0.5
+  medium  ← direct_overlaps > 0 或 adjacent_overlaps > 0 或 score ≥ 0.2
+  weak    ← 其他 (仅同文件关联)
+```
+
+**strong (强依赖)** 的含义：候选补丁修改了与修复补丁**完全相同的代码行和函数**。这意味着修复补丁假设这些代码行处于候选补丁修改后的状态。不先合入该候选补丁，修复补丁大概率无法正确应用。
+
+**medium (中依赖)** 的含义：候选补丁修改了修复补丁**附近的代码**（同文件、相邻行）。虽然不直接阻断修复补丁的应用，但可能影响上下文匹配或功能完整性。
+
+**weak (弱关联)** 的含义：仅修改了同一文件，没有行级或函数级重叠。通常不影响合入，但提供了上下文信息。
+
+### 2.3 "无前置补丁"的判定逻辑与解释
+
+当工具报告"无前置补丁"时，**不是简单地返回空结果**，而是基于以下多维度分析得出结论：
+
+#### 判定依据一：DryRun 可干净应用
+
+```
+如果修复补丁通过 DryRun (git apply) 在目标版本上干净应用:
+  → 说明补丁的删除行在目标版本中确实存在 (上下文匹配)
+  → 说明补丁的添加行可以正确插入 (行号偏移在可接受范围内)
+  → 即: 目标版本在该补丁涉及的代码区域与上游主线是一致的
+  → 结论: 不存在因"缺失前置补丁"导致的文本冲突
+```
+
+**DryRun 能干净应用是最强的"无需前置"信号**——如果中间有改动缺失，git apply 大概率会因上下文不匹配而拒绝应用。
+
+#### 判定依据二：时间窗口内无候选
+
+```
+如果 git log 搜索在时间窗口内找不到修改同文件的其他 commit:
+  → 说明从漏洞引入到当前版本，没有人动过修复补丁涉及的文件
+  → 目标版本该文件的代码与上游是相同的
+  → 结论: 无前置依赖
+```
+
+#### 判定依据三：修改范围集中
+
+```
+如果修复补丁仅修改 1-2 个文件、改动行数少:
+  → 被其他补丁交叉依赖的概率低
+  → 越是局部修改，越容易独立合入
+```
+
+#### 判定依据四：无新数据结构依赖
+
+```
+如果 PatchReview 分析发现补丁未引入新的数据结构 (struct 字段、锁变量、API):
+  → 不依赖前置补丁提供这些定义
+  → 可独立编译
+```
+
+#### 什么情况下 DryRun 能过但仍需前置补丁？
+
+这是一个重要的边界情况，工具会明确说明：
+
+> "尽管存在前置补丁，修复补丁本身可干净应用。这说明前置补丁提供的是**编译/运行时依赖** (如数据结构定义、API 声明)，而非文本层面的上下文冲突。"
+
+典型场景：前置补丁在另一个头文件中新增了一个 struct 字段定义，修复补丁引用了这个字段。`git apply` 只检查 diff 上下文匹配，不检查编译依赖，所以补丁能 apply 但编译会失败。
+
+工具通过 **Hunk 级分析 + 函数重叠检测** 来捕捉这类跨文件依赖。
+
+### 2.4 后置补丁发现逻辑
+
+后置补丁通过两种方式检测（`core/risk_benefit.py`）：
+
+#### 方式一：Fixes 标签反查
+
+```python
+git log --grep="Fixes: <fix_commit_short_id>" --all
+```
+
+内核社区规范要求，如果一个补丁修复了另一个补丁引入的问题，必须在 commit message 中添加 `Fixes:` 标签。通过反向搜索引用了修复补丁 ID 的 commit，可以找到上游对本修复的追加修正。
+
+**含义**：存在后续修复意味着社区发现原始修复不完善（如遗漏边界条件、引入回归），建议一并合入。
+
+#### 方式二：同函数后续修改
+
+```python
+git log -S<func_name> -- <file_path>  # 在 fix 之后搜索修改同函数的 commit
+```
+
+查找修复补丁涉及的函数，是否有后续 commit 也修改了这些函数。
+
+**含义**：同函数的后续修改可能是功能增强或独立修复，需评估是否影响本修复的正确性。
+
+### 2.5 "无后置补丁"的含义
+
+当报告"无后置补丁"时：
+
+> "未检测到后续关联补丁，说明该修复在上游社区是自包含的，无需额外的追加修正。"
+
+这意味着：
+1. 没有任何后续 commit 通过 `Fixes:` 标签引用本修复 → 社区没有发现本修复有问题
+2. 本修复涉及的函数在之后没有被其他安全修复修改 → 本修复是完备的
 
 ---
 
-## 当前遗留问题
+## 三、核心技术原理：补丁回合 (Backporting) 逻辑
+
+### 3.1 整体流水线
+
+```
+CVE ID + 目标内核版本
+  │
+  ├─ Stage 1: Crawler (情报收集)
+  │    ├─ 从 MITRE/NVD 获取 CVE 基本信息
+  │    ├─ 从 linux-cve-announce 提取 mainline fix commit
+  │    └─ 从 git.kernel.org / googlesource / 本地仓库获取补丁内容
+  │
+  ├─ Stage 2: Analysis (引入/修复检测)
+  │    ├─ 引入检测: 漏洞引入 commit 是否存在于目标版本 → 是否受影响
+  │    ├─ 修复检测: 修复 commit 是否已合入目标版本 → 是否已修复
+  │    └─ Stable backport 检测: 是否有该版本的官方 backport
+  │
+  ├─ Stage 3: Dependency (前置依赖分析)
+  │    └─ 如上 2.2 节所述
+  │
+  ├─ Stage 4: DryRun (多级自适应补丁试应用)
+  │    └─ 如下 3.2 节所述
+  │
+  └─ Stage 5 (可选 --deep): 深度分析
+       ├─ VulnAnalysis (漏洞类型/根因/触发)
+       ├─ PatchReview (代码走读/安全检视)
+       ├─ RiskBenefit (风险收益评估)
+       └─ MergeAdvisor (合入建议)
+```
+
+### 3.2 多级自适应 DryRun
+
+DryRun 是补丁回合的核心环节——验证社区补丁能否在目标版本上正确应用，并在可能时自动适配生成可用补丁。
+
+```
+L0: strict (git apply --check)
+ │  原始补丁直接应用，3 行上下文完全匹配
+ │  ✔ → 最高置信度，补丁可直接 cherry-pick
+ │  ✘ ↓
+L1: context-C1 (git apply -C1)
+ │  降低上下文要求到 1 行，容忍少量行偏移
+ │  ✔ → 高置信度，偏移通常是无关紧要的
+ │  ✘ ↓
+L2: 3way (git apply --3way)
+ │  三路合并，利用 git 内置冲突解决
+ │  ✔ → 中置信度，建议人工确认合并结果
+ │  ✘ ↓
+L5: verified-direct (Python 内存级)
+ │  绕过 git apply:
+ │    1. 读取目标文件内容
+ │    2. 在内存中定位每个 hunk 的精确位置
+ │    3. 应用修改 (删除行→添加行)
+ │    4. difflib.unified_diff 生成新 patch
+ │  ✔ → 中置信度，已验证每个 hunk 的语义正确性
+ │  ✘ ↓
+L3: regenerated (上下文重生成)
+ │  从目标文件中重新提取 hunk 上下文:
+ │    1. 定位 "-" 行在目标文件中的精确位置
+ │    2. 用目标文件的真实上下文替换原始上下文
+ │    3. 重新计算行号偏移
+ │    4. 生成适配后的 patch
+ │  ✔ → 中低置信度，上下文已重写
+ │  ✘ ↓
+L3.5: zero-context (零上下文)
+ │  极端策略: 删除所有上下文行，仅保留 +/- 行
+ │  配合 --unidiff-zero 应用
+ │  ✔ → 低置信度，仅适用上下文严重损坏的场景
+ │  ✘ ↓
+L4: conflict-adapted (冲突适配)
+ │  逐 hunk 分析冲突原因:
+ │    - 符号/宏重命名 → 自动映射替换
+ │    - 缩进风格差异 → 自动适配
+ │    - 行偏移 → 重新定位
+ │  ✔ → 低置信度，需人工审查适配结果
+ │  ✘ ↓
+失败 → 报告冲突详情，建议人工处理
+```
+
+### 3.3 什么时候需要看前置补丁，什么时候不需要
+
+| 场景 | 是否需要前置 | 原因 |
+|------|-------------|------|
+| DryRun strict 通过 + 无前置补丁检出 | **不需要** | 补丁可直接应用，代码上下文完全一致 |
+| DryRun 通过 (非 strict) + 无前置 | **基本不需要** | 有少量行偏移但已自动适配，不影响正确性 |
+| DryRun 通过 + 有前置补丁检出 | **需要评估** | 补丁文本能应用，但可能依赖前置补丁的编译期/运行时改动 |
+| DryRun 失败 + 有强依赖前置 | **需要** | 冲突原因可能是缺少前置补丁的代码改动 |
+| DryRun 失败 + 无前置检出 | **需人工分析** | 目标版本与上游差异太大，可能需手动适配 |
+
+**核心原则**：
+
+1. **DryRun 是最直接的判据** — 如果补丁能在目标版本上干净应用，99% 的情况不需要前置补丁
+2. **Hunk 重叠是最准确的依赖信号** — 两个补丁修改了同一段代码的同一行，几乎必然存在依赖
+3. **函数重叠是补充信号** — 修改同一函数不一定有依赖，但值得关注
+4. **"无前置"不等于没有分析** — 工具会解释为什么判定为无前置（DryRun 通过、无候选、范围集中等）
+
+---
+
+## 四、当前遗留问题
 
 ### 已解决 ✅
 
-| 原编号 | 问题 | 解决方式 |
-|--------|------|---------|
-| — | DryRun L0-L2 全败时无法生成补丁 | 新增 L5 Verified-Direct + L3.5 Zero-Context |
-| — | 宏/常量重命名导致补丁语义等价但无法应用 | 符号映射自动检测 + 替换 |
-| — | 缩进风格差异 (tab/space) 导致 git apply 拒绝 | 缩进适配算法 |
-| — | validate 模式下 DryRun 被跳过 | `force_dryrun` + `git merge-base` 修正 |
-| — | 批量验证无法以 CVE 为维度聚合 | CVE 级主修复/前置补丁识别 |
-| — | 开发者看不懂工具输出 | Analysis Narrative 结构化叙述 |
+| 问题 | 解决方式 |
+|------|---------|
+| DryRun L0-L2 全败时无法生成补丁 | 新增 L5 Verified-Direct + L3.5 Zero-Context |
+| 宏/常量重命名导致补丁无法应用 | 符号映射自动检测 + 替换 |
+| 缩进风格差异 (tab/space) 导致拒绝 | 缩进适配算法 |
+| validate 模式下 DryRun 被跳过 | `force_dryrun` 修正 |
+| 开发者看不懂工具输出 | Analysis Narrative 结构化叙述 |
+| 风险收益展示裸数值无法理解 | 改为等级标签 + 详细文字描述 |
+| 函数名提取到 static/int 等噪声词 | C 函数名智能提取 (跳过类型修饰符) |
+| LLM 返回 None 导致 strip() 崩溃 | `(content or "").strip()` 防护 |
+| 无前置补丁时不解释原因 | 关联补丁完整分析（无论有无都给理由） |
 
 ### 仍存在 ⚠️
 
-### 1. `normalize_subject` 前缀处理不够灵活
-
-**现状：** 使用固定列表 `[backport]`、`[stable]`、`backport:` 等匹配前缀，且只去除第一个命中。
-
-**问题：** 企业内核 commit 常有自定义前缀如 `[hulk]`、`[PATCH v2]`、`UPSTREAM:` 等，当前无法处理；多个前缀叠加时只去除第一个。
-
-### 2. FTS5 关键词搜索过于严格
-
-**现状：** `_cache_fts` 使用 `" AND ".join(kws)` 连接关键词。
-
-**问题：** 当 backport 对 subject 做了较大修改（删字/加字）时，AND 连接要求全部命中，容易漏掉。
-
-### 3. L3 搜索性能瓶颈
-
-**现状：** 每个候选 commit 都执行 `git show` 获取完整 diff（100 个候选 = 100 次 git show）。
-
-**问题：** 频繁的 git show 在大仓库中单次 ~50ms，批量候选时显著拖慢 L3 搜索。
-
-### 4. Stable backport 版本匹配硬编码
-
-**现状：** `_try_stable_backport` 中硬编码 `ver.startswith("5.10")`。
-
-**问题：** 当目标仓库基于 6.x 或其他版本时无法正确匹配。
-
-### 5. `verify=False` 散布于代码
-
-**现状：** `agents/crawler.py` 中 3 处 `requests.get(..., verify=False)`。
-
-**问题：** 安全风险，且未从配置项控制。
-
-### 6. 阈值硬编码
-
-**现状：** L2 阈值 `0.85`、L3 阈值 `0.70` 硬编码在 `agents/analysis.py` 中。
-
-**问题：** 不同仓库的 commit message 风格不同，阈值应可配置微调。
-
-### 7. Fixes 标签链未递归追踪
-
-**现状：** 依赖分析只提取第一层 `Fixes:` 标签引用。
-
-**问题：** 内核社区常见 A fixes B, B fixes C 的链式引用，当前只排除了直接引用。
-
-### 8. AI 补丁生成未接入 DryRun 主链路
-
-**现状：** `ai_patch_generator.py` 已实现，但 `DryRunAgent.check_adaptive` 中 L4 失败后并未自动调用 AI 生成。
-
-**问题：** L6 AI-Generated 在架构图中存在，但尚未在代码中自动触发，需手动配置。
-
-### 9. `search_reports` 在冲突分析路径为空
-
-**现状：** `_analyze_conflicts` 中 `search_reports` 固定返回 `[]`。
-
-**问题：** L4 路径的 hunk 定位过程没有详细搜索报告，调试困难。
-
+| 编号 | 问题 | 说明 |
+|------|------|------|
+| 1 | `normalize_subject` 前缀不灵活 | 企业内核自定义前缀 `[hulk]` 等无法处理 |
+| 2 | FTS5 关键词搜索过严 | AND 连接要求全部命中，backport subject 修改后易漏 |
+| 3 | L3 搜索性能瓶颈 | 100 个候选各执行 git show ~50ms |
+| 4 | Stable backport 版本匹配硬编码 | `ver.startswith("5.10")` 仅支持 5.10 |
+| 5 | `verify=False` 未配置化 | 安全风险 |
+| 6 | 阈值硬编码 | L2/L3 相似度阈值应可配置 |
+| 7 | Fixes 标签链未递归 | 仅追踪第一层引用 |
+| 8 | L6 AI 补丁未接入主链路 | 需手动配置 |
 
 ---
 
-## 下一阶段优化方向
+## 五、下一阶段优化方向
 
 ### P-Near — 搜索质量增强 (1-2 周)
 
-| 编号 | 项目 | 描述 | 复杂度 |
-|------|------|------|--------|
-| N.1 | `normalize_subject` 正则化 | 用正则 `re.sub(r'\[.*?\]', '', s)` 去除所有方括号前缀；增加 `UPSTREAM:`、`FROMLIST:` 等常见前缀；支持 config 自定义前缀列表 | 低 |
-| N.2 | FTS5 搜索改 OR + 权重 | 关键词用 OR 连接，命中越多得分越高；对前 3 个关键词给更高权重（通常是函数名/模块名）| 中 |
-| N.3 | L3 延迟 diff 获取 | 先用 `git show --stat` 预过滤（修改文件数差异过大的直接跳过），再按 subject 预排序取 top N 执行完整 diff | 中 |
-| N.4 | diff LRU 内存缓存 | `get_commit_diff` 加 `functools.lru_cache`，避免 analysis + dependency 重复获取同一 commit diff | 低 |
+| 编号 | 项目 | 复杂度 |
+|------|------|--------|
+| N.1 | `normalize_subject` 正则化 — 去除所有 `[...]` 前缀，支持配置 | 低 |
+| N.2 | FTS5 搜索改 OR + 权重 | 中 |
+| N.3 | L3 延迟 diff 获取 — `git show --stat` 预过滤 | 中 |
+| N.4 | diff LRU 内存缓存 | 低 |
 
-### P-Mid — Pipeline 通用化与质量提升 (2-4 周)
+### P-Mid — Pipeline 通用化 (2-4 周)
 
-| 编号 | 项目 | 描述 | 复杂度 |
-|------|------|------|--------|
-| M.1 | Stable backport 版本自动匹配 | 从 config 的 `branch` 字段提取版本前缀（如 `linux-5.10.y` → `5.10`），替代硬编码 | 低 |
-| M.2 | 引入 commit 缺失的降级策略 | 无引入 commit 时，使用版本范围（`affected.versions.lessThan`）做范围判定 | 中 |
-| M.3 | L6 AI 补丁生成接入 | 在 `check_adaptive` 中 L4 失败后自动调用 `AIPatchGenerator`，完成 DryRun 全链路 | 中 |
-| M.4 | `verify=False` 可配置 | 新增 `config.network.ssl_verify` 配置项 | 低 |
-| M.5 | 阈值配置化 | L2 subject 阈值、L3 diff 阈值、依赖评分阈值从 `config.yaml` 读取 | 低 |
-| M.6 | Fixes 标签链递归 | 递归追踪 `Fixes:` 引用（限深 3 层），将整条链上的 commit 加入排除列表 | 中 |
-| M.7 | L4 冲突分析搜索报告 | `_analyze_conflicts` 中记录 `search_reports`，提升 L4 路径调试能力 | 低 |
+| 编号 | 项目 | 复杂度 |
+|------|------|--------|
+| M.1 | Stable backport 版本自动匹配 | 低 |
+| M.2 | 引入 commit 缺失的降级策略 | 中 |
+| M.3 | L6 AI 补丁生成接入主链路 | 中 |
+| M.4 | `verify=False` 可配置 | 低 |
+| M.5 | 阈值配置化 | 低 |
+| M.6 | Fixes 标签链递归 (限深 3 层) | 中 |
 
 ### P-Far — 扩展能力 (1-3 月)
 
-| 编号 | 项目 | 描述 | 复杂度 |
-|------|------|------|--------|
-| F.1 | CI/CD 集成模式 | `--json` 输出格式 + 非零退出码，便于流水线集成 | 中 |
-| F.2 | 多仓库并行分析 | 同时分析多个目标版本（如 5.10-hulk 和 6.6-hulk），结果对比展示 | 高 |
-| F.3 | CVE 订阅与增量扫描 | 接入 linux-cve-announce 邮件列表或 RSS，自动触发新 CVE 分析 | 高 |
-| F.4 | Web Dashboard | 轻量 FastAPI + 前端面板，CVE 修复状态看板 | 高 |
-| F.5 | 扩大基准测试集 | 覆盖 50+ CVE 场景，建立持续回归基准 | 中 (需业务配合) |
+| 编号 | 项目 | 复杂度 |
+|------|------|--------|
+| F.1 | CI/CD 集成模式 (`--json` + 非零退出码) | 中 |
+| F.2 | 多仓库并行分析 | 高 |
+| F.3 | CVE 订阅与增量扫描 | 高 |
+| F.4 | Web Dashboard | 高 |
+| F.5 | 扩大基准测试集 50+ CVE | 中 |
 
 ---
 
-## 建议执行路径
+## 六、建议执行路径
 
 ```
 已完成 ✅:
   Phase 0-2: 基础架构 + 搜索引擎 + 路径映射 + Diff 包含度
   Phase 3:   多级 DryRun (L0-L5 + L3.5 + L4) + 符号映射 + 缩进适配
-  Phase 4:   batch-validate + CVE 级聚合 + 重试 + offset/limit
-  Phase 5:   Analysis Narrative (workflow / prereq / applicability / quality / action)
-  Phase 6:   Validate 修复 (force_dryrun / fix_correctly_absent / worktree 假阳性)
-  P0:        验证框架 (validate / benchmark / worktree 回退)
+  Phase 4:   batch-validate + CVE 级聚合 + 前置补丁交叉验证
+  Phase 5:   Analysis Narrative
+  Phase 6:   Validate 修复 (force_dryrun / worktree)
+  Phase 7:   v2.0 深度分析 (漏洞/社区/检视/风险/建议/关联补丁完整分析)
 
-近期 (P-Near, 1-2 周):
-  ├─ N.1 normalize_subject 正则化 (半天)
-  ├─ N.4 diff LRU 缓存 (半天)
-  ├─ M.1 Stable backport 版本自动匹配 (半天)
-  └─ M.4 + M.5 verify 可配置 + 阈值配置化 (半天)
+近期 (1-2 周):
+  ├─ N.1 normalize_subject 正则化
+  ├─ N.4 diff LRU 缓存
+  ├─ M.1 Stable backport 版本自动匹配
+  └─ M.4 + M.5 配置化 (verify / 阈值)
 
-中期 (P-Mid, 2-4 周):
-  ├─ N.2 FTS5 搜索改 OR + 权重
-  ├─ N.3 L3 延迟 diff 获取
-  ├─ M.3 L6 AI 补丁生成接入主链路
-  ├─ M.6 Fixes 标签链递归
-  └─ M.2 引入 commit 缺失降级策略
+中期 (2-4 周):
+  ├─ N.2 FTS5 搜索改 OR
+  ├─ N.3 L3 延迟 diff
+  ├─ M.3 L6 AI 接入主链路
+  └─ M.6 Fixes 标签链递归
 
-远期 (P-Far, 1-3 月):
-  ├─ F.1 CI/CD 集成模式
-  ├─ F.5 扩大基准测试集 50+ CVE
-  ├─ F.2 多仓库并行
-  └─ F.3 + F.4 CVE 订阅 / Web Dashboard
+远期 (1-3 月):
+  ├─ F.1 CI/CD 集成
+  ├─ F.5 基准测试集 50+ CVE
+  └─ F.2 + F.3 多仓库 / CVE 订阅
 ```
-
----
-
-## v2.0 — 深度分析能力扩展 (v1.0 tag 后)
-
-> v1.0 核心算法 (搜索引擎 / DryRun / 依赖分析) 保持不变。v2.0 在 v1 Pipeline 之上新增
-> 5 个深度分析模块，采用 **LLM 增强 + 确定性兜底** 策略：有 LLM 时深度分析，无 LLM 时
-> 输出结构化基础信息。输出集成到 JSON + TUI 报告中，无客户端页面。
-
-### v2.0 新增模块总览
-
-| 用户需求 | 实现模块 | 文件 | LLM 依赖 |
-|---------|---------|------|---------|
-| 漏洞分析 (影响/风险/利用条件/技术原因) | `VulnAnalysisAgent` | `agents/vuln_analysis.py` | 确定性分类 + LLM 深度分析 |
-| 社区演进分析 (mailist/bugzilla) | `CommunityAgent` | `agents/community.py` | 确定性爬取 + LLM 摘要 |
-| 修复补丁逻辑分析 (代码走读/触发方式) | `PatchReviewAgent` | `agents/patch_review.py` | 确定性代码解析 + LLM 走读 |
-| 前后置关联补丁 + 风险收益 | 扩展 Dependency + `RiskBenefitAnalyzer` | `core/risk_benefit.py` | 确定性检测 + LLM 评估 |
-| 合入建议与检视分析 | `MergeAdvisorAgent` | `agents/merge_advisor.py` | 确定性规则 + LLM 综合建议 |
-
-### v2.0 数据流
-
-```
-CVE ID
-  │
-  ├─ v1 Pipeline (不变): Crawler → Analysis → Dependency → DryRun
-  │
-  └─ v2 扩展 (--deep 触发):
-       ├─ CommunityAgent (lore + bugzilla + CVE refs)
-       ├─ VulnAnalysisAgent (漏洞分类 + 深度分析)
-       ├─ PatchReviewAgent (代码走读 + 调用拓扑 + 安全检视)
-       ├─ DependencyAgent 扩展 (后置补丁检测)
-       ├─ RiskBenefitAnalyzer (风险收益量化)
-       └─ MergeAdvisorAgent (汇总→合入建议)
-           │
-           ▼
-       AnalysisResultV2 → JSON 输出 + TUI 报告
-```
-
-### Sprint 1 — 基础设施
-
-| 任务 | 文件 | 说明 |
-|------|------|------|
-| 统一 LLM 客户端 | `core/llm_client.py` (新建) | `LLMClient.chat()` / `.chat_json()` 封装，替代现有两套调用方式 |
-| 新增数据模型 | `core/models.py` (修改) | `CommunityDiscussion` / `VulnAnalysis` / `PatchReview` / `MergeRecommendation` / `AnalysisResultV2` |
-| 增强 FunctionAnalyzer | `core/function_analyzer.py` (修改) | 新增 callees 提取 / 数据结构(锁/引用计数)检测 / 调用拓扑构建 |
-
-### Sprint 2 — 社区 + 漏洞分析
-
-| 任务 | 文件 | 说明 |
-|------|------|------|
-| CommunityAgent | `agents/community.py` (新建) | lore.kernel.org 搜索 + bugzilla 搜索 + CVE 引用链接提取；无 LLM 时输出原文截取 |
-| VulnAnalysisAgent | `agents/vuln_analysis.py` (新建) | 关键词规则分类漏洞类型 + LLM 输出技术根因/触发路径/利用条件/判断方法 |
-
-### Sprint 3 — 补丁检视 + 风险收益
-
-| 任务 | 文件 | 说明 |
-|------|------|------|
-| PatchReviewAgent | `agents/patch_review.py` (新建) | 确定性: 函数修改映射 + 调用拓扑 + 锁/结构体检测 + 常见漏洞模式检测；LLM: 代码走读 + 触发分析 + 安全性分析 |
-| Dependency 扩展 | `agents/dependency.py` (修改) | 新增后置补丁检测 (`Fixes:` 标签反查 + 同函数后续修改) |
-| RiskBenefitAnalyzer | `core/risk_benefit.py` (新建) | 量化合入复杂度 / 回归风险 / 变更范围 / 安全收益 |
-
-### Sprint 4 — 合入建议 + 集成
-
-| 任务 | 文件 | 说明 |
-|------|------|------|
-| MergeAdvisorAgent | `agents/merge_advisor.py` (新建) | 规则引擎判定 action + LLM 综合建议 + 检视 checklist |
-| Pipeline 集成 | `pipeline.py` (修改) | 新增 `analyze_v2()` 编排方法 |
-| CLI 集成 | `cli.py` (修改) | `--deep` 标志 + `vuln-analysis` / `community` 子命令 + JSON 输出扩展 |
-| 文档更新 | `README.md` / `docs/` | 更新架构和功能文档 |
