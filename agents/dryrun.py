@@ -255,16 +255,21 @@ class DryRunAgent:
 
         adapted = self._regenerate_patch(mapped_diff, rp_path)
         if adapted:
-            r3 = self._apply_check(adapted, rp_path, [])
-            if r3.applies_cleanly:
-                r3.apply_method = "regenerated"
-                r3.stat_output = self._get_stat(adapted, target_version)
-                r3.adapted_patch = adapted
-                r3.error_output = (
-                    "(上下文重生成成功: context 已从目标文件更新)")
-                logger.info("[DryRun] 上下文重生成成功: %s",
-                            patch.commit_id[:12])
-                return r3
+            for l3_opts, l3_label in [([], "strict"),
+                                      (["-C1"], "-C1"),
+                                      (["--3way"], "3way")]:
+                r3 = self._apply_check(adapted, rp_path, l3_opts)
+                if r3.applies_cleanly:
+                    r3.apply_method = "regenerated"
+                    r3.stat_output = self._get_stat(
+                        adapted, target_version)
+                    r3.adapted_patch = adapted
+                    r3.error_output = (
+                        f"(上下文重生成成功 [{l3_label}]: "
+                        "context 已从目标文件更新)")
+                    logger.info("[DryRun] 上下文重生成成功 [%s]: %s",
+                                l3_label, patch.commit_id[:12])
+                    return r3
 
         r0.stat_output = self._get_stat(mapped_diff, target_version)
         analysis = self._analyze_conflicts(mapped_diff, rp_path)
@@ -274,20 +279,26 @@ class DryRunAgent:
             r0.search_reports = analysis["search_reports"]
 
         if analysis.get("adapted_diff"):
-            r4 = self._apply_check(analysis["adapted_diff"], rp_path, [])
-            if r4.applies_cleanly:
-                r4.apply_method = "conflict-adapted"
-                r4.stat_output = self._get_stat(
-                    analysis["adapted_diff"], target_version)
-                r4.adapted_patch = analysis["adapted_diff"]
-                r4.conflict_hunks = analysis["hunks"]
-                r4.search_reports = analysis.get("search_reports", [])
-                r4.error_output = (
-                    "(冲突适配成功: - 行替换为目标文件实际内容, "
-                    "+ 行不变, 需人工审查)")
-                logger.info("[DryRun] 冲突适配成功: %s",
-                            patch.commit_id[:12])
-                return r4
+            for l4_opts, l4_label in [([], "strict"),
+                                      (["-C1"], "-C1"),
+                                      (["--3way"], "3way")]:
+                r4 = self._apply_check(
+                    analysis["adapted_diff"], rp_path, l4_opts)
+                if r4.applies_cleanly:
+                    r4.apply_method = "conflict-adapted"
+                    r4.stat_output = self._get_stat(
+                        analysis["adapted_diff"], target_version)
+                    r4.adapted_patch = analysis["adapted_diff"]
+                    r4.conflict_hunks = analysis["hunks"]
+                    r4.search_reports = analysis.get(
+                        "search_reports", [])
+                    r4.error_output = (
+                        f"(冲突适配成功 [{l4_label}]: "
+                        "- 行替换为目标文件实际内容, "
+                        "+ 行不变, 需人工审查)")
+                    logger.info("[DryRun] 冲突适配成功 [%s]: %s",
+                                l4_label, patch.commit_id[:12])
+                    return r4
 
         # 全部失败时，按优先级保留最佳可用补丁用于 validate 对比:
         # L3 重建 > L4 冲突适配 > 社区原始补丁 (兜底)
@@ -399,23 +410,41 @@ class DryRunAgent:
         if pos is not None:
             return pos, n
 
-        # B) 用 before-context 最后一行做锚点
+        # B) 用 before-context 最后一行做锚点, 候选位置验证 removed 行
         if ctx_before:
             adj = ((hint_line + len(ctx_before) - 1)
                    if hint_line else hint_line)
-            anchor = self._find_anchor_line(
-                ctx_before[-1], file_lines, adj)
-            if anchor is not None:
-                return anchor + 1, n
+            candidates = self._find_anchor_line_candidates(
+                ctx_before[-1], file_lines, adj,
+                max_candidates=5)
+            for anchor in candidates:
+                pos = anchor + 1
+                if pos + n <= len(file_lines):
+                    actual = [l.strip() for l in
+                              file_lines[pos:pos + n]]
+                    expect = [l.strip() for l in removed]
+                    if self._line_fuzzy_score(expect, actual) >= 0.50:
+                        return pos, n
+            if candidates:
+                return candidates[0] + 1, n
 
-        # C) 用 after-context 第一行做锚点
+        # C) 用 after-context 第一行做锚点, 候选位置验证 removed 行
         if ctx_after:
             adj = ((hint_line + len(ctx_before) + n)
                    if hint_line else hint_line)
-            anchor = self._find_anchor_line(
-                ctx_after[0], file_lines, adj)
-            if anchor is not None:
-                return max(0, anchor - n), n
+            candidates = self._find_anchor_line_candidates(
+                ctx_after[0], file_lines, adj,
+                max_candidates=5)
+            for anchor in candidates:
+                pos = max(0, anchor - n)
+                if pos + n <= len(file_lines):
+                    actual = [l.strip() for l in
+                              file_lines[pos:pos + n]]
+                    expect = [l.strip() for l in removed]
+                    if self._line_fuzzy_score(expect, actual) >= 0.50:
+                        return pos, n
+            if candidates:
+                return max(0, candidates[0] - n), n
 
         # D) Level 8: 代码语义匹配 (context 被打断时的最后手段)
         if removed:
@@ -423,6 +452,26 @@ class DryRunAgent:
                 removed, file_lines, hint_line)
             if pos is not None:
                 return pos, n
+
+        # E) 单行最佳匹配: 选最具特征的 removed 行做全文搜索,
+        #    用 ctx_before/ctx_after 交叉验证
+        if removed:
+            best_line = max(removed, key=lambda l: len(l.strip()))
+            if len(best_line.strip()) >= 8:
+                offset_in_rm = removed.index(best_line)
+                candidates = self._find_anchor_line_candidates(
+                    best_line, file_lines, hint_line,
+                    window=600, max_candidates=8)
+                for cand in candidates:
+                    pos = cand - offset_in_rm
+                    if pos < 0 or pos + n > len(file_lines):
+                        continue
+                    actual = [l.strip() for l in
+                              file_lines[pos:pos + n]]
+                    expect = [l.strip() for l in removed]
+                    sim = self._line_fuzzy_score(expect, actual)
+                    if sim >= 0.60:
+                        return pos, n
 
         return None, n
 
@@ -463,7 +512,8 @@ class DryRunAgent:
         每个策略找到候选后都会用 ctx_after 做交叉验证，
         防止同名行在文件中多次出现时选错位置。
         """
-        # A) before-context: 从末尾向前迭代，跳过 trivial 行
+        # A) before-context: 从末尾向前迭代，跳过 trivial 行，
+        #    每个非 trivial 锚点尝试所有候选位置
         if ctx_before:
             for back in range(len(ctx_before)):
                 idx = len(ctx_before) - 1 - back
@@ -471,25 +521,28 @@ class DryRunAgent:
                     continue
                 adj = ((hint_line + idx)
                        if hint_line else hint_line)
-                anchor = self._find_anchor_line(
-                    ctx_before[idx], file_lines, adj)
-                if anchor is not None:
+                candidates = self._find_anchor_line_candidates(
+                    ctx_before[idx], file_lines, adj,
+                    max_candidates=5)
+                for anchor in candidates:
                     ins = anchor + 1 + back
                     if self._check_insertion_context(
                             ctx_after, file_lines, ins):
                         return ins, 0
                 break
 
-        # B) after-context: 从首行向后迭代，跳过 trivial 行
+        # B) after-context: 从首行向后迭代，跳过 trivial 行，
+        #    每个非 trivial 锚点尝试所有候选位置
         if ctx_after:
             for fwd in range(len(ctx_after)):
                 if _is_trivial_anchor(ctx_after[fwd]):
                     continue
                 adj = ((hint_line + len(ctx_before) + fwd)
                        if hint_line else hint_line)
-                anchor = self._find_anchor_line(
-                    ctx_after[fwd], file_lines, adj)
-                if anchor is not None:
+                candidates = self._find_anchor_line_candidates(
+                    ctx_after[fwd], file_lines, adj,
+                    max_candidates=5)
+                for anchor in candidates:
                     ins = anchor - fwd
                     if self._check_insertion_context(
                             ctx_after, file_lines, ins):
@@ -518,7 +571,8 @@ class DryRunAgent:
                     return pos, 0
 
         # ── 交叉验证全部失败，使用宽松回退策略 ─────────────────
-        # A-fallback) 锚点搜索不做交叉验证（覆盖面更广）
+        # A-fallback) 锚点搜索不做交叉验证，但尝试所有候选位置中
+        #   context 最佳的一个
         if ctx_before:
             for back in range(len(ctx_before)):
                 idx = len(ctx_before) - 1 - back
@@ -526,10 +580,11 @@ class DryRunAgent:
                     continue
                 adj = ((hint_line + idx)
                        if hint_line else hint_line)
-                anchor = self._find_anchor_line(
-                    ctx_before[idx], file_lines, adj)
-                if anchor is not None:
-                    return anchor + 1 + back, 0
+                candidates = self._find_anchor_line_candidates(
+                    ctx_before[idx], file_lines, adj,
+                    max_candidates=5)
+                if candidates:
+                    return candidates[0] + 1 + back, 0
                 break
 
         # E) 全 hunk 非 + 行投票
@@ -561,9 +616,22 @@ class DryRunAgent:
         在 hint 附近精确或高阈值模糊查找单行。
         优先返回离 hint 最近的匹配（而非第一个匹配）。
         """
+        candidates = self._find_anchor_line_candidates(
+            line, file_lines, hint_line, window, max_candidates=1)
+        return candidates[0] if candidates else None
+
+    def _find_anchor_line_candidates(
+            self, line: str, file_lines: List[str],
+            hint_line: Optional[int],
+            window: int = 300,
+            max_candidates: int = 5) -> List[int]:
+        """
+        返回最多 max_candidates 个匹配位置，按距离 hint 排序。
+        支持精确匹配和高阈值模糊匹配。
+        """
         ns = line.strip()
         if not ns or len(ns) < 4:
-            return None
+            return []
         hs = [l.strip() for l in file_lines]
 
         if hint_line and hint_line > 0:
@@ -576,26 +644,23 @@ class DryRunAgent:
             lo, hi = 0, len(hs)
             center = len(hs) // 2
 
-        best, best_dist = None, float("inf")
+        exact = []
         for i in range(lo, hi):
             if hs[i] == ns:
-                dist = abs(i - center)
-                if dist < best_dist:
-                    best_dist = dist
-                    best = i
-        if best is not None:
-            return best
+                exact.append((abs(i - center), i))
+        if exact:
+            exact.sort()
+            return [pos for _, pos in exact[:max_candidates]]
 
-        best_pos, best_r, best_fdist = None, 0.0, float("inf")
+        fuzzy = []
         for i in range(lo, hi):
             r = difflib.SequenceMatcher(None, ns, hs[i]).ratio()
             if r >= 0.85:
-                dist = abs(i - center)
-                if r > best_r or (r == best_r and dist < best_fdist):
-                    best_r = r
-                    best_pos = i
-                    best_fdist = dist
-        return best_pos
+                fuzzy.append((-r, abs(i - center), i))
+        if fuzzy:
+            fuzzy.sort()
+            return [pos for _, _, pos in fuzzy[:max_candidates]]
+        return []
 
     # ─── 序列定位算法 ────────────────────────────────────────────
 
@@ -607,12 +672,15 @@ class DryRunAgent:
         search_seq = expected if expected else context_lines
         if not search_seq:
             return None
-        # 保留空行, 仅去噪声行
         seq = [l for l in search_seq if not l.startswith("\\")]
         if not seq:
             return None
 
         pos = self._find_exact_sequence(seq, file_lines)
+        if pos is not None:
+            return pos
+
+        pos = self._find_normalized_sequence(seq, file_lines)
         if pos is not None:
             return pos
 
@@ -668,6 +736,23 @@ class DryRunAgent:
                 return i
         return None
 
+    @staticmethod
+    def _normalize_ws(s: str) -> str:
+        return re.sub(r'\s+', ' ', s.strip())
+
+    def _find_normalized_sequence(self, needle: List[str],
+                                  haystack: List[str]) -> Optional[int]:
+        """tab/多空格归一化后匹配，处理缩进风格差异"""
+        if not needle:
+            return None
+        n = len(needle)
+        ns = [self._normalize_ws(l) for l in needle]
+        hs = [self._normalize_ws(l) for l in haystack]
+        for i in range(len(hs) - n + 1):
+            if hs[i:i + n] == ns:
+                return i
+        return None
+
     def _find_in_function(self, needle: List[str],
                           haystack: List[str],
                           func_name: str) -> Optional[int]:
@@ -698,6 +783,9 @@ class DryRunAgent:
         pos = self._find_exact_sequence(needle, scope)
         if pos is not None:
             return func_start + pos
+        pos = self._find_normalized_sequence(needle, scope)
+        if pos is not None:
+            return func_start + pos
         pos = self._find_fuzzy_sequence(needle, scope)
         if pos is not None:
             return func_start + pos
@@ -720,6 +808,12 @@ class DryRunAgent:
 
         for i in range(lo, hi):
             if hs[i:i + n] == ns:
+                return i
+
+        ns_norm = [self._normalize_ws(l) for l in needle]
+        hs_norm = [self._normalize_ws(l) for l in haystack]
+        for i in range(lo, min(len(hs_norm) - n + 1, hi)):
+            if hs_norm[i:i + n] == ns_norm:
                 return i
 
         threshold = 0.45 if n <= 3 else 0.50
@@ -857,31 +951,44 @@ class DryRunAgent:
 
     def _regenerate_patch(self, diff_text: str,
                           repo_path: str) -> Optional[str]:
+        if not diff_text:
+            return None
         parsed = self._parse_hunks_for_regen(diff_text)
         if not parsed:
+            logger.debug("[L3] _parse_hunks_for_regen 返回空")
             return None
 
         new_parts = []
-        any_adapted = False
+        total_hunks = 0
+        adapted_hunks = 0
+        failed_detail = []
 
         for file_path, header_lines, hunks in parsed:
             resolved = self._resolve_file_path(file_path, repo_path)
             if resolved is None:
+                logger.debug("[L3] 文件路径无法解析: %s", file_path)
                 new_parts.append("\n".join(header_lines))
                 for hh, hl in hunks:
+                    total_hunks += 1
                     new_parts.append(hh)
                     new_parts.append("\n".join(hl))
+                    failed_detail.append(
+                        f"{file_path}:{hh[:40]}... (文件不存在)")
                 continue
 
             try:
                 with open(resolved, "r", encoding="utf-8",
                           errors="replace") as f:
                     target_lines = [l.rstrip("\n") for l in f.readlines()]
-            except Exception:
+            except Exception as e:
+                logger.debug("[L3] 读取文件失败 %s: %s", resolved, e)
                 new_parts.append("\n".join(header_lines))
                 for hh, hl in hunks:
+                    total_hunks += 1
                     new_parts.append(hh)
                     new_parts.append("\n".join(hl))
+                    failed_detail.append(
+                        f"{file_path}:{hh[:40]}... (读取失败)")
                 continue
 
             new_parts.append("\n".join(header_lines))
@@ -891,6 +998,7 @@ class DryRunAgent:
                 sub_hunks = _split_to_sub_hunks(orig_header, orig_lines)
 
                 for hunk_header, hunk_lines in sub_hunks:
+                    total_hunks += 1
                     hint_line = self._parse_hunk_line_hint(hunk_header)
                     func_name = self._extract_func_from_hunk(hunk_header)
                     adj_hint = ((hint_line + file_offset) if hint_line
@@ -907,13 +1015,18 @@ class DryRunAgent:
                         file_offset = actual_start - expected_start
 
                     if change_pos is None:
+                        segs = _split_hunk_segments(hunk_lines)
+                        snippet = (segs[1] or segs[2] or ["?"])
+                        failed_detail.append(
+                            f"{file_path}:L{hint_line or '?'} "
+                            f"{snippet[0][:50].strip()}")
                         new_parts.append(hunk_header)
                         new_parts.append("\n".join(hunk_lines))
                         continue
 
                     _, _, added_lines, _ = _split_hunk_segments(
                         hunk_lines)
-                    any_adapted = True
+                    adapted_hunks += 1
 
                     ctx_n = 3
                     start = max(0, change_pos - ctx_n)
@@ -939,7 +1052,13 @@ class DryRunAgent:
                         f"@@ -{start + 1},{oc} +{start + 1},{nc} @@")
                     new_parts.append("\n".join(rebuilt))
 
-        if not any_adapted:
+        logger.info("[L3] 重建结果: %d/%d hunk 已适配", adapted_hunks,
+                    total_hunks)
+        if failed_detail:
+            for d in failed_detail[:5]:
+                logger.debug("[L3] 定位失败: %s", d)
+
+        if adapted_hunks == 0:
             return None
         return "\n".join(new_parts) + "\n"
 
