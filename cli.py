@@ -635,6 +635,9 @@ def _diagnose_root_cause(diff_cmp: dict, dryrun_detail: dict,
                 "conflict-adapted": "中间 commit 修改了补丁涉及的同一行代码, "
                                     "已用目标文件实际内容替换补丁的 - 行、保留 + 行。"
                                     "适配补丁可应用但需人工审查语义正确性",
+                "verified-direct": "原始补丁 context 严重偏移, 已在目标文件中"
+                                   "直接定位变更点并验证, 完全绕过 git apply, "
+                                   "核心 +/- 改动行完全不变",
             }.get(method, f"通过 {method} 适配成功")
             causes.append(f"上下文适配: {method_desc}")
         elif applies is False:
@@ -1131,7 +1134,8 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
         elif adapted_patch and local_diff:
             generated_vs_real = _compare_generated_vs_real(
                 adapted_patch, local_diff)
-            is_regen = apply_method in ("regenerated", "conflict-adapted")
+            is_regen = apply_method in (
+                "regenerated", "conflict-adapted", "verified-direct")
             generated_vs_real["compare_source"] = (
                 "adapted_patch" if is_regen else "adapted_patch(community)")
         elif community_diff and local_diff:

@@ -5,7 +5,10 @@ Dry-Run Agent — 多级补丁试应用 + 逐 hunk 冲突分析
   Level 0 - strict:           git apply --check
   Level 1 - context-C1:       git apply --check -C1
   Level 2 - 3way:             git apply --check --3way
+  Level 5 - verified-direct:  完全绕过 git apply, Python 内存中
+                              定位 → 验证 → 修改 → difflib 生成 diff
   Level 3 - regenerated:      从目标文件重建 context (核心 +/- 不变)
+  Level 3.5 - zero-context:   零上下文重建, 消除 context 行匹配问题
   Level 4 - conflict-adapted: 用目标文件实际行替换 - 行, 保留 + 行
 
 核心定位:
@@ -249,6 +252,26 @@ class DryRunAgent:
                 return r
         r0 = first_err or DryRunResult()
 
+        # ── L5: 直接验证重建 — 完全绕过 git apply ───────────────
+        # 在 Python 内存中定位+验证+修改+difflib 生成 diff,
+        # 不依赖 git apply, 是最健壮的策略。
+        direct_diff, verified = self._regenerate_verified(
+            mapped_diff, rp_path)
+        if verified and direct_diff:
+            r5 = DryRunResult()
+            r5.applies_cleanly = True
+            r5.apply_method = "verified-direct"
+            r5.adapted_patch = direct_diff
+            r5.error_output = (
+                "(L5 直接验证成功: 变更点已在目标文件中精确定位"
+                "并验证, 绕过 git apply)")
+            r5.stat_output = self._get_stat(
+                mapped_diff, target_version) or ""
+            logger.info("[DryRun] L5 直接验证成功: %s",
+                        patch.commit_id[:12])
+            return r5
+
+        # ── L3: 上下文重生成 + git apply ─────────────────────────
         adapted = self._regenerate_patch(mapped_diff, rp_path)
         if adapted:
             for l3_opts, l3_label in [
@@ -270,7 +293,7 @@ class DryRunAgent:
                                 l3_label, patch.commit_id[:12])
                     return r3
 
-        # L3.5: 零上下文重建 — 完全消除 context 行匹配问题
+        # ── L3.5: 零上下文重建 — 消除 context 行匹配问题 ────────
         zero_ctx = self._regenerate_zero_context(mapped_diff, rp_path)
         if zero_ctx:
             for zc_opts, zc_label in [
@@ -291,6 +314,7 @@ class DryRunAgent:
                                 zc_label, patch.commit_id[:12])
                     return r35
 
+        # ── L4: 冲突分析适配 ─────────────────────────────────────
         r0.stat_output = self._get_stat(mapped_diff, target_version)
         analysis = self._analyze_conflicts(mapped_diff, rp_path)
         r0.conflict_hunks = analysis["hunks"]
@@ -323,24 +347,31 @@ class DryRunAgent:
                                 l4_label, patch.commit_id[:12])
                     return r4
 
-        # 全部失败时，按优先级保留最佳可用补丁用于 validate 对比:
-        # L3.5 零上下文 > L3 重建 > L4 冲突适配 > 社区原始补丁
-        if zero_ctx:
+        # ── 全部失败: 按优先级保留最佳可用补丁 ────────────────────
+        # L5 direct > L3.5 零上下文 > L3 重建 > L4 适配 > 社区原始
+        if direct_diff:
+            r0.adapted_patch = direct_diff
+            logger.info(
+                "[DryRun] git apply 全失败, "
+                "保留 L5 直接验证结果用于对比: %s",
+                patch.commit_id[:12])
+        elif zero_ctx:
             r0.adapted_patch = zero_ctx
             logger.info(
-                "[DryRun] 所有策略均失败, 保留 L3.5 零上下文结果: %s",
+                "[DryRun] 保留 L3.5 零上下文结果: %s",
                 patch.commit_id[:12])
         elif adapted:
             r0.adapted_patch = adapted
             logger.info(
-                "[DryRun] 所有策略均失败, 保留 L3 重建结果用于对比: %s",
+                "[DryRun] 保留 L3 重建结果用于对比: %s",
                 patch.commit_id[:12])
         elif analysis.get("adapted_diff"):
             r0.adapted_patch = analysis["adapted_diff"]
         else:
             r0.adapted_patch = mapped_diff
             logger.info(
-                "[DryRun] L3/L4 均无产出, 使用社区原始补丁作为 adapted_patch: %s",
+                "[DryRun] L3-L5 均无产出, "
+                "使用社区原始补丁作为 adapted_patch: %s",
                 patch.commit_id[:12])
 
         logger.info("[DryRun] 所有策略均失败: %s (%d 文件, %d hunk)",
@@ -350,18 +381,26 @@ class DryRunAgent:
 
     def _ensure_adapted_patch(self, result: DryRunResult,
                               diff_text: str, repo_path: str):
-        """L0/L1/L2 成功后，仍执行 L3 重建以生成 adapted_patch。
-        adapted_patch 的行号对齐目标文件，可用于 validate 的补丁本质比较。
-        若 L3 重建失败，回退使用社区原始补丁（已确认可 apply）。"""
+        """L0/L1/L2 成功后，仍生成 adapted_patch (行号对齐目标文件)。
+        优先用 L5 直接验证, 其次 L3 重建, 最后回退社区原始补丁。"""
+        try:
+            direct, ok = self._regenerate_verified(
+                diff_text, repo_path)
+            if ok and direct:
+                result.adapted_patch = direct
+                return
+        except Exception as e:
+            logger.debug("[DryRun] _ensure L5 异常: %s", e)
         try:
             adapted = self._regenerate_patch(diff_text, repo_path)
             if adapted:
                 result.adapted_patch = adapted
                 return
         except Exception as e:
-            logger.debug("[DryRun] _ensure_adapted_patch L3 重建异常: %s", e)
+            logger.debug("[DryRun] _ensure L3 异常: %s", e)
         result.adapted_patch = diff_text
-        logger.info("[DryRun] L3 重建未成功, 回退使用社区原始补丁作为 adapted_patch")
+        logger.info("[DryRun] L5/L3 重建未成功, "
+                    "回退使用社区原始补丁作为 adapted_patch")
 
     # ─── 路径映射 ─────────────────────────────────────────────────
 
@@ -1065,6 +1104,155 @@ class DryRunAgent:
             result.append(ws + body)
         return result
 
+    # ─── 直接验证重建 (L5) ─ 完全绕过 git apply ──────────────────
+
+    def _regenerate_verified(self, diff_text: str,
+                             repo_path: str
+                             ) -> Tuple[Optional[str], bool]:
+        """
+        L5: 直接验证补丁重建 — 完全绕过 git apply。
+        对每个文件：读取目标文件 → 定位 hunk → 验证匹配 → 内存中修改
+        → difflib.unified_diff 生成 diff。
+        返回 (adapted_diff_text, verified: bool)。
+        """
+        if not diff_text:
+            return None, False
+        parsed = self._parse_hunks_for_regen(diff_text)
+        if not parsed:
+            return None, False
+
+        all_diff_parts = []
+        total_hunks = 0
+        verified_hunks = 0
+        diag = []
+
+        for file_path, header_lines, hunks in parsed:
+            resolved = self._resolve_file_path(file_path, repo_path)
+            if resolved is None:
+                logger.info("[L5] 文件不存在: %s (repo=%s)",
+                            file_path, repo_path)
+                diag.append(f"  {file_path}: 文件不存在")
+                for _, hl in hunks:
+                    total_hunks += 1
+                continue
+
+            try:
+                with open(resolved, "r", encoding="utf-8",
+                          errors="replace") as f:
+                    target_lines = [l.rstrip("\n")
+                                    for l in f.readlines()]
+            except Exception as e:
+                logger.info("[L5] 读取失败 %s: %s", resolved, e)
+                diag.append(f"  {file_path}: 读取失败 {e}")
+                for _, hl in hunks:
+                    total_hunks += 1
+                continue
+
+            logger.debug("[L5] 文件已加载: %s (%d行)", file_path,
+                         len(target_lines))
+            changes = []
+            file_offset = 0
+
+            for orig_header, orig_lines in hunks:
+                sub_hunks = _split_to_sub_hunks(
+                    orig_header, orig_lines)
+
+                for hh, hl in sub_hunks:
+                    total_hunks += 1
+                    hint = self._parse_hunk_line_hint(hh)
+                    fn = self._extract_func_from_hunk(hh)
+                    adj = (hint + file_offset) if hint else hint
+
+                    pos, n_rm = self._locate_hunk(
+                        hl, target_lines, adj, fn)
+
+                    if pos is not None and hint:
+                        ctx_len = len(
+                            _split_hunk_segments(hl)[0])
+                        file_offset = (
+                            (pos - ctx_len) - (hint - 1))
+
+                    if pos is None:
+                        segs = _split_hunk_segments(hl)
+                        snippet = (segs[1] or segs[2] or ["?"])
+                        logger.info(
+                            "[L5] 定位失败: %s hint=%s "
+                            "first_line='%s'",
+                            file_path, hint,
+                            snippet[0][:70].strip())
+                        diag.append(
+                            f"  {file_path}:L{hint or '?'} "
+                            f"定位失败 '{snippet[0][:50].strip()}'")
+                        continue
+
+                    _, exp_rm, added, _ = \
+                        _split_hunk_segments(hl)
+                    actual_rm = target_lines[pos:pos + n_rm]
+
+                    if n_rm > 0:
+                        expect_s = [l.strip() for l in exp_rm]
+                        actual_s = [l.strip() for l in actual_rm]
+                        sim = self._line_fuzzy_score(
+                            expect_s, actual_s)
+                        if sim < 0.30:
+                            logger.info(
+                                "[L5] 验证不通过 sim=%.2f: "
+                                "%s pos=%d",
+                                sim, file_path, pos + 1)
+                            diag.append(
+                                f"  {file_path}:L{pos+1} "
+                                f"sim={sim:.2f} 不通过")
+                            continue
+
+                    sym_map = self._extract_symbol_mapping(
+                        exp_rm, actual_rm)
+                    if sym_map:
+                        added = self._apply_symbol_mapping(
+                            added, sym_map)
+                        logger.debug("[L5] 符号映射: %s",
+                                     sym_map)
+                    added = self._adapt_indentation(
+                        added, exp_rm, actual_rm)
+
+                    verified_hunks += 1
+                    changes.append((pos, n_rm, added))
+                    logger.debug(
+                        "[L5] hunk 定位成功: %s pos=%d "
+                        "rm=%d add=%d",
+                        file_path, pos + 1, n_rm, len(added))
+
+            if not changes:
+                continue
+
+            modified = list(target_lines)
+            for pos, n_rm, added in sorted(
+                    changes, key=lambda x: -x[0]):
+                modified[pos:pos + n_rm] = added
+
+            orig_nl = [l + "\n" for l in target_lines]
+            mod_nl = [l + "\n" for l in modified]
+            diff_lines = list(difflib.unified_diff(
+                orig_nl, mod_nl,
+                fromfile=f"a/{file_path}",
+                tofile=f"b/{file_path}",
+            ))
+
+            if diff_lines:
+                all_diff_parts.append(
+                    f"diff --git a/{file_path} b/{file_path}")
+                all_diff_parts.extend(
+                    line.rstrip("\n") for line in diff_lines)
+
+        logger.info("[L5] 直接验证: %d/%d hunk 成功",
+                    verified_hunks, total_hunks)
+        if diag:
+            for d in diag[:10]:
+                logger.info("[L5-DIAG] %s", d)
+
+        if verified_hunks == 0:
+            return None, False
+        return "\n".join(all_diff_parts) + "\n", True
+
     # ─── 上下文重生成 (L3) ────────────────────────────────────────
 
     def _regenerate_patch(self, diff_text: str,
@@ -1111,6 +1299,7 @@ class DryRunAgent:
 
             new_parts.append("\n".join(header_lines))
             file_offset = 0
+            cum_delta = 0
 
             for orig_header, orig_lines in hunks:
                 sub_hunks = _split_to_sub_hunks(orig_header, orig_lines)
@@ -1184,9 +1373,11 @@ class DryRunAgent:
                              if l.startswith(" ") or l.startswith("-"))
                     nc = sum(1 for l in rebuilt
                              if l.startswith(" ") or l.startswith("+"))
+                    new_start = start + 1 + cum_delta
                     new_parts.append(
-                        f"@@ -{start + 1},{oc} +{start + 1},{nc} @@")
+                        f"@@ -{start + 1},{oc} +{new_start},{nc} @@")
                     new_parts.append("\n".join(rebuilt))
+                    cum_delta += (len(added_lines) - n_remove)
 
         logger.info("[L3] 重建结果: %d/%d hunk 已适配", adapted_hunks,
                     total_hunks)
