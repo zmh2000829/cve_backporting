@@ -1585,12 +1585,26 @@ def cmd_batch_validate(args, config):
 
         known_prereq_commits = [p["commit"] for p in prereqs]
 
+        _MAX_RETRIES = 3
         try:
-            r = _run_single_validate(
-                config, cve_id, tv, primary["commit"],
-                known_prereq_commits,
-                git_mgr=git_mgr, show_stages=True,
-                cve_info=cve_info)
+            r = None
+            for _attempt in range(1, _MAX_RETRIES + 1):
+                r = _run_single_validate(
+                    config, cve_id, tv, primary["commit"],
+                    known_prereq_commits,
+                    git_mgr=git_mgr, show_stages=True,
+                    cve_info=cve_info)
+
+                has_patch = r.get("dryrun_detail", {}).get(
+                    "has_adapted_patch", False)
+                gvr_v = r.get("generated_vs_real", {}).get(
+                    "verdict", "no_data")
+                if has_patch or gvr_v not in ("no_data", "error"):
+                    break
+                if _attempt < _MAX_RETRIES:
+                    console.print(
+                        f"  [yellow]⟳ 未生成补丁 (verdict={gvr_v}), "
+                        f"重试 {_attempt}/{_MAX_RETRIES}...[/]")
 
             gvr = r.get("generated_vs_real", {})
             verdict = gvr.get("verdict", "no_data")
