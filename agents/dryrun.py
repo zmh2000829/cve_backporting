@@ -270,6 +270,27 @@ class DryRunAgent:
                                 l3_label, patch.commit_id[:12])
                     return r3
 
+        # L3.5: 零上下文重建 — 完全消除 context 行匹配问题
+        zero_ctx = self._regenerate_zero_context(mapped_diff, rp_path)
+        if zero_ctx:
+            for zc_opts, zc_label in [
+                    (["--unidiff-zero"], "unidiff-zero"),
+                    (["--unidiff-zero", "--ignore-whitespace"],
+                     "unidiff-zero-ign-ws"),
+                    (["--unidiff-zero", "-C1"], "unidiff-zero-C1")]:
+                r35 = self._apply_check(zero_ctx, rp_path, zc_opts)
+                if r35.applies_cleanly:
+                    r35.apply_method = "regenerated"
+                    r35.stat_output = self._get_stat(
+                        zero_ctx, target_version)
+                    r35.adapted_patch = zero_ctx
+                    r35.error_output = (
+                        f"(零上下文重建成功 [{zc_label}]: "
+                        "context 已消除, 核心 +/- 不变)")
+                    logger.info("[DryRun] L3.5 零上下文成功 [%s]: %s",
+                                zc_label, patch.commit_id[:12])
+                    return r35
+
         r0.stat_output = self._get_stat(mapped_diff, target_version)
         analysis = self._analyze_conflicts(mapped_diff, rp_path)
         r0.conflict_hunks = analysis["hunks"]
@@ -303,8 +324,13 @@ class DryRunAgent:
                     return r4
 
         # 全部失败时，按优先级保留最佳可用补丁用于 validate 对比:
-        # L3 重建 > L4 冲突适配 > 社区原始补丁 (兜底)
-        if adapted:
+        # L3.5 零上下文 > L3 重建 > L4 冲突适配 > 社区原始补丁
+        if zero_ctx:
+            r0.adapted_patch = zero_ctx
+            logger.info(
+                "[DryRun] 所有策略均失败, 保留 L3.5 零上下文结果: %s",
+                patch.commit_id[:12])
+        elif adapted:
             r0.adapted_patch = adapted
             logger.info(
                 "[DryRun] 所有策略均失败, 保留 L3 重建结果用于对比: %s",
@@ -1112,7 +1138,12 @@ class DryRunAgent:
                         failed_detail.append(
                             f"{file_path}:L{hint_line or '?'} "
                             f"{snippet[0][:50].strip()}")
-                        new_parts.append(hunk_header)
+                        if file_offset != 0 and hint_line:
+                            adj_hdr = self._adjust_hunk_header(
+                                hunk_header, file_offset)
+                            new_parts.append(adj_hdr)
+                        else:
+                            new_parts.append(hunk_header)
                         new_parts.append("\n".join(hunk_lines))
                         continue
 
@@ -1165,7 +1196,139 @@ class DryRunAgent:
 
         if adapted_hunks == 0:
             return None
+        return self._strip_index_lines("\n".join(new_parts) + "\n")
+
+    # ─── 零上下文重建 (L3.5) ─────────────────────────────────────
+
+    def _regenerate_zero_context(self, diff_text: str,
+                                 repo_path: str) -> Optional[str]:
+        """
+        零上下文补丁重建：完全不使用 context 行，仅保留 +/- 行。
+        配合 --unidiff-zero 使用，彻底消除 context 行不匹配问题。
+        适用于社区补丁与目标文件上下文差异较大但核心改动一致的场景。
+        """
+        if not diff_text:
+            return None
+        parsed = self._parse_hunks_for_regen(diff_text)
+        if not parsed:
+            return None
+
+        new_parts = []
+        total_hunks = 0
+        adapted_hunks = 0
+
+        for file_path, header_lines, hunks in parsed:
+            resolved = self._resolve_file_path(file_path, repo_path)
+            if resolved is None:
+                continue
+            try:
+                with open(resolved, "r", encoding="utf-8",
+                          errors="replace") as f:
+                    target_lines = [l.rstrip("\n")
+                                    for l in f.readlines()]
+            except Exception:
+                continue
+
+            file_hunk_parts = []
+            file_offset = 0
+            cum_delta = 0
+
+            for orig_header, orig_lines in hunks:
+                sub_hunks = _split_to_sub_hunks(
+                    orig_header, orig_lines)
+                for hh, hl in sub_hunks:
+                    total_hunks += 1
+                    hint = self._parse_hunk_line_hint(hh)
+                    fn = self._extract_func_from_hunk(hh)
+                    adj = ((hint + file_offset) if hint
+                           else hint)
+
+                    pos, n_rm = self._locate_hunk(
+                        hl, target_lines, adj, fn)
+
+                    if pos is not None and hint:
+                        ctx_len = len(
+                            _split_hunk_segments(hl)[0])
+                        file_offset = (
+                            (pos - ctx_len) - (hint - 1))
+
+                    if pos is None:
+                        continue
+
+                    _, exp_rm, added, _ = _split_hunk_segments(
+                        hl)
+                    actual_rm = target_lines[
+                        pos:pos + n_rm]
+                    sym_map = self._extract_symbol_mapping(
+                        exp_rm, actual_rm)
+                    if sym_map:
+                        added = self._apply_symbol_mapping(
+                            added, sym_map)
+                    added = self._adapt_indentation(
+                        added, exp_rm, actual_rm)
+
+                    adapted_hunks += 1
+
+                    rebuilt = []
+                    for i in range(
+                            pos,
+                            min(len(target_lines), pos + n_rm)):
+                        rebuilt.append("-" + target_lines[i])
+                    for a in added:
+                        rebuilt.append("+" + a)
+
+                    old_start = pos + 1
+                    new_start = pos + 1 + cum_delta
+                    old_count = n_rm
+                    new_count = len(added)
+                    cum_delta += (new_count - old_count)
+
+                    file_hunk_parts.append(
+                        f"@@ -{old_start},{old_count}"
+                        f" +{new_start},{new_count} @@")
+                    file_hunk_parts.append(
+                        "\n".join(rebuilt))
+
+            if file_hunk_parts:
+                clean_headers = [
+                    h for h in header_lines
+                    if not h.startswith("index ")]
+                new_parts.append("\n".join(clean_headers))
+                new_parts.extend(file_hunk_parts)
+
+        logger.info("[L3.5] 零上下文重建: %d/%d hunk",
+                    adapted_hunks, total_hunks)
+        if adapted_hunks == 0:
+            return None
         return "\n".join(new_parts) + "\n"
+
+    @staticmethod
+    def _adjust_hunk_header(header: str, offset: int) -> str:
+        m = re.match(
+            r'@@\s+-(\d+)(,\d+)?\s+\+(\d+)(,\d+)?\s*@@(.*)',
+            header)
+        if not m:
+            return header
+        old_s = int(m.group(1)) + offset
+        new_s = int(m.group(3)) + offset
+        oc = m.group(2) or ""
+        nc = m.group(4) or ""
+        fn = m.group(5) or ""
+        return f"@@ -{max(1,old_s)}{oc} +{max(1,new_s)}{nc} @@{fn}"
+
+    @staticmethod
+    def _strip_index_lines(diff_text: str) -> str:
+        """去除 index 行中的 blob hash，避免引用不存在的对象"""
+        lines = diff_text.split("\n")
+        result = []
+        for line in lines:
+            if line.startswith("index "):
+                m = re.match(r'index\s+\S+\s+(\d+)', line)
+                if m:
+                    result.append(f"index 0000000..0000000 {m.group(1)}")
+                    continue
+            result.append(line)
+        return "\n".join(result)
 
     # ─── 冲突分析 (L4) ───────────────────────────────────────────
 
