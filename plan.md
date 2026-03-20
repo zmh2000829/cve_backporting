@@ -42,6 +42,49 @@
 | 增量缓存构建 | `get_latest_cached_commit` + `latest..branch` 增量拉取，rebase 自动降级 |
 | 配置清理 | 移除 `MatchingConfig` / `DependencyConfig` / `PerformanceConfig` 等无用配置类 |
 
+### Phase 3 — 多级自适应 DryRun 引擎 ✅
+
+| 完成项 | 说明 |
+|--------|------|
+| L5 Verified-Direct | 全新策略：绕过 `git apply`，Python 内存中直接读取目标文件、定位 hunk、修改内容、`difflib.unified_diff` 生成标准 diff |
+| L3.5 Zero-Context | 零上下文 diff 策略：仅保留 `-`/`+` 行，配合 `--unidiff-zero` 应用，适用于 context 严重损坏场景 |
+| 符号/宏映射 (Symbol Mapping) | `_extract_symbol_mapping` 自动检测目标文件中的宏/常量重命名（如 `HFSPLUS_UNICODE_MAX_LEN → HFSPLUS_MAX_STRLEN`），`_apply_symbol_mapping` 将映射应用到 `+` 行 |
+| 缩进适配 (Indentation Adaptation) | `_adapt_indentation` 检测 tab↔space 差异，自动调整 `+` 行缩进风格以匹配目标文件 |
+| 空白容忍变体 | L0/L1 各增加 `--ignore-whitespace` 变体（`ignore-ws`、`C1-ignore-ws`），共 5 个快速尝试选项 |
+| 多 hunk 累积偏移修正 | `_regenerate_patch` 跟踪 `cum_delta`，正确计算后续 hunk 的 `+new_start` 行号 |
+| `_ensure_adapted_patch` | L0-L2 成功后也尝试 L5→L3 生成 `adapted_patch`，确保输出补丁行号正确 |
+| Blob Hash 清理 | `_strip_index_lines` 移除 `index <hash>..<hash>` 行，避免目标仓库无法解析 |
+
+### Phase 4 — 批量验证与 CVE 级聚合 ✅
+
+| 完成项 | 说明 |
+|--------|------|
+| `batch-validate` 命令 | 从 JSON 加载 CVE 数据，批量运行 `validate`，实时 JSON 报告输出 |
+| `--offset` / `--limit` 参数 | 支持分页执行：从第 N 个起取 M 个 CVE |
+| CVE 级聚合 | 一个 CVE 有多个 `hulk_fix_patchs` 时，自动识别主修复 vs 前置补丁，以 CVE 为维度统计 |
+| 重试机制 | 未生成 `adapted.patch` 时自动重试最多 3 次（`_MAX_RETRIES`） |
+| 前置补丁交叉验证 | `prereq_cross_validation` 对比工具推荐的前置依赖与 JSON 中已知的 `hulk_fix_patchs`，计算召回率 |
+| 实时 JSON 报告 | 每处理完一个 CVE 立即写入 `batch_validate_*.json`，含 `progress`/`passed`/`failed`/`errors` |
+| JSON 提供 mainline 信息 | 直接使用 JSON 中的 `mainline_fix_patchs` / `mainline_import_patchs`，跳过 MITRE 爬取加速 |
+| `validate` 支持 `--mainline-fix` / `--mainline-intro` | 单条验证也可直接指定社区修复/引入 commit，跳过爬取 |
+
+### Phase 5 — 分析过程可视化 (Analysis Narrative) ✅
+
+| 完成项 | 说明 |
+|--------|------|
+| `_build_analysis_narrative` | 生成结构化 JSON 叙述：`workflow` / `prerequisite_analysis` / `patch_applicability` / `patch_quality_assessment` / `developer_action` |
+| 集成到 `analyze` 命令 | 输出 JSON 包含 `analysis_narrative` 字段 |
+| 集成到 `validate` / `batch-validate` | 验证模式额外包含 `patch_quality_assessment`（生成补丁 vs 真实修复对比） |
+| 辅助叙述函数 | `_build_prereq_narrative` / `_build_dryrun_narrative` / `_build_quality_narrative` / `_build_action_suggestion` |
+
+### Phase 6 — Validate 模式修复与增强 ✅
+
+| 完成项 | 说明 |
+|--------|------|
+| `force_dryrun` 参数 | `Pipeline.analyze(force_dryrun=True)` 确保 validate 模式下 DryRun 始终执行，不因 worktree 共享 git 对象库的误判而提前退出 |
+| `fix_correctly_absent` 修正 | 改用 `git merge-base --is-ancestor known_fix HEAD` 直接在 worktree 中验证，替代 `subject_match` 避免共享对象库导致的假阳性 |
+| 补丁比对逻辑修正 | `generated_vs_real` 比对正确识别 `verified-direct` 为再生成方法 |
+
 ---
 
 ## P0 — 验证框架与准确度度量 ✅ 已完成
@@ -285,6 +328,19 @@ def compare_prereqs(recommended: List[str], actual: List[str]) -> dict:
 
 ## 当前遗留问题
 
+### 已解决 ✅
+
+| 原编号 | 问题 | 解决方式 |
+|--------|------|---------|
+| — | DryRun L0-L2 全败时无法生成补丁 | 新增 L5 Verified-Direct + L3.5 Zero-Context |
+| — | 宏/常量重命名导致补丁语义等价但无法应用 | 符号映射自动检测 + 替换 |
+| — | 缩进风格差异 (tab/space) 导致 git apply 拒绝 | 缩进适配算法 |
+| — | validate 模式下 DryRun 被跳过 | `force_dryrun` + `git merge-base` 修正 |
+| — | 批量验证无法以 CVE 为维度聚合 | CVE 级主修复/前置补丁识别 |
+| — | 开发者看不懂工具输出 | Analysis Narrative 结构化叙述 |
+
+### 仍存在 ⚠️
+
 ### 1. `normalize_subject` 前缀处理不够灵活
 
 **现状：** 使用固定列表 `[backport]`、`[stable]`、`backport:` 等匹配前缀，且只去除第一个命中。
@@ -297,7 +353,7 @@ def compare_prereqs(recommended: List[str], actual: List[str]) -> dict:
 
 **问题：** 当 backport 对 subject 做了较大修改（删字/加字）时，AND 连接要求全部命中，容易漏掉。
 
-### 3. L3 性能瓶颈
+### 3. L3 搜索性能瓶颈
 
 **现状：** 每个候选 commit 都执行 `git show` 获取完整 diff（100 个候选 = 100 次 git show）。
 
@@ -327,76 +383,83 @@ def compare_prereqs(recommended: List[str], actual: List[str]) -> dict:
 
 **问题：** 内核社区常见 A fixes B, B fixes C 的链式引用，当前只排除了直接引用。
 
+### 8. AI 补丁生成未接入 DryRun 主链路
+
+**现状：** `ai_patch_generator.py` 已实现，但 `DryRunAgent.check_adaptive` 中 L4 失败后并未自动调用 AI 生成。
+
+**问题：** L6 AI-Generated 在架构图中存在，但尚未在代码中自动触发，需手动配置。
+
+### 9. `search_reports` 在冲突分析路径为空
+
+**现状：** `_analyze_conflicts` 中 `search_reports` 固定返回 `[]`。
+
+**问题：** L4 路径的 hunk 定位过程没有详细搜索报告，调试困难。
+
+
 ---
 
 ## 下一阶段优化方向
 
-### P2 — 搜索质量增强
+### P-Near — 搜索质量增强 (1-2 周)
 
 | 编号 | 项目 | 描述 | 复杂度 |
 |------|------|------|--------|
-| 2.1 | `normalize_subject` 正则化 | 用正则 `re.sub(r'\[.*?\]', '', s)` 去除所有方括号前缀；增加 `UPSTREAM:`、`FROMLIST:` 等常见前缀；支持 config 自定义前缀列表 | 低 |
-| 2.2 | FTS5 搜索改 OR + 权重 | 关键词用 OR 连接，命中越多得分越高；对前 3 个关键词给更高权重（通常是函数名/模块名）| 中 |
-| 2.3 | L3 延迟 diff 获取 | 先用 `git show --stat` 预过滤（修改文件数差异过大的直接跳过），再按 subject 预排序取 top N 执行完整 diff | 中 |
-| 2.4 | diff LRU 内存缓存 | `get_commit_diff` 加 `functools.lru_cache`，避免 analysis + dependency 重复获取同一 commit diff | 低 |
+| N.1 | `normalize_subject` 正则化 | 用正则 `re.sub(r'\[.*?\]', '', s)` 去除所有方括号前缀；增加 `UPSTREAM:`、`FROMLIST:` 等常见前缀；支持 config 自定义前缀列表 | 低 |
+| N.2 | FTS5 搜索改 OR + 权重 | 关键词用 OR 连接，命中越多得分越高；对前 3 个关键词给更高权重（通常是函数名/模块名）| 中 |
+| N.3 | L3 延迟 diff 获取 | 先用 `git show --stat` 预过滤（修改文件数差异过大的直接跳过），再按 subject 预排序取 top N 执行完整 diff | 中 |
+| N.4 | diff LRU 内存缓存 | `get_commit_diff` 加 `functools.lru_cache`，避免 analysis + dependency 重复获取同一 commit diff | 低 |
 
-### P2 — Pipeline 通用化
-
-| 编号 | 项目 | 描述 | 复杂度 |
-|------|------|------|--------|
-| 3.1 | Stable backport 版本自动匹配 | 从 config 的 `branch` 字段提取版本前缀（如 `linux-5.10.y` → `5.10`），替代硬编码 | 低 |
-| 3.2 | 引入 commit 缺失的降级策略 | 无引入 commit 时，使用版本范围（`affected.versions.lessThan`）做范围判定，而非默认标记为受影响 | 中 |
-| 3.3 | on_stage 细粒度回调 | Crawler 区分"获取 MITRE" / "获取 patch"；Analysis L2 显示"N 个候选，比对中..."；Dependency 显示"分析第 M/N 个" | 低 |
-
-### P3 — 代码质量与健壮性
+### P-Mid — Pipeline 通用化与质量提升 (2-4 周)
 
 | 编号 | 项目 | 描述 | 复杂度 |
 |------|------|------|--------|
-| 4.1 | `verify=False` 可配置 | 新增 `config.network.ssl_verify` 配置项，默认 `true`，内网环境可关闭 | 低 |
-| 4.2 | 阈值配置化 | L2 subject 阈值、L3 diff 阈值、依赖评分阈值从 `config.yaml` 读取 | 低 |
-| 4.3 | SQLite 连接池 | 使用持久连接或 `threading.local` 线程级连接复用，减少连接开销 | 中 |
-| 4.4 | Fixes 标签链递归 | 递归追踪 `Fixes:` 引用（限深 3 层），将整条链上的 commit 加入排除列表 | 中 |
-| 4.5 | 异常处理规范化 | 消除裸 `except Exception: pass`，统一使用 `logger.debug` 记录 | 低 |
-| 4.6 | `check_commit_existence` 返回值类型化 | 返回 NamedTuple 替代裸 tuple，提升可读性 | 低 |
+| M.1 | Stable backport 版本自动匹配 | 从 config 的 `branch` 字段提取版本前缀（如 `linux-5.10.y` → `5.10`），替代硬编码 | 低 |
+| M.2 | 引入 commit 缺失的降级策略 | 无引入 commit 时，使用版本范围（`affected.versions.lessThan`）做范围判定 | 中 |
+| M.3 | L6 AI 补丁生成接入 | 在 `check_adaptive` 中 L4 失败后自动调用 `AIPatchGenerator`，完成 DryRun 全链路 | 中 |
+| M.4 | `verify=False` 可配置 | 新增 `config.network.ssl_verify` 配置项 | 低 |
+| M.5 | 阈值配置化 | L2 subject 阈值、L3 diff 阈值、依赖评分阈值从 `config.yaml` 读取 | 低 |
+| M.6 | Fixes 标签链递归 | 递归追踪 `Fixes:` 引用（限深 3 层），将整条链上的 commit 加入排除列表 | 中 |
+| M.7 | L4 冲突分析搜索报告 | `_analyze_conflicts` 中记录 `search_reports`，提升 L4 路径调试能力 | 低 |
 
-### P4 — 扩展能力
+### P-Far — 扩展能力 (1-3 月)
 
 | 编号 | 项目 | 描述 | 复杂度 |
 |------|------|------|--------|
-| 5.1 | 批量 CVE 报告 | `analyze --batch` 生成汇总 HTML/Markdown 报告，含统计图表 | 高 |
-| 5.2 | CI/CD 集成模式 | `--json` 输出格式 + 非零退出码（有未修复 CVE 时 exit 1），便于流水线集成 | 中 |
-| 5.3 | 多仓库并行 | 支持同时分析多个目标版本（如 5.10-hulk 和 6.6-hulk），结果对比展示 | 高 |
-| 5.4 | CVE 订阅与增量扫描 | 接入 linux-cve-announce 邮件列表或 RSS，自动触发新 CVE 分析 | 高 |
-| 5.5 | Web Dashboard | 轻量 FastAPI + 前端面板，展示 CVE 修复状态看板 | 高 |
+| F.1 | CI/CD 集成模式 | `--json` 输出格式 + 非零退出码，便于流水线集成 | 中 |
+| F.2 | 多仓库并行分析 | 同时分析多个目标版本（如 5.10-hulk 和 6.6-hulk），结果对比展示 | 高 |
+| F.3 | CVE 订阅与增量扫描 | 接入 linux-cve-announce 邮件列表或 RSS，自动触发新 CVE 分析 | 高 |
+| F.4 | Web Dashboard | 轻量 FastAPI + 前端面板，CVE 修复状态看板 | 高 |
+| F.5 | 扩大基准测试集 | 覆盖 50+ CVE 场景，建立持续回归基准 | 中 (需业务配合) |
 
 ---
 
 ## 建议执行路径
 
 ```
-最高优先 (P0, 1-2 周):
-  ├─ 0.1 GitRepoManager 增加 worktree 管理方法 (半天)
-  ├─ 0.2 validate 命令: 单 CVE 回退验证 + 对比报告 (2天)
-  ├─ 0.3 benchmark 命令: 批量验证 + 汇总统计 (1天)
-  ├─ 0.4 render_benchmark_report UI 渲染 (半天)
-  ├─ 0.5 benchmarks.example.yaml + 文档 (半天)
-  └─ 0.6 收集首批 5-10 个已修复 CVE 构建基准集 (需业务配合)
+已完成 ✅:
+  Phase 0-2: 基础架构 + 搜索引擎 + 路径映射 + Diff 包含度
+  Phase 3:   多级 DryRun (L0-L5 + L3.5 + L4) + 符号映射 + 缩进适配
+  Phase 4:   batch-validate + CVE 级聚合 + 重试 + offset/limit
+  Phase 5:   Analysis Narrative (workflow / prereq / applicability / quality / action)
+  Phase 6:   Validate 修复 (force_dryrun / fix_correctly_absent / worktree 假阳性)
+  P0:        验证框架 (validate / benchmark / worktree 回退)
 
-近期 (P2, 2-3 周):
-  ├─ 2.1 normalize_subject 正则化 (半天)
-  ├─ 2.4 diff LRU 缓存 (半天)
-  ├─ 3.1 Stable backport 版本自动匹配 (半天)
-  └─ 4.1 + 4.2 verify 可配置 + 阈值配置化 (半天)
+近期 (P-Near, 1-2 周):
+  ├─ N.1 normalize_subject 正则化 (半天)
+  ├─ N.4 diff LRU 缓存 (半天)
+  ├─ M.1 Stable backport 版本自动匹配 (半天)
+  └─ M.4 + M.5 verify 可配置 + 阈值配置化 (半天)
 
-中期 (P2-P3, 3-5 周):
-  ├─ 2.2 FTS5 搜索改 OR + 权重
-  ├─ 2.3 L3 延迟 diff 获取
-  ├─ 3.2 引入 commit 缺失降级策略
-  ├─ 4.4 Fixes 标签链递归
-  └─ 4.5 异常处理规范化
+中期 (P-Mid, 2-4 周):
+  ├─ N.2 FTS5 搜索改 OR + 权重
+  ├─ N.3 L3 延迟 diff 获取
+  ├─ M.3 L6 AI 补丁生成接入主链路
+  ├─ M.6 Fixes 标签链递归
+  └─ M.2 引入 commit 缺失降级策略
 
-远期 (P4):
-  ├─ 5.2 CI/CD 集成模式
-  ├─ 5.1 批量报告
-  └─ 5.4 + 5.5 CVE 订阅 / Web Dashboard
+远期 (P-Far, 1-3 月):
+  ├─ F.1 CI/CD 集成模式
+  ├─ F.5 扩大基准测试集 50+ CVE
+  ├─ F.2 多仓库并行
+  └─ F.3 + F.4 CVE 订阅 / Web Dashboard
 ```
