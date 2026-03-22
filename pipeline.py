@@ -195,6 +195,8 @@ class Pipeline:
                 result.prerequisite_patches = dep["prerequisite_patches"]
                 result.conflict_files = dep["conflict_files"]
                 result.recommendations.extend(dep["recommendations"])
+                result.dependency_details = dep.get("analysis_details")
+                
                 n_pre = len(result.prerequisite_patches)
                 if n_pre > 0:
                     n_s = sum(1 for p in result.prerequisite_patches
@@ -209,7 +211,12 @@ class Pipeline:
                     parts.append(f"共{n_pre}个")
                     _cb("dependency", "success", " / ".join(parts))
                 else:
-                    _cb("dependency", "warn", "无前置依赖")
+                    # 无前置依赖场景：显示分析范围
+                    if result.dependency_details:
+                        scope = f"候选{result.dependency_details.candidate_count}个"
+                        _cb("dependency", "success", f"无前置 ({scope})")
+                    else:
+                        _cb("dependency", "warn", "无前置依赖")
 
         # ── Step 6: DryRun (多级自适应) ──────────────────────────────
         if enable_dryrun or force_dryrun:
@@ -226,6 +233,27 @@ class Pipeline:
             result.dry_run = self.dryrun.check_adaptive(
                 dryrun_patch, target_version)
             dr = result.dry_run
+            # 回填 DryRun 结果到依赖分析详情（支持"无前置"场景的证据链）
+            if result.dependency_details is not None:
+                result.dependency_details.dryrun_baseline_passed = dr.applies_cleanly
+                result.dependency_details.dryrun_method = dr.apply_method or ""
+                # 更新拟人化叙述中的 DryRun 状态
+                narrative = result.dependency_details.analysis_narrative
+                for i, line in enumerate(narrative):
+                    if "待 DryRun Agent 验证" in line:
+                        dryrun_status = (
+                            f"通过 ({dr.apply_method})" if dr.applies_cleanly
+                            else f"未通过 (冲突 {len(dr.conflicting_files)} 个文件)"
+                        )
+                        narrative[i] = f"  结果: 空集基线 DryRun {dryrun_status}"
+                        break
+                # 如果有前置依赖但 DryRun 通过，说明实际无硬前置
+                if dr.applies_cleanly and len(result.prerequisite_patches) == 0:
+                    result.dependency_details.confidence_level = "high"
+                    result.dependency_details.no_prerequisite_reason = (
+                        f"空集基线 DryRun 通过 (method={dr.apply_method}), "
+                        "确认无硬前置依赖"
+                    )
             if dr.applies_cleanly:
                 method_labels = {
                     "strict": "可以干净应用",

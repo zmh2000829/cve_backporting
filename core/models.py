@@ -153,6 +153,26 @@ class PrerequisitePatch:
 
 
 @dataclass
+class DependencyAnalysisDetails:
+    """前置依赖分析详情（用于"无前置"场景的详细说明）"""
+    candidate_count: int = 0                    # 候选 commit 总数
+    strong_count: int = 0                       # strong 依赖数
+    medium_count: int = 0                       # medium 依赖数
+    weak_count: int = 0                         # weak 依赖数
+    time_window_start: str = ""                 # 时间窗口起点 (引入 commit 时间)
+    time_window_end: str = ""                   # 时间窗口终点 (HEAD)
+    analysis_files: List[str] = field(default_factory=list)  # 分析的文件列表
+    analysis_scope: str = ""                    # 分析范围描述
+    no_prerequisite_reason: str = ""            # 无前置的原因说明
+    confidence_level: str = "medium"            # 结论置信度: high/medium/low
+    boundary_statement: str = ""                # 边界声明 (仅对当前分支/配置成立)
+    dryrun_baseline_passed: bool = False        # 空集基线 DryRun 是否通过
+    dryrun_method: str = ""                     # DryRun 通过的方法 (strict/fuzz/3way/etc)
+    analysis_narrative: List[str] = field(default_factory=list)  # 拟人化分析过程 (5-6 条)
+    manual_review_checklist: List[str] = field(default_factory=list)  # 人工审查清单
+
+
+@dataclass
 class DryRunResult:
     """Dry-run 试应用结果"""
     applies_cleanly: bool = False
@@ -182,6 +202,7 @@ class AnalysisResult:
     conflict_files: List[str] = field(default_factory=list)
     dry_run: Optional[DryRunResult] = None
     recommendations: List[str] = field(default_factory=list)
+    dependency_details: Optional["DependencyAnalysisDetails"] = None  # v2.0 新增：依赖分析详情
 
 
 # ── v2.0 深度分析模型 ─────────────────────────────────────────────

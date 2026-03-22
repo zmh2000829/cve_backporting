@@ -184,12 +184,16 @@ def render_report(result) -> Panel:
         report_parts.append(Text(""))
         report_parts.append(_render_version_map(r.cve_info))
 
-    # 前置依赖详情表
-    if r.prerequisite_patches:
+    # 前置依赖详情表（有前置或无前置时均渲染，无前置时展示详细分析证据）
+    dep_details = getattr(r, "dependency_details", None)
+    if r.prerequisite_patches or dep_details is not None:
         report_parts.append(Text(""))
-        report_parts.append(_render_prereq_table(r.prerequisite_patches,
-                                                  fix_files=r.fix_patch.modified_files if r.fix_patch else [],
-                                                  conflict_files=r.conflict_files))
+        report_parts.append(_render_prereq_table(
+            r.prerequisite_patches,
+            fix_files=r.fix_patch.modified_files if r.fix_patch else [],
+            conflict_files=r.conflict_files,
+            dep_details=dep_details,
+        ))
 
     # DryRun 详情
     if r.dry_run and not r.dry_run.applies_cleanly and r.dry_run.error_output:
@@ -278,13 +282,91 @@ def _render_version_map(cve_info) -> Table:
 
 
 def _render_prereq_table(patches, fix_files: list = None,
-                         conflict_files: list = None) -> Panel:
+                         conflict_files: list = None,
+                         dep_details=None) -> Panel:
     """渲染前置依赖详情面板（含分析上下文）"""
     from rich.console import Group
     from core.models import PrerequisitePatch
 
     parts = []
 
+    # ── 无前置依赖：展示详细分析证据 ──────────────────────────────────
+    if not patches and dep_details is not None:
+        ctx = Table(box=None, show_header=False, padding=(0, 1), expand=True, show_edge=False)
+        ctx.add_column("k", style="bold", width=18)
+        ctx.add_column("v")
+
+        ctx.add_row("分析文件",
+                    ", ".join(dep_details.analysis_files[:6])
+                    + (f" (+{len(dep_details.analysis_files)-6})"
+                       if len(dep_details.analysis_files) > 6 else ""))
+        ctx.add_row("时间窗口",
+                    f"{dep_details.time_window_start}  →  {dep_details.time_window_end}")
+        ctx.add_row("候选 Commit 数",
+                    f"[cyan]{dep_details.candidate_count}[/] 个 (修改同文件、排除 merge)")
+        ctx.add_row("依赖分级结果",
+                    f"[red]strong={dep_details.strong_count}[/]  "
+                    f"[yellow]medium={dep_details.medium_count}[/]  "
+                    f"[dim]weak={dep_details.weak_count}[/]")
+
+        # DryRun 空集基线结果
+        if dep_details.dryrun_method:
+            dryrun_label = {
+                "strict": "[green]严格匹配通过[/]",
+                "context-C1": "[green]上下文适配通过 (-C1)[/]",
+                "3way": "[green]3-way merge 通过[/]",
+                "regenerated": "[green]上下文重生成通过[/]",
+                "verified-direct": "[green]直接验证通过[/]",
+                "conflict-adapted": "[yellow]冲突已适配 (需人工审查)[/]",
+            }.get(dep_details.dryrun_method,
+                  f"[green]{dep_details.dryrun_method}[/]")
+            baseline = dryrun_label if dep_details.dryrun_baseline_passed else "[red]未通过[/]"
+            ctx.add_row("空集基线 DryRun", baseline)
+
+        # 置信度
+        conf_color = {"high": "green", "medium": "yellow", "low": "red"}.get(
+            dep_details.confidence_level, "white")
+        ctx.add_row("结论置信度",
+                    f"[{conf_color} bold]{dep_details.confidence_level.upper()}[/]")
+        if dep_details.no_prerequisite_reason:
+            ctx.add_row("无前置原因", dep_details.no_prerequisite_reason)
+        if dep_details.boundary_statement:
+            ctx.add_row("边界声明", f"[dim]{dep_details.boundary_statement}[/]")
+        parts.append(ctx)
+
+        # 拟人化分析过程
+        if dep_details.analysis_narrative:
+            parts.append(Text(""))
+            narrative_tbl = Table(box=None, show_header=False, padding=(0, 1),
+                                  expand=True, show_edge=False)
+            narrative_tbl.add_column("line", ratio=1)
+            for line in dep_details.analysis_narrative:
+                if line.startswith("Step"):
+                    narrative_tbl.add_row(f"[bold cyan]{line}[/]")
+                else:
+                    narrative_tbl.add_row(f"  [dim]{line.strip()}[/]")
+            parts.append(Panel(narrative_tbl,
+                               title="[dim]依赖分析过程[/]",
+                               border_style="dim", padding=(0, 2)))
+
+        # 人工审查清单
+        if dep_details.manual_review_checklist:
+            parts.append(Text(""))
+            checklist_tbl = Table(box=None, show_header=False, padding=(0, 1),
+                                  expand=True, show_edge=False)
+            checklist_tbl.add_column("", width=3)
+            checklist_tbl.add_column("item", ratio=1)
+            for item in dep_details.manual_review_checklist:
+                checklist_tbl.add_row("[yellow]□[/]", item)
+            parts.append(Panel(checklist_tbl,
+                               title="[dim]人工审查清单[/]",
+                               border_style="yellow", padding=(0, 2)))
+
+        return Panel(Group(*parts),
+                     title="[bold green]前置依赖分析  — 无硬前置依赖[/]",
+                     border_style="green", padding=(0, 2))
+
+    # ── 有前置依赖：原有展示逻辑 ──────────────────────────────────────
     # 分析上下文信息
     if fix_files or conflict_files:
         ctx = Table(box=None, show_header=False, padding=(0, 1), expand=True, show_edge=False)
@@ -304,8 +386,34 @@ def _render_prereq_table(patches, fix_files: list = None,
         if n_w:
             summary_parts.append(f"[dim]{n_w}弱[/]")
         ctx.add_row("依赖统计", " / ".join(summary_parts) + f"  (共 {len(patches)} 个)")
+        if dep_details:
+            ctx.add_row("时间窗口",
+                        f"{dep_details.time_window_start}  →  {dep_details.time_window_end}")
+            ctx.add_row("候选 Commit 数",
+                        f"[cyan]{dep_details.candidate_count}[/] 个")
+            conf_color = {"high": "green", "medium": "yellow", "low": "red"}.get(
+                dep_details.confidence_level, "white")
+            ctx.add_row("结论置信度",
+                        f"[{conf_color} bold]{dep_details.confidence_level.upper()}[/]")
+            if dep_details.boundary_statement:
+                ctx.add_row("边界声明", f"[dim]{dep_details.boundary_statement}[/]")
         parts.append(ctx)
         parts.append(Text(""))
+
+        # 有前置时的拟人化过程
+        if dep_details and dep_details.analysis_narrative:
+            narrative_tbl = Table(box=None, show_header=False, padding=(0, 1),
+                                  expand=True, show_edge=False)
+            narrative_tbl.add_column("line", ratio=1)
+            for line in dep_details.analysis_narrative:
+                if line.startswith("Step"):
+                    narrative_tbl.add_row(f"[bold cyan]{line}[/]")
+                else:
+                    narrative_tbl.add_row(f"  [dim]{line.strip()}[/]")
+            parts.append(Panel(narrative_tbl,
+                               title="[dim]依赖分析过程[/]",
+                               border_style="dim", padding=(0, 2)))
+            parts.append(Text(""))
 
     grade_icons = {"strong": "[red bold]强[/]", "medium": "[yellow]中[/]", "weak": "[dim]弱[/]"}
 
