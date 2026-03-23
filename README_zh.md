@@ -1,70 +1,109 @@
-# CVE Backporting Engine（中文说明）
+<p align="center">
+  <img src="https://img.shields.io/badge/CVE-Backporting-0d1117?style=for-the-badge&logo=linux&logoColor=white&labelColor=FCC624" alt="CVE Backporting" height="36">
+</p>
 
-> 面向企业 Linux 内核维护场景的 CVE 修复分析与回移（Backport）自动化引擎。
+<h1 align="center">CVE Backporting Engine 中文说明</h1>
+
+<p align="center">
+  <strong>企业 Linux 内核 CVE 修复分析与回移自动化引擎</strong>
+</p>
+
+<p align="center">
+  <em>从 CVE ID 到可执行回移方案：搜索、判定、依赖、适配、解释一体化完成。</em>
+</p>
+
+---
 
 ## 项目介绍
 
-`CVE Backporting Engine` 是一个端到端的自动化流水线，用于将上游社区 CVE 修复补丁高效映射并回移到企业内核分支。它覆盖了从漏洞情报获取、修复提交定位、依赖分析、补丁可用性验证到结果解释的完整流程。
+`CVE Backporting Engine` 是一个面向企业内核维护团队的端到端 CVE 回移（Backport）流水线。它将传统依赖专家经验、步骤分散、结果不稳定的处理方式，升级为可重复、可度量、可解释的工程流程。
 
-项目重点解决企业内核维护中的典型痛点：
-- 上游与下游代码差异大，传统 `git apply` 容易失败
-- squash commit、路径迁移、上下文漂移导致“找得到但打不上”
-- 人工分析链路长、成本高、结果不稳定
+系统围绕真实生产问题设计：
 
-通过多级搜索与多级 DryRun 策略，本项目可将 CVE 从“信息”快速转化为“可执行回移方案”。
+- 上游修复与下游分支差异大，`git apply` 经常失败
+- 企业仓库存在 squash、路径迁移、上下文漂移，导致常规检索漏检
+- 单条 CVE 分析耗时长，批量处理不具备一致性
+- 决策依据难沉淀，跨团队协同成本高
+
+项目核心目标：**把“找到补丁”提升为“交付可执行回移策略”**。
 
 ---
 
 ## 项目优势
 
-### 1. 端到端自动化
-从 CVE 编号开始，自动完成：漏洞信息抓取 → 修复定位 → 引入提交检测 → 依赖分析 → 补丁 dry-run 验证。
+### 1) 端到端自动化闭环
+从 `CVE-ID` 输入开始，自动串联：
 
-### 2. 多级提交搜索能力
-支持 `ID -> Subject -> Diff` 的三级搜索路径，并结合置信度评分，提高在复杂仓库中的命中率与可解释性。
+1. 多源情报抓取（MITRE / 内核源 / 镜像源）
+2. 引入提交（intro）检测
+3. 修复提交（fix）定位
+4. hunk 级依赖分析
+5. 多级 DryRun 适配验证
+6. 结构化叙述输出（analysis narrative）
 
-### 3. 面向企业内核差异的补丁适配
-内置多级自适应 DryRun 引擎（含严格匹配、宽松上下文、三方合并、重构补丁、零上下文、冲突适配等路径），并支持 AI 辅助生成（可选）。
+### 2) 三级提交搜索，解决“找不到”
+搜索链路采用 `ID -> Subject -> Diff` 渐进策略：
 
-### 4. 依赖分析更贴近真实回移流程
-基于 hunk 级别重叠与函数关系进行前置依赖判定，给出强/中/弱分级，减少“补丁打上了但行为不对”的风险。
+- **L1 ID 精确匹配**：最高置信度
+- **L2 Subject 语义匹配**：支持 backport 命名差异
+- **L3 Diff 级匹配/包含度**：适配 squash 场景
 
-### 5. 结果可解释，便于工程决策
-输出结构化叙述（analysis narrative），清楚说明：做了什么、为何如此判断、当前风险点、下一步建议。
+### 3) 五层自适应 DryRun，解决“打不上”
+当标准补丁应用失败时，采用渐进降级策略自动适配：
+
+- **L0 Strict**：严格上下文匹配
+- **L1 Context-C1**：放宽上下文约束
+- **L2 3-Way**：三方合并
+- **L3 Regenerated**：重建上下文补丁
+- **L4 Conflict-Adapted**：冲突分析后适配生成
+
+> 可选扩展：在 AI 开启时可进入 **L5 AI-Generated** 进行模型辅助补丁生成。
+
+### 4) 七层工程化算法能力，覆盖复杂差异
+在核心五层 DryRun 之外，工程实现整合了更细粒度策略（如 Verified-Direct、Zero-Context 等），形成多路径算法体系，显著提升在企业分支中的命中与适配成功率。
+
+### 5) 可解释输出，便于审查与复盘
+关键命令输出 `analysis_narrative`，包含：
+
+- 工作流轨迹（做了什么）
+- 前置依赖判断（为什么）
+- 可应用性判定（成功/失败原因）
+- 开发者动作建议（下一步怎么做）
 
 ---
 
-## 项目优势提炼（给汇报/立项可直接复用）
+## 项目优势提炼（可直接用于汇报）
 
-- **一句话版本**：
-  - 用自动化与可解释算法，把企业内核 CVE 回移从“经验驱动”升级为“流程驱动”。
+### 一句话版本
+**将 CVE 回移从“专家手工排查”升级为“算法驱动的标准化处置流水线”。**
 
-- **三点版本**：
-  1. **更快**：自动化替代人工串行分析，缩短 CVE 处置周期。
-  2. **更准**：多级搜索 + 多策略适配，提升补丁定位和应用成功率。
-  3. **更稳**：全流程有依据、有输出、有追踪，降低个人经验依赖。
+### 三点版本
+1. **更快**：自动化串联关键步骤，缩短单 CVE 处置周期。  
+2. **更准**：多级搜索 + 多策略适配，提高补丁定位与应用成功率。  
+3. **更稳**：过程可解释、结果可审计，降低个人经验依赖。
 
-- **价值版本（管理视角）**：
-  - 降低安全修复 SLA 压力
-  - 降低高阶内核工程师重复劳动
-  - 提升批量 CVE 处理的一致性和可审计性
+### 业务价值版本（管理视角）
+- 降低安全修复 SLA 压力
+- 提升批量 CVE 处置吞吐
+- 降低核心工程师重复劳动
+- 形成可复用的组织级安全工程资产
 
 ---
 
 ## 快速入门
 
-### 1) 环境要求
+### 1. 环境要求
 - Python 3.8+
-- 可访问目标 Linux 内核仓库（本地路径）
+- 本地可访问目标 Linux 内核仓库
 
-### 2) 安装依赖
+### 2. 安装依赖
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 3) 配置仓库
-在 `config.yaml` 中配置目标仓库，例如：
+### 3. 配置目标仓库
+在 `config.yaml` 中配置版本别名与路径：
 
 ```yaml
 repositories:
@@ -73,13 +112,13 @@ repositories:
     branch: "linux-5.10.y"
 ```
 
-### 4) 初始化提交缓存（首次）
+### 4. 构建提交缓存（首次必做）
 
 ```bash
 python cli.py build-cache --target 5.10-hulk
 ```
 
-### 5) 执行 CVE 分析
+### 5. 执行核心分析（analyze）
 
 ```bash
 python cli.py analyze --cve CVE-2024-26633 --target 5.10-hulk
@@ -87,27 +126,113 @@ python cli.py analyze --cve CVE-2024-26633 --target 5.10-hulk
 
 ---
 
+## `analyze` 核心用法（重点）
+
+### 单条 CVE 分析
+
+```bash
+python cli.py analyze --cve CVE-2024-26633 --target 5.10-hulk
+```
+
+### 批量 CVE 分析
+
+```bash
+python cli.py analyze --batch cve_list.txt --target 5.10-hulk
+```
+
+`cve_list.txt` 示例：
+
+```text
+CVE-2024-26633
+CVE-2024-26634
+CVE-2024-26635
+```
+
+### 深度分析模式
+
+```bash
+python cli.py analyze --cve CVE-2024-26633 --target 5.10-hulk --deep
+```
+
+### 仅做判定，不执行 DryRun
+
+```bash
+python cli.py analyze --cve CVE-2024-26633 --target 5.10-hulk --no-dryrun
+```
+
+### analyze 结果产物
+
+执行后会生成：
+- 终端可视化阶段报告（含关键判定）
+- JSON 报告（含 `analysis_narrative`）
+- 若适配成功，输出 `*_adapted.patch` 补丁文件
+
+---
+
+## 五层自适应 DryRun（核心机制）
+
+```text
+Patch Input
+  ├─ L0 Strict           -> git apply --check
+  ├─ L1 Context-C1       -> git apply -C1 --check
+  ├─ L2 3-Way            -> git apply --3way --check
+  ├─ L3 Regenerated      -> 锚点定位 + 上下文重建
+  └─ L4 Conflict-Adapted -> 冲突分析 + 适配补丁生成
+```
+
+### 为什么这五层有效
+- 先用最可靠的 Git 原生路径（L0-L2）
+- 再进入算法修复路径（L3-L4）处理企业分支差异
+- 保持“自动化优先 + 人工可审查兜底”
+
+---
+
+## 七层算法能力（工程实现视角）
+
+在复杂仓库中，系统通过多策略组合形成七层（及扩展）能力体系，典型包括：
+
+1. 严格应用检查
+2. 弱化上下文检查
+3. 三方合并检查
+4. 锚点行定位
+5. 七策略序列搜索
+6. 逐行投票定位
+7. 跨 hunk 偏移传播
+
+并可叠加：
+- 代码语义匹配（结构/标识符/关键词）
+- 路径映射（跨版本目录迁移）
+- 可选 AI 生成补丁路径
+
+> 详细算法说明见：`docs/ADAPTIVE_DRYRUN.md` 与 `docs/MULTI_LEVEL_ALGORITHM.md`
+
+---
+
 ## 常用命令
 
 ```bash
-# 检查漏洞引入提交是否存在
+# 检查漏洞引入提交是否在目标分支存在
 python cli.py check-intro --cve CVE-2024-26633 --target 5.10-hulk
 
 # 检查修复是否已合入
 python cli.py check-fix --cve CVE-2024-26633 --target 5.10-hulk
 
-# 单条验证（对比已知修复）
+# 单条验证（与已知修复对比）
 python cli.py validate --cve CVE-2024-26633 --target 5.10-hulk --known-fix <commit>
 
 # 批量验证
 python cli.py batch-validate --file cve_data.json --target 5.10-hulk
+
+# 基准评估
+python cli.py benchmark --file benchmarks.yaml --target 5.10-hulk
 ```
 
 ---
 
-## 建议阅读
+## 建议阅读顺序
 
-- 英文总览：`README.md`
-- 技术文档：`docs/TECHNICAL.md`
-- DryRun 算法：`docs/ADAPTIVE_DRYRUN.md`
-- 多级算法说明：`docs/MULTI_LEVEL_ALGORITHM.md`
+1. `README.md`（英文总览）
+2. `README_zh.md`（中文落地说明）
+3. `docs/TECHNICAL.md`（架构与模块）
+4. `docs/ADAPTIVE_DRYRUN.md`（五层 DryRun 原理）
+5. `docs/MULTI_LEVEL_ALGORITHM.md`（多级算法全景）
