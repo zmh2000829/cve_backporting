@@ -130,6 +130,19 @@ def render_report(result) -> Panel:
     grid.add_row("受影响", vuln)
     grid.add_row("已修复", fixed)
 
+    # L0-L5 级别判定
+    if getattr(r, "level_decision", None):
+        ld = r.level_decision
+        lv_style = {
+            "L0": "green bold", "L1": "cyan bold", "L2": "yellow bold",
+            "L3": "yellow", "L4": "red", "L5": "red bold",
+        }.get(ld.level, "white")
+        harmless_str = "是" if ld.harmless else "否"
+        grid.add_row("策略级别", f"[{lv_style}]{ld.level}[/] ({ld.strategy})")
+        grid.add_row("无害判定", harmless_str)
+        if ld.warnings:
+            grid.add_row("级别告警", ld.warnings[0][:90])
+
     # 搜索结果 + 步骤
     if r.introduced_search and r.introduced_search.found:
         s = r.introduced_search
@@ -679,6 +692,72 @@ def render_validate_report(result: dict):
     sections.append(ct)
     sections.append(Text(""))
 
+    # ── 2.5) L0-L5 级别判定 & 规则命中 ──────────────────────
+    level_decision = result.get("level_decision", {}) or {}
+    if level_decision:
+        ld_tbl = Table(box=box.SIMPLE_HEAVY, show_header=False,
+                       padding=(0, 1), expand=True,
+                       title="[bold]策略分级判定 (L0-L5)[/]")
+        ld_tbl.add_column("K", width=18, style="bold")
+        ld_tbl.add_column("V", ratio=1)
+
+        level = level_decision.get("level", "")
+        harmless = level_decision.get("harmless", False)
+        conf = level_decision.get("confidence", "")
+        strategy = level_decision.get("strategy", "")
+        reason = level_decision.get("reason", "")
+
+        level_style = {
+            "L0": "green bold", "L1": "cyan bold", "L2": "yellow bold",
+            "L3": "yellow", "L4": "red", "L5": "red bold",
+        }.get(level, "white")
+
+        ld_tbl.add_row("级别", f"[{level_style}]{level}[/]")
+        ld_tbl.add_row("策略", strategy)
+        ld_tbl.add_row("无害判定", "[green]是[/]" if harmless else "[yellow]否[/]")
+        ld_tbl.add_row("置信度", conf)
+        if reason:
+            ld_tbl.add_row("理由", reason)
+
+        rule_hits = level_decision.get("rule_hits", []) or []
+        if rule_hits:
+            ld_tbl.add_row("规则命中数", str(len(rule_hits)))
+            for h in rule_hits[:6]:
+                sev = h.get("severity", "info")
+                color = "red" if sev == "high" else ("yellow" if sev == "warn" else "dim")
+                ld_tbl.add_row("", f"[{color}]{h.get('rule_id','')}: {h.get('message','')}[/]")
+
+        sections.append(ld_tbl)
+        sections.append(Text(""))
+
+    # ── 2.6) 函数调用链影响分析 ─────────────────────────────
+    impacts = result.get("function_impacts", []) or []
+    if impacts:
+        fi_tbl = Table(box=box.SIMPLE, show_header=True, padding=(0, 1),
+                       expand=True, title="[bold]函数影响分析 (调用/被调用)[/]")
+        fi_tbl.add_column("函数", style="bold cyan", width=22)
+        fi_tbl.add_column("Callers", width=8, justify="right")
+        fi_tbl.add_column("Callees", width=8, justify="right")
+        fi_tbl.add_column("影响分", width=8, justify="right")
+        fi_tbl.add_column("告警", ratio=1)
+
+        for fi in impacts[:12]:
+            callers = fi.get("callers", []) or []
+            callees = fi.get("callees", []) or []
+            score = fi.get("impact_score", 0)
+            warns = fi.get("warnings", []) or []
+            score_style = "red" if score >= 0.7 else ("yellow" if score >= 0.4 else "green")
+            fi_tbl.add_row(
+                fi.get("function", ""),
+                str(len(callers)),
+                str(len(callees)),
+                f"[{score_style}]{score:.2f}[/]",
+                (warns[0] if warns else "[dim]-[/]"),
+            )
+
+        sections.append(fi_tbl)
+        sections.append(Text(""))
+
     # ── 3) 社区修复补丁详情 ──────────────────────────
     fp_detail = result.get("fix_patch_detail", {})
     if fp_detail:
@@ -835,6 +914,16 @@ def render_validate_report(result: dict):
         else:
             status_text = "[red bold]所有策略均失败 — 需人工手动合入[/]"
         dr_tbl.add_row("应用结果", status_text)
+
+        attempts = dr_detail.get("apply_attempts", []) or []
+        if attempts:
+            dr_tbl.add_row("尝试轨迹", f"共 {len(attempts)} 次")
+            for a in attempts[:8]:
+                ok = a.get("success") == "yes"
+                icon = "[green]✔[/]" if ok else "[red]✘[/]"
+                method = a.get("method", "")
+                detail = (a.get("detail", "") or "")[:80]
+                dr_tbl.add_row("", f"{icon} {method} [dim]{detail}[/]")
 
         strategy_full = {
             "strict": {

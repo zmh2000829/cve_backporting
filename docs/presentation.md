@@ -50,7 +50,8 @@ style: |
 10. **Demo 演示** — 真实 CVE 分析全流程
 11. **原理深度剖析** — 前置补丁决策 / 符号映射 / L5 原理 / 闭环验证
 12. **质疑与挑战回应** — 12 个常见技术质疑的详细回应
-13. **总结与展望**
+13. **L0-L5 分级编排与可插拔规则（本轮新增）**
+14. **总结与展望**
 
 ---
 
@@ -2232,10 +2233,116 @@ Step 5: 产出可答辩结论（工具自动生成 narrative）
 ---
 
 <!-- _class: lead -->
+<!-- _backgroundColor: #16213e -->
+<!-- _color: white -->
+
+# 13 L0-L5 分级编排与可插拔规则（本轮新增）
+
+---
+
+# 为什么要做 L0-L5 分级
+
+### 专家反馈的核心诉求
+
+1. **不同场景需要不同策略强度**：
+   - L0 必须是“100%可落地 + 无害变更”
+   - L1 允许上下文差异，但要有规则与证据约束
+2. **不能只看补丁能不能 apply**：
+   - 还要看是否涉及关键结构、调用链牵连、改动规模
+3. **规则要可扩展**：
+   - 支持后续人工持续加规则，而不是写死在流程里
+
+---
+
+# 新编排框架：DryRun级别 × 规则引擎
+
+```
+DryRun 方法 → 初始级别:
+  strict            → L0
+  ignore-ws/C1      → L1
+  3way              → L2
+  regenerated       → L3
+  conflict-adapted  → L4
+  verified-direct   → L5
+
+规则引擎二次裁决:
+  - large_change
+  - critical_structures
+  - call_chain_fanout
+
+最终输出:
+  level_decision + warnings + confidence + evidence
+```
+
+### 关键收敛原则
+
+- **只有 L0 且无高/中风险规则命中，才可判定 harmless**
+- L1~L5 默认进入“需审查”路径（强弱不同）
+
+---
+
+# 三类新增规则（可插拔）
+
+| 规则 | 触发条件 | 输出 |
+|------|----------|------|
+| `large_change` | 改动行数或 hunk 数超阈值 | warning |
+| `critical_structures` | 命中锁/RCU/refcount/struct 等关键关键词 | high risk |
+| `call_chain_fanout` | callers+callees 扇出过大 | warning |
+
+### 插拔式扩展
+
+- 通过 `policy.extra_rule_modules` 动态加载
+- 外部模块可通过 `register_rules(registry)` 注册新规则
+- 支持不同团队按子系统沉淀私有规则
+
+---
+
+# 可审计输出增强（analysis / validate）
+
+新增结构化字段：
+
+- `level_decision`
+  - `level`, `harmless`, `confidence`, `reason`, `rule_hits`
+- `function_impacts`
+  - 修改函数的 `callers/callees/impact_score`
+- `validation_details`
+  - 工作流步骤、warning 汇总、规则 profile/version
+- `dryrun_detail.apply_attempts`
+  - strict→C1→3way→... 全尝试轨迹
+
+### 价值
+
+> 从“给结论”升级为“给结论 + 给证据 + 给边界 + 给复盘轨迹”
+
+---
+
+# 下一步计划（对齐专家评审）
+
+### P0（本周）
+
+- 完成 L0~L5 回归样例集（20+ CVE）
+- 校准阈值（行数/hunk/fanout）
+- 固化输出 schema，保障评审材料一致
+
+### P1（2~4周）
+
+- 强化 L1“无害”判定规则（参数变化/签名变化/返回语义）
+- 调用链分析从单文件扩展到跨文件热点子系统
+- 提供“保守/平衡/激进”三套规则 profile
+
+### P2（1~2月）
+
+- 接入 CI 审批门禁（L4/L5 或 high risk 自动人工审批）
+- 建立规则插件目录规范，支持团队独立扩展
+- 自动生成专家答辩模板（证据链 + 结论边界 + 建议动作）
+
+---
+
+<!-- _class: lead -->
 <!-- _backgroundColor: #1a1a2e -->
 <!-- _color: white -->
 
-# 13 总结与展望
+# 14 总结与展望
 
 ---
 

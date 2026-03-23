@@ -235,13 +235,20 @@ class DryRunAgent:
             (["-C1", "--ignore-whitespace"], "C1-ignore-ws"),
             (["--3way"], "3way"),
         ]
+        apply_attempts = []
         first_err = None
         for opts, label in _quick_levels:
             r = self._apply_check(mapped_diff, rp_path, opts)
+            apply_attempts.append({
+                "method": label,
+                "success": "yes" if r.applies_cleanly else "no",
+                "detail": (r.error_output or "")[:180],
+            })
             if first_err is None and not r.applies_cleanly:
                 first_err = r
             if r.applies_cleanly:
                 r.apply_method = label
+                r.apply_attempts = apply_attempts
                 r.stat_output = self._get_stat(
                     mapped_diff, target_version)
                 if label != "strict":
@@ -251,6 +258,7 @@ class DryRunAgent:
                 self._ensure_adapted_patch(r, mapped_diff, rp_path)
                 return r
         r0 = first_err or DryRunResult()
+        r0.apply_attempts = apply_attempts
 
         # ── L5: 直接验证重建 — 完全绕过 git apply ───────────────
         # 在 Python 内存中定位+验证+修改+difflib 生成 diff,
@@ -265,6 +273,11 @@ class DryRunAgent:
             r5.error_output = (
                 "(L5 直接验证成功: 变更点已在目标文件中精确定位"
                 "并验证, 绕过 git apply)")
+            r5.apply_attempts = apply_attempts + [{
+                "method": "verified-direct",
+                "success": "yes",
+                "detail": "in-memory verified regeneration",
+            }]
             r5.stat_output = self._get_stat(
                 mapped_diff, target_version) or ""
             logger.info("[DryRun] L5 直接验证成功: %s",
@@ -289,6 +302,11 @@ class DryRunAgent:
                     r3.error_output = (
                         f"(上下文重生成成功 [{l3_label}]: "
                         "context 已从目标文件更新)")
+                    r3.apply_attempts = apply_attempts + [{
+                        "method": f"regenerated/{l3_label}",
+                        "success": "yes",
+                        "detail": "context regenerated and checked",
+                    }]
                     logger.info("[DryRun] 上下文重生成成功 [%s]: %s",
                                 l3_label, patch.commit_id[:12])
                     return r3
@@ -310,6 +328,11 @@ class DryRunAgent:
                     r35.error_output = (
                         f"(零上下文重建成功 [{zc_label}]: "
                         "context 已消除, 核心 +/- 不变)")
+                    r35.apply_attempts = apply_attempts + [{
+                        "method": f"regenerated-zero/{zc_label}",
+                        "success": "yes",
+                        "detail": "zero-context regenerated and checked",
+                    }]
                     logger.info("[DryRun] L3.5 零上下文成功 [%s]: %s",
                                 zc_label, patch.commit_id[:12])
                     return r35
@@ -343,6 +366,11 @@ class DryRunAgent:
                         f"(冲突适配成功 [{l4_label}]: "
                         "- 行替换为目标文件实际内容, "
                         "+ 行不变, 需人工审查)")
+                    r4.apply_attempts = apply_attempts + [{
+                        "method": f"conflict-adapted/{l4_label}",
+                        "success": "yes",
+                        "detail": "conflict-adapted patch checked",
+                    }]
                     logger.info("[DryRun] 冲突适配成功 [%s]: %s",
                                 l4_label, patch.commit_id[:12])
                     return r4

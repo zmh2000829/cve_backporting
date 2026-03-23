@@ -69,7 +69,8 @@ def _make_git_mgr(config, tv: str) -> GitRepoManager:
 def cmd_analyze(args, config):
     git_mgr = _make_git_mgr(config, args.target_version)
     pipe = Pipeline(git_mgr, path_mappings=config.path_mappings,
-                    llm_config=config.llm)
+                    llm_config=config.llm,
+                    policy_config=getattr(config, "policy", None))
 
     cves = [args.cve_id] if args.cve_id else []
     if args.batch_file:
@@ -136,6 +137,7 @@ def _analyze_one(pipe: Pipeline, cve_id: str, target: str,
             "conflicting_files": dr.conflicting_files,
             "error_output": dr.error_output[:500] if dr.error_output else "",
             "has_adapted_patch": bool(dr.adapted_patch),
+            "apply_attempts": dr.apply_attempts,
         }
 
     try:
@@ -1229,11 +1231,48 @@ def _build_analysis_narrative(result, dryrun_detail: dict,
     action = _build_action_suggestion(
         dr, prereqs, result.is_fixed, result.is_vulnerable)
 
+    # ── 6. 策略分级与规则命中 (L0-L5) ─────────────────────────
+    level_desc = {}
+    if getattr(result, "level_decision", None):
+        ld = result.level_decision
+        level_desc = {
+            "conclusion": (
+                f"判定级别 {ld.level}，策略={ld.strategy}，"
+                f"置信度={ld.confidence}，无害判定={ld.harmless}"
+            ),
+            "reason": ld.reason,
+            "warnings": ld.warnings,
+            "rule_hits": ld.rule_hits,
+        }
+
+    validate_detail_desc = {}
+    if getattr(result, "validation_details", None):
+        vd = result.validation_details
+        validate_detail_desc = {
+            "workflow_steps": vd.workflow_steps,
+            "warnings": vd.warnings,
+            "rule_profile": vd.rule_profile,
+            "rule_version": vd.rule_version,
+        }
+
+    function_impact_desc = []
+    for fi in getattr(result, "function_impacts", [])[:8]:
+        function_impact_desc.append({
+            "function": fi.function,
+            "callers": fi.callers,
+            "callees": fi.callees,
+            "impact_score": fi.impact_score,
+            "warnings": fi.warnings,
+        })
+
     narrative = {
         "workflow": workflow,
         "prerequisite_analysis": prereq_desc,
         "patch_applicability": dryrun_desc,
         "developer_action": action,
+        "level_decision": level_desc,
+        "validation_details": validate_detail_desc,
+        "function_impact": function_impact_desc,
     }
     if quality_desc:
         narrative["patch_quality_assessment"] = quality_desc
@@ -1746,7 +1785,8 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
             use_cache=False,
         )
         pipe = Pipeline(wt_mgr, path_mappings=config.path_mappings,
-                        llm_config=config.llm if deep else None)
+                        llm_config=config.llm if deep else None,
+                        policy_config=getattr(config, "policy", None))
 
         if show_stages:
             tracker = StageTracker(STAGES)
@@ -1861,6 +1901,7 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
                 "has_adapted_patch": bool(dr.adapted_patch),
                 "conflict_hunks": dr.conflict_hunks,
                 "search_reports": dr.search_reports if dr.search_reports else [],
+                "apply_attempts": dr.apply_attempts,
             }
 
         # 获取 known_fix 的完整信息(stat + diff)
@@ -2023,6 +2064,16 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
             "analysis_narrative": narrative,
             "fix_patch_detail": fix_patch_detail,
             "dryrun_detail": dryrun_detail,
+            "level_decision": (result.level_decision.__dict__ if result.level_decision else {}),
+            "validation_details": (
+                {
+                    "workflow_steps": result.validation_details.workflow_steps,
+                    "warnings": result.validation_details.warnings,
+                    "rule_profile": result.validation_details.rule_profile,
+                    "rule_version": result.validation_details.rule_version,
+                } if result.validation_details else {}
+            ),
+            "function_impacts": [fi.__dict__ for fi in (result.function_impacts or [])],
             "known_fix_detail": known_fix_detail,
             "diff_comparison": diff_comparison,
             "generated_vs_real": generated_vs_real,

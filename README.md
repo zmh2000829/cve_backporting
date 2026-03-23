@@ -116,6 +116,29 @@ Every `validate`, `batch-validate`, and `analyze` JSON output now includes an `a
 - **patch_quality_assessment** — How the generated patch compares to the real fix (validate mode)
 - **developer_action** — Actionable next steps for the developer
 
+### L0-L5 Strategy Orchestration + Pluggable Rules (NEW)
+
+The engine now classifies each run into **L0-L5 merge-risk scenarios** and emits auditable evidence:
+
+- **L0 (strict)**: exact context match, only this level can be marked as "harmless"
+- **L1 (ignore-ws/context-C1)**: light context drift, can be harmless only after rule checks
+- **L2 (3-way)**: medium merge complexity
+- **L3 (regenerated)**: context rebuilt, requires focused review
+- **L4 (conflict-adapted)**: conflict adaptation, manual semantic review required
+- **L5 (verified-direct / advanced path)**: robust fallback, low confidence by default
+
+Rule engine highlights:
+- **Large change warning** (changed lines / hunk count thresholds)
+- **Call-chain impact warning** (caller/callee fanout)
+- **Critical structure warning** (lock/RCU/refcount/struct-sensitive changes)
+- **Pluggable extension** via `policy.extra_rule_modules`
+
+Validate output now includes:
+- `level_decision` (level, harmless, confidence, reason, rule hits)
+- `function_impacts` (callers/callees/impact score)
+- `dryrun_detail.apply_attempts` (full strategy attempt trace)
+- `validation_details` (workflow steps + warning summary)
+
 ---
 
 ## Architecture

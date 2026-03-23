@@ -21,6 +21,7 @@ from agents.vuln_analysis import VulnAnalysisAgent
 from agents.patch_review import PatchReviewAgent
 from agents.merge_advisor import MergeAdvisorAgent
 from core.risk_benefit import RiskBenefitAnalyzer
+from core.policy_engine import PolicyEngine
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +51,8 @@ class Pipeline:
     """CVE补丁回溯分析流水线"""
 
     def __init__(self, git_mgr: GitRepoManager, api_timeout: int = 30,
-                 path_mappings: list = None, llm_config=None):
+                 path_mappings: list = None, llm_config=None,
+                 policy_config=None):
         pm = PathMapper(path_mappings) if path_mappings else PathMapper()
         self.crawler = CrawlerAgent(api_timeout=api_timeout, git_mgr=git_mgr)
         self.analysis = AnalysisAgent(git_mgr, path_mapper=pm)
@@ -64,6 +66,7 @@ class Pipeline:
         self.patch_review_agent = PatchReviewAgent(git_mgr, self.llm)
         self.risk_benefit = RiskBenefitAnalyzer(git_mgr, self.llm)
         self.merge_advisor = MergeAdvisorAgent(self.llm)
+        self.policy_engine = PolicyEngine(policy_config, llm_enabled=self.llm.enabled)
 
     def analyze(self, cve_id: str, target_version: str,
                 enable_dryrun: bool = True,
@@ -300,6 +303,31 @@ class Pipeline:
                         f"{nc} 个文件冲突")
         else:
             _cb("dryrun", "skip", "已跳过")
+
+        # ── Step 7: 策略分级与规则评估 (L0-L5 + 可插拔规则) ───────────
+        try:
+            result.validation_details = self.policy_engine.evaluate(
+                result.fix_patch,
+                result.dry_run,
+                self.git_mgr,
+                target_version,
+                path_mapper=self.analysis.path_mapper,
+            )
+            result.level_decision = result.validation_details.level_decision
+            result.function_impacts = result.validation_details.function_impacts
+
+            ld = result.level_decision
+            if ld:
+                result.recommendations.append(
+                    f"策略分级: {ld.level} ({ld.strategy}), 置信度 {ld.confidence}")
+                if ld.level == "L0" and ld.harmless:
+                    result.recommendations.append(
+                        "L0 判定: 变更可视为无害且不影响语义")
+                if ld.warnings:
+                    result.recommendations.append(
+                        f"规则告警 {len(ld.warnings)} 条: {ld.warnings[0]}")
+        except Exception as e:
+            logger.warning("[Pipeline] PolicyEngine 评估失败: %s", e)
 
         if not result.is_fixed:
             not_merged = (

@@ -46,11 +46,26 @@ class LLMConfig:
 
 
 @dataclass
+class PolicyConfig:
+    """L0-L5 分级与规则引擎配置"""
+    enabled: bool = True
+    profile: str = "default"
+    large_change_line_threshold: int = 80
+    large_hunk_threshold: int = 8
+    call_chain_fanout_threshold: int = 6
+    critical_structure_keywords: list = field(default_factory=lambda: [
+        "spin_lock", "mutex", "rcu", "refcount", "kref", "atomic", "struct"
+    ])
+    extra_rule_modules: list = field(default_factory=list)
+
+
+@dataclass
 class Config:
     repositories: Dict[str, Dict[str, str]] = field(default_factory=dict)
     cache: CacheConfig = field(default_factory=CacheConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
+    policy: PolicyConfig = field(default_factory=PolicyConfig)
     path_mappings: list = field(default_factory=lambda: list(DEFAULT_PATH_MAPPINGS))
 
 
@@ -82,6 +97,16 @@ class ConfigLoader:
                     k: v for k, v in data["llm"].items()
                     if k in ("enabled", "provider", "api_key", "base_url",
                              "model", "max_tokens", "temperature", "timeout")
+                })
+            if "policy" in data and isinstance(data["policy"], dict):
+                cfg.policy = PolicyConfig(**{
+                    k: v for k, v in data["policy"].items()
+                    if k in ("enabled", "profile",
+                             "large_change_line_threshold",
+                             "large_hunk_threshold",
+                             "call_chain_fanout_threshold",
+                             "critical_structure_keywords",
+                             "extra_rule_modules")
                 })
             if "path_mappings" in data and isinstance(data["path_mappings"], list):
                 cfg.path_mappings = data["path_mappings"]

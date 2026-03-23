@@ -1,7 +1,7 @@
 """所有共享数据模型"""
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 
 
 @dataclass
@@ -153,6 +153,39 @@ class PrerequisitePatch:
 
 
 @dataclass
+class LevelDecision:
+    """L0-L5 级别判定结果"""
+    level: str = "L5"                    # L0/L1/L2/L3/L4/L5
+    strategy: str = ""                    # 使用的策略说明
+    harmless: bool = False                 # 是否可判定为无害变更
+    confidence: str = "medium"            # high/medium/low
+    reason: str = ""                      # 判定理由
+    warnings: List[str] = field(default_factory=list)  # 风险告警
+    rule_hits: List[Dict[str, Any]] = field(default_factory=list)  # 命中的规则明细
+
+
+@dataclass
+class FunctionImpact:
+    """函数调用/被调用影响分析"""
+    function: str = ""
+    callers: List[str] = field(default_factory=list)
+    callees: List[str] = field(default_factory=list)
+    impact_score: float = 0.0
+    warnings: List[str] = field(default_factory=list)
+
+
+@dataclass
+class ValidationDetails:
+    """validate 过程细节（用于可审计输出）"""
+    workflow_steps: List[str] = field(default_factory=list)
+    level_decision: Optional[LevelDecision] = None
+    function_impacts: List[FunctionImpact] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+    rule_profile: str = "default"
+    rule_version: str = "v1"
+
+
+@dataclass
 class DependencyAnalysisDetails:
     """前置依赖分析详情（用于"无前置"场景的详细说明）"""
     candidate_count: int = 0                    # 候选 commit 总数
@@ -185,6 +218,7 @@ class DryRunResult:
     patch_file: str = ""
     adapted_patch: str = ""         # 上下文重生成/冲突适配后的补丁内容
     search_reports: List[Dict] = field(default_factory=list)  # 详细搜索过程报告
+    apply_attempts: List[Dict[str, str]] = field(default_factory=list)  # 每次 apply 尝试轨迹
 
 
 @dataclass
@@ -203,6 +237,9 @@ class AnalysisResult:
     dry_run: Optional[DryRunResult] = None
     recommendations: List[str] = field(default_factory=list)
     dependency_details: Optional["DependencyAnalysisDetails"] = None  # v2.0 新增：依赖分析详情
+    level_decision: Optional[LevelDecision] = None
+    function_impacts: List[FunctionImpact] = field(default_factory=list)
+    validation_details: Optional[ValidationDetails] = None
 
 
 # ── v2.0 深度分析模型 ─────────────────────────────────────────────
