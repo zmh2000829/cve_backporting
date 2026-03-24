@@ -345,6 +345,81 @@ class FunctionAnalyzer:
 
         return topo
 
+    def build_cross_file_call_graph(
+        self,
+        file_contents: List[Tuple[str, str]],
+        global_func_names: Optional[Set[str]] = None,
+    ) -> Tuple[Dict[str, List[str]], Dict[str, List[str]]]:
+        """
+        在多个已修改文件之间合并调用关系：若 A.c 调用 B.c 中定义的符号且二者均在
+        global_func_names 中，则建立跨文件边。用于策略引擎的扇出/牵连告警。
+
+        Returns:
+            (callees_of, callers_of) 均为 函数名 -> 去重后的相对方函数名列表
+        """
+        if not file_contents:
+            return {}, {}
+
+        if global_func_names is None:
+            global_func_names = set()
+            for _fp, content in file_contents:
+                for fn in self.extract_functions(content, _fp):
+                    global_func_names.add(fn.name)
+
+        callees_of: Dict[str, Set[str]] = {}
+        callers_of: Dict[str, Set[str]] = {}
+
+        for fpath, content in file_contents:
+            topo = self.build_call_topology_extended(content, fpath, global_func_names)
+            for fname, info in topo.items():
+                callees_of.setdefault(fname, set()).update(info.get("callees") or [])
+                for c in info.get("callees") or []:
+                    callers_of.setdefault(c, set()).add(fname)
+
+        return (
+            {k: sorted(v) for k, v in callees_of.items()},
+            {k: sorted(v) for k, v in callers_of.items()},
+        )
+
+    def build_call_topology_extended(
+        self,
+        file_content: str,
+        file_path: str,
+        global_func_names: Set[str],
+    ) -> Dict:
+        """
+        同 build_call_topology，但 callees 可指向其它文件中的符号（只要在 global_func_names 内）。
+        """
+        functions = self.extract_functions(file_content, file_path)
+        lines = file_content.split("\n")
+        topo: Dict[str, Dict] = {}
+
+        for func in functions:
+            body, _ = self.extract_function_body(lines, func.line_number - 1)
+            raw_callees = self.extract_callees(body)
+            linked = sorted(
+                {
+                    c
+                    for c in raw_callees
+                    if c in global_func_names and c != func.name
+                }
+            )
+            func.callees = linked
+            topo[func.name] = {
+                "callees": linked,
+                "callers": [],
+                "line": func.line_number,
+                "signature": func.signature,
+                "file": file_path,
+            }
+
+        for fname, info in topo.items():
+            for callee in info["callees"]:
+                if callee in topo and callee != fname:
+                    topo[callee]["callers"].append(fname)
+
+        return topo
+
     def _generate_impact_summary(self, modified_funcs: List[FunctionInfo],
                                  affected_funcs: List[FunctionInfo]) -> str:
         """生成影响摘要"""

@@ -87,37 +87,42 @@
 | 完成项 | 说明 |
 |--------|------|
 | L0-L5 统一分级判定 | 基于 DryRun 方法映射 `strict→L0`、`context-C1→L1`、`3way→L2`、`regenerated→L3`、`conflict-adapted→L4`、`verified-direct→L5` |
-| 无害判定收敛 | 仅 `L0` 且无高/中风险规则命中才标记为 harmless |
-| 调用链影响分析 | 输出修改函数 callers/callees、影响分数、扇出告警 |
+| 分级策略文案 | `level_decision.strategy` / `reason` 区分 L0~L5 含义；**仅 L0 且无 high/warn 规则** 才 `harmless=true` |
+| 无害判定收敛 | L1 不自动无害；与 `l1_api_surface`、大改动、扇出、关键结构规则联动 |
+| 调用链影响分析 | 修改文件范围内 **跨文件** 符号边合并；callers/callees、扇出告警 |
 | 大改动告警 | 按改动行数 / hunk 数阈值触发 warning |
 | 关键结构变更告警 | 锁/RCU/refcount/struct 等关键词命中后提升风险 |
+| L1 细粒度启发式 | 签名行增删不一致、`return` 行差阈值（可配置、可关闭） |
 | 可插拔规则框架 | `RuleRegistry` + `policy.extra_rule_modules` 动态扩展 |
-| 输出可审计化 | validate/analyze JSON 新增 `level_decision`、`function_impacts`、`validation_details`、DryRun `apply_attempts` |
+| Profile 预设 | `conservative` / `balanced` / `aggressive` / `default`，YAML 覆盖预设 |
+| 输出可审计化 | `validation_details.rule_version=v2`；`level_decision`、`function_impacts`、`validation_details`、DryRun `apply_attempts` |
+| 回归测试 | `tests/test_policy_engine.py` |
 | TUI 报告增强 | 新增“策略分级判定”“函数影响分析”“DryRun 尝试轨迹”面板 |
 
 ---
 
 ## 三、下一步推进计划（更新版）
 
-### P0（本周）— 稳定化与可回归验证
+### P0（本周）— 稳定化与可回归验证 ✅（代码侧已落地）
 
-1. **补齐规则引擎回归用例**
-   - 覆盖 L0~L5 各级样例
-   - 覆盖“少量改动但关键结构变化”场景
-   - 覆盖调用链高扇出 warning 场景
+1. **补齐规则引擎回归用例** ✅
+   - `tests/test_policy_engine.py`：`unittest` 覆盖 L0 无害、L0+关键结构、大改动阈值、L1 签名启发式、跨文件扇出、`l1_api_surface` 可关闭、空 DryRun→L5、`POLICY_PROFILE_PRESETS` 存在性
+   - 运行：`python -m unittest tests.test_policy_engine -v`
 2. **完成 20+ CVE 小样本验证**
-   - 指标：level 判定稳定性、warning 误报率
-3. **统一报告字段 schema**
-   - 固化 `level_decision / function_impacts / validation_details / apply_attempts` 字段约束
+   - 指标：level 判定稳定性、warning 误报率（需在具名仓库与 CVE 清单上人工/批跑，本仓库不绑数据）
+3. **统一报告字段 schema** ✅
+   - `validation_details.rule_version` 递增至 **v2**（与 L1 规则、跨文件图、profile 合并行为对齐）；字段仍为 `level_decision` / `function_impacts` / `validation_details` / DryRun `apply_attempts`
 
-### P1（2~4 周）— 策略质量提升
+### P1（2~4 周）— 策略质量提升 ✅（首版已合入，后续观测调参）
 
-1. **L1 无害判定质量提升**
-   - 引入更细粒度规则（参数调整、签名变化、返回值语义变化）
-2. **调用链影响精度增强**
-   - 从单文件拓扑扩展到跨文件符号追踪（先做热点子系统）
-3. **规则配置模板化**
-   - 提供高保守 / 平衡 / 激进三套 profile
+1. **L1 无害判定质量提升** ✅（首版）
+   - 新增可插拔默认规则 `l1_api_surface`：签名行增删不一致、`return` 行数差阈值（`l1_return_line_delta_threshold`）
+   - 编排上 **L1 仍不自动 `harmless`**，与专家「L0 才机械无害」一致
+2. **调用链影响精度增强** ✅（首版）
+   - 修改文件集合内 **跨文件符号边**：`FunctionAnalyzer.build_call_topology_extended` + `build_cross_file_call_graph`
+   - 后续：全仓库符号索引 / 子系统白名单（见 P2）
+3. **规则配置模板化** ✅
+   - `core/config.py`：`POLICY_PROFILE_PRESETS`（`conservative` / `balanced` / `aggressive` / `default`），YAML 显式项覆盖预设；默认 `profile: balanced`（无 policy 节时与 dataclass 一致）
 
 ### P2（1~2 月）— 工程化落地
 

@@ -2,7 +2,7 @@
 
 import os
 import yaml
-from typing import Dict
+from typing import Dict, Any
 from dataclasses import dataclass, field
 
 
@@ -45,11 +45,32 @@ class LLMConfig:
     timeout: int = 60
 
 
+# policy.profile 预设：显式写在 YAML 中的阈值始终覆盖此处
+POLICY_PROFILE_PRESETS: Dict[str, Dict[str, int]] = {
+    "conservative": {
+        "large_change_line_threshold": 40,
+        "large_hunk_threshold": 4,
+        "call_chain_fanout_threshold": 4,
+    },
+    "balanced": {
+        "large_change_line_threshold": 80,
+        "large_hunk_threshold": 8,
+        "call_chain_fanout_threshold": 6,
+    },
+    "aggressive": {
+        "large_change_line_threshold": 200,
+        "large_hunk_threshold": 16,
+        "call_chain_fanout_threshold": 12,
+    },
+    "default": {},
+}
+
+
 @dataclass
 class PolicyConfig:
     """L0-L5 分级与规则引擎配置"""
     enabled: bool = True
-    profile: str = "default"
+    profile: str = "balanced"
     large_change_line_threshold: int = 80
     large_hunk_threshold: int = 8
     call_chain_fanout_threshold: int = 6
@@ -57,6 +78,9 @@ class PolicyConfig:
         "spin_lock", "mutex", "rcu", "refcount", "kref", "atomic", "struct"
     ])
     extra_rule_modules: list = field(default_factory=list)
+    # L1 细粒度：签名/返回值启发式（可关）
+    l1_api_surface_rules_enabled: bool = True
+    l1_return_line_delta_threshold: int = 2
 
 
 @dataclass
@@ -99,14 +123,24 @@ class ConfigLoader:
                              "model", "max_tokens", "temperature", "timeout")
                 })
             if "policy" in data and isinstance(data["policy"], dict):
+                raw_policy: Dict[str, Any] = dict(data["policy"])
+                prof = str(raw_policy.get("profile") or "balanced")
+                preset = dict(POLICY_PROFILE_PRESETS.get(prof) or POLICY_PROFILE_PRESETS.get("default") or {})
+                merged_policy = {**preset, **raw_policy}
+                merged_policy["profile"] = prof
+                allowed_policy_keys = (
+                    "enabled", "profile",
+                    "large_change_line_threshold",
+                    "large_hunk_threshold",
+                    "call_chain_fanout_threshold",
+                    "critical_structure_keywords",
+                    "extra_rule_modules",
+                    "l1_api_surface_rules_enabled",
+                    "l1_return_line_delta_threshold",
+                )
                 cfg.policy = PolicyConfig(**{
-                    k: v for k, v in data["policy"].items()
-                    if k in ("enabled", "profile",
-                             "large_change_line_threshold",
-                             "large_hunk_threshold",
-                             "call_chain_fanout_threshold",
-                             "critical_structure_keywords",
-                             "extra_rule_modules")
+                    k: v for k, v in merged_policy.items()
+                    if k in allowed_policy_keys
                 })
             if "path_mappings" in data and isinstance(data["path_mappings"], list):
                 cfg.path_mappings = data["path_mappings"]

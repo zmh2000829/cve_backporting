@@ -86,3 +86,24 @@ path_mappings:
   # - upstream: "path/in/newer/kernel/"
   #   local: "path/in/your/kernel/"
   #   since: "x.y"
+
+# ─── L0-L5 策略与可插拔规则 ─────────────────────────────────
+# profile: conservative | balanced | aggressive | default
+#   先套用预设阈值，YAML 中显式写的项再覆盖预设。
+policy:
+  enabled: true
+  profile: "balanced"
+  large_change_line_threshold: 80
+  large_hunk_threshold: 8
+  call_chain_fanout_threshold: 6
+  l1_api_surface_rules_enabled: true
+  l1_return_line_delta_threshold: 2
+  critical_structure_keywords:
+    - "spin_lock"
+    - "mutex"
+    - "rcu"
+    - "refcount"
+    - "kref"
+    - "atomic"
+    - "struct"
+  extra_rule_modules: []

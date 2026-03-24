@@ -118,26 +118,31 @@ Every `validate`, `batch-validate`, and `analyze` JSON output now includes an `a
 
 ### L0-L5 Strategy Orchestration + Pluggable Rules (NEW)
 
-The engine now classifies each run into **L0-L5 merge-risk scenarios** and emits auditable evidence:
+The engine classifies each run into **L0-L5 merge-risk scenarios** with **different default strategies** (documented in `level_decision.strategy` / `reason`):
 
-- **L0 (strict)**: exact context match, only this level can be marked as "harmless"
-- **L1 (ignore-ws/context-C1)**: light context drift, can be harmless only after rule checks
+- **L0 (strict)**: exact context match; **only** L0 with **no** high/warn rules may be marked `harmless=true`
+- **L1 (ignore-ws / context-C1)**: light drift; **not** auto-harmless — use **L1 API-surface heuristics** (signature churn, return-path delta) plus optional LLM review
 - **L2 (3-way)**: medium merge complexity
 - **L3 (regenerated)**: context rebuilt, requires focused review
 - **L4 (conflict-adapted)**: conflict adaptation, manual semantic review required
-- **L5 (verified-direct / advanced path)**: robust fallback, low confidence by default
+- **L5 (verified-direct / unknown path)**: robust fallback, low confidence by default
+
+**Profiles** (`policy.profile`): `conservative` / `balanced` / `aggressive` / `default` — preset thresholds for large-change and call-chain fanout; explicit YAML values override presets.
 
 Rule engine highlights:
 - **Large change warning** (changed lines / hunk count thresholds)
-- **Call-chain impact warning** (caller/callee fanout)
+- **Call-chain impact warning** (caller/callee fanout, **cross-file** edges among modified files)
 - **Critical structure warning** (lock/RCU/refcount/struct-sensitive changes)
-- **Pluggable extension** via `policy.extra_rule_modules`
+- **L1 API surface** (`l1_api_surface`): signature-line add/remove mismatch, return-statement delta
+- **Pluggable extension** via `policy.extra_rule_modules` (`register_rules` or `RULES`)
 
-Validate output now includes:
+Validate output (`validation_details.rule_version` **v2**) includes:
 - `level_decision` (level, harmless, confidence, reason, rule hits)
 - `function_impacts` (callers/callees/impact score)
 - `dryrun_detail.apply_attempts` (full strategy attempt trace)
 - `validation_details` (workflow steps + warning summary)
+
+Regression: `python -m unittest tests.test_policy_engine -v`
 
 ---
 
