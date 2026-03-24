@@ -3,7 +3,13 @@
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from core.models import DryRunResult, FunctionImpact, PatchInfo
+from core.models import (
+    DependencyAnalysisDetails,
+    DryRunResult,
+    FunctionImpact,
+    PatchInfo,
+    PrerequisitePatch,
+)
 
 
 @dataclass
@@ -13,6 +19,8 @@ class RuleContext:
     function_impacts: List[FunctionImpact]
     changed_lines: int
     hunk_count: int
+    prerequisite_patches: List[PrerequisitePatch] = field(default_factory=list)
+    dependency_details: Optional[DependencyAnalysisDetails] = None
     critical_structure_hits: List[str] = field(default_factory=list)
     llm_enabled: bool = False
     base_level: str = "L5"

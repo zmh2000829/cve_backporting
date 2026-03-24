@@ -57,6 +57,10 @@ def _policy_config_panel(policy_config) -> Table:
     fields = [
         ("profile", "规则 Profile"),
         ("enabled", "规则引擎"),
+        ("prerequisite_rules_enabled", "关联补丁规则"),
+        ("direct_backport_rules_enabled", "直接回合规则"),
+        ("direct_backport_line_threshold", "直回 line 阈值"),
+        ("direct_backport_hunk_threshold", "直回 hunk 阈值"),
         ("large_change_rules_enabled", "大改动规则"),
         ("large_change_line_threshold", "large_change line"),
         ("large_hunk_threshold", "large_change hunk"),
@@ -65,6 +69,8 @@ def _policy_config_panel(policy_config) -> Table:
         ("critical_structure_rules_enabled", "关键结构规则"),
         ("l1_api_surface_rules_enabled", "L1 API 规则"),
         ("l1_return_line_delta_threshold", "L1 返回差异阈值"),
+        ("high_impact_single_line_rules_enabled", "单行高影响规则"),
+        ("single_line_impact_max_changed_lines", "单行高影响阈值"),
     ]
 
     tbl = Table(box=box.SIMPLE, show_header=False,
@@ -115,13 +121,15 @@ def _render_rules_overview_panel(
     rule_hits=None,
     rule_profile=None,
     rule_version=None,
+    strategy_buckets=None,
     title: str = "[bold]规则与分级策略[/]",
     max_hits: int = 6,
 ):
     ld = _to_dict_like(level_decision)
     hits = rule_hits if rule_hits is not None else (ld.get("rule_hits") or [])
+    sb = strategy_buckets or {}
 
-    if not (policy_config or ld or hits or rule_profile or rule_version):
+    if not (policy_config or ld or hits or rule_profile or rule_version or sb):
         return None
 
     parts = []
@@ -162,6 +170,23 @@ def _render_rules_overview_panel(
         if floor_counter:
             rule_meta.add_row("命中抬升", " / ".join(
                 f"{k}:{v}" for k, v in sorted(floor_counter.items()) if v))
+    if sb:
+        if sb.get("dependency_bucket"):
+            rule_meta.add_row("依赖分桶", str(sb.get("dependency_bucket")))
+        dep_counts = sb.get("dependency_counts") or {}
+        if dep_counts:
+            rule_meta.add_row(
+                "依赖计数",
+                " / ".join(
+                    f"{k}={v}" for k, v in dep_counts.items() if v
+                ) or "0"
+            )
+        rtb = sb.get("rule_type_bucket") or []
+        if rtb:
+            rule_meta.add_row(
+                "规则类型分桶",
+                " / ".join(f"{k}:{v}" for k, v in rtb if v)
+            )
 
     if len(rule_meta.rows):
         parts.append(rule_meta)
@@ -339,6 +364,7 @@ def render_report(result, policy_config=None) -> Panel:
         rule_hits=level_decision.rule_hits if level_decision else [],
         rule_profile=getattr(validation_details, "rule_profile", None),
         rule_version=getattr(validation_details, "rule_version", None),
+        strategy_buckets=getattr(validation_details, "strategy_buckets", None),
         max_hits=4,
     )
     if rules_panel is not None:
@@ -901,6 +927,7 @@ def render_validate_report(result: dict, policy_config=None):
         rule_hits=level_decision.get("rule_hits", []) or [],
         rule_profile=validation_details.get("rule_profile"),
         rule_version=validation_details.get("rule_version"),
+        strategy_buckets=validation_details.get("strategy_buckets"),
         max_hits=8,
     )
     if rules_panel is not None:
@@ -1845,6 +1872,10 @@ def render_batch_validate_report(results: list, target: str, policy_config=None)
     profile_counts = Counter()
     version_counts = Counter()
     warning_counter = Counter()
+    dependency_bucket_counts = Counter()
+    rule_type_bucket_counts = Counter()
+    level_dependency_counts = Counter()
+    level_rule_type_counts = Counter()
     core_sims = []
     method_counts = {}
     pass_count = 0
@@ -1877,6 +1908,17 @@ def render_batch_validate_report(results: list, target: str, policy_config=None)
             profile_counts[vd["rule_profile"]] += 1
         if vd.get("rule_version"):
             version_counts[vd["rule_version"]] += 1
+        sb = vd.get("strategy_buckets", {}) or {}
+        dep_bucket = sb.get("dependency_bucket", "")
+        if dep_bucket:
+            dependency_bucket_counts[dep_bucket] += 1
+            if level:
+                level_dependency_counts[f"{dep_bucket}:{level}"] += 1
+        for rule_type, count in (sb.get("rule_type_bucket", []) or []):
+            if count:
+                rule_type_bucket_counts[rule_type] += count
+                if level:
+                    level_rule_type_counts[f"{rule_type}:{level}"] += count
         for hit in ld.get("rule_hits", []) or []:
             if isinstance(hit, dict):
                 warning_counter[hit.get("severity", "info")] += 1
@@ -1952,6 +1994,18 @@ def render_batch_validate_report(results: list, target: str, policy_config=None)
     if level_counts:
         level_parts = [f"{k}: {v}" for k, v in sorted(level_counts.items()) if v]
         summary.add_row("规则级别分布", "  ".join(level_parts))
+    if dependency_bucket_counts:
+        dep_parts = [f"{k}: {v}" for k, v in sorted(dependency_bucket_counts.items()) if v]
+        summary.add_row("依赖类型分桶", "  ".join(dep_parts))
+    if rule_type_bucket_counts:
+        rule_parts = [f"{k}: {v}" for k, v in sorted(rule_type_bucket_counts.items()) if v]
+        summary.add_row("规则类型分桶", "  ".join(rule_parts))
+    if level_dependency_counts:
+        pair_parts = [f"{k}: {v}" for k, v in sorted(level_dependency_counts.items()) if v]
+        summary.add_row("级别×依赖分桶", "  ".join(pair_parts[:8]))
+    if level_rule_type_counts:
+        pair_parts = [f"{k}: {v}" for k, v in sorted(level_rule_type_counts.items()) if v]
+        summary.add_row("级别×规则分桶", "  ".join(pair_parts[:8]))
     if profile_counts:
         profile_parts = [f"{k}: {v}" for k, v in sorted(profile_counts.items())]
         summary.add_row("规则 Profile", "  ".join(profile_parts))

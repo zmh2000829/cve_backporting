@@ -71,6 +71,10 @@ class PolicyConfig:
     """L0-L5 分级与规则引擎配置"""
     enabled: bool = True
     profile: str = "balanced"
+    prerequisite_rules_enabled: bool = True
+    direct_backport_rules_enabled: bool = True
+    direct_backport_line_threshold: int = 24
+    direct_backport_hunk_threshold: int = 2
     large_change_rules_enabled: bool = True
     large_change_line_threshold: int = 80
     large_hunk_threshold: int = 8
@@ -84,6 +88,8 @@ class PolicyConfig:
     # L1 细粒度：签名/返回值启发式（可关）
     l1_api_surface_rules_enabled: bool = True
     l1_return_line_delta_threshold: int = 2
+    high_impact_single_line_rules_enabled: bool = True
+    single_line_impact_max_changed_lines: int = 4
 
 
 @dataclass
@@ -133,6 +139,10 @@ class ConfigLoader:
                 merged_policy["profile"] = prof
                 allowed_policy_keys = (
                     "enabled", "profile",
+                    "prerequisite_rules_enabled",
+                    "direct_backport_rules_enabled",
+                    "direct_backport_line_threshold",
+                    "direct_backport_hunk_threshold",
                     "large_change_rules_enabled",
                     "large_change_line_threshold",
                     "large_hunk_threshold",
@@ -143,6 +153,8 @@ class ConfigLoader:
                     "extra_rule_modules",
                     "l1_api_surface_rules_enabled",
                     "l1_return_line_delta_threshold",
+                    "high_impact_single_line_rules_enabled",
+                    "single_line_impact_max_changed_lines",
                 )
                 cfg.policy = PolicyConfig(**{
                     k: v for k, v in merged_policy.items()

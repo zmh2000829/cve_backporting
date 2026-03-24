@@ -187,6 +187,7 @@ class ValidationDetails:
     warnings: List[str] = field(default_factory=list)
     rule_profile: str = "default"
     rule_version: str = "v2"
+    strategy_buckets: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

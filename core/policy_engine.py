@@ -61,13 +61,23 @@ class PolicyEngine:
         else:
             registrar(registry)
 
-    def evaluate(self, patch: Optional[PatchInfo], dryrun: Optional[DryRunResult], git_mgr, target_version: str, path_mapper=None) -> ValidationDetails:
+    def evaluate(
+        self,
+        patch: Optional[PatchInfo],
+        dryrun: Optional[DryRunResult],
+        git_mgr,
+        target_version: str,
+        path_mapper=None,
+        prerequisite_patches=None,
+        dependency_details=None,
+    ) -> ValidationDetails:
         if not patch:
             return ValidationDetails(
                 workflow_steps=["无补丁数据，跳过策略分级"],
                 warnings=["fix_patch 为空"],
                 rule_profile=getattr(self.config, "profile", "default") if self.config else "default",
                 rule_version="v2",
+                strategy_buckets={},
             )
 
         base_method = (dryrun.apply_method if dryrun else "") or ""
@@ -84,6 +94,8 @@ class PolicyEngine:
             function_impacts=impacts,
             changed_lines=changed,
             hunk_count=hunks,
+            prerequisite_patches=list(prerequisite_patches or []),
+            dependency_details=dependency_details,
             critical_structure_hits=critical_hits,
             llm_enabled=self.llm_enabled,
             base_level=base_level,
@@ -93,14 +105,21 @@ class PolicyEngine:
         level_decision = self._decide_level(base_method, base_level, rule_hits)
 
         cross_n = getattr(self, "_last_cross_file_count", 0)
+        prereq_summary = self._summarize_prerequisites(prerequisite_patches, dependency_details)
+        direct_summary = self._summarize_direct_backport(level_decision, rule_hits, prerequisite_patches)
+        impact_summary = self._summarize_impact_focus(rule_hits, impacts, critical_hits)
         steps = [
             f"DryRun 基线: {base_level} ({base_method or 'none'})",
             f"最终场景: {level_decision.level} ({level_decision.review_mode})",
+            f"直接回合判断: {direct_summary}",
+            f"关联补丁判断: {prereq_summary}",
             f"变更规模: {changed} 行, {hunks} hunk, {len(funcs)} 函数",
             f"调用链影响函数: {len(impacts)}（跨文件合并源文件 {cross_n} 个）",
+            f"高影响关注: {impact_summary}",
             f"规则命中: {len(rule_hits)}",
         ]
         warnings = [hit["message"] for hit in rule_hits if hit.get("severity") in ("warn", "high")]
+        strategy_buckets = self._build_strategy_buckets(level_decision, rule_hits, prerequisite_patches)
 
         return ValidationDetails(
             workflow_steps=steps,
@@ -109,7 +128,107 @@ class PolicyEngine:
             warnings=warnings,
             rule_profile=getattr(self.config, "profile", "default") if self.config else "default",
             rule_version="v2",
+            strategy_buckets=strategy_buckets,
         )
+
+    def _summarize_prerequisites(self, prerequisite_patches, dependency_details) -> str:
+        prereqs = list(prerequisite_patches or [])
+        if prereqs:
+            strong = sum(1 for p in prereqs if getattr(p, "grade", "") == "strong")
+            medium = sum(1 for p in prereqs if getattr(p, "grade", "") == "medium")
+            if strong:
+                return f"存在 {strong} 个强依赖前置补丁，不能忽略关联补丁"
+            if medium:
+                return f"存在 {medium} 个中等依赖，建议一并核对关联补丁"
+            return f"仅发现 {len(prereqs)} 个弱关联补丁，可按需复核"
+        if dependency_details is not None:
+            return "未发现强/中依赖，可不优先考虑关联补丁"
+        return "暂无依赖分析证据"
+
+    def _summarize_direct_backport(self, level_decision: LevelDecision, rule_hits: List[Dict], prerequisite_patches) -> str:
+        prereqs = list(prerequisite_patches or [])
+        rule_ids = {hit.get("rule_id") for hit in (rule_hits or [])}
+        if "direct_backport_candidate" in rule_ids and not prereqs and level_decision.level == "L0":
+            return "满足直接回合条件"
+        if "prerequisite_required" in rule_ids:
+            return "不能直接回合，需先处理强依赖补丁"
+        if level_decision.level in ("L0", "L1") and not prereqs:
+            return "补丁主体接近可直回，但需结合规则证据确认"
+        return "不建议直接回合，需先审查风险或依赖"
+
+    def _summarize_impact_focus(self, rule_hits: List[Dict], impacts: List[FunctionImpact], critical_hits: List[str]) -> str:
+        highlights = []
+        for hit in rule_hits or []:
+            rule_id = hit.get("rule_id")
+            if rule_id == "single_line_high_impact":
+                highlights.append("单行高影响变更")
+            elif rule_id == "critical_structures":
+                highlights.append("关键结构/锁/引用计数")
+            elif rule_id in ("call_chain_propagation", "call_chain_fanout"):
+                highlights.append("调用链扩散")
+            elif rule_id == "l1_api_surface":
+                highlights.append("函数签名/入参/返回路径")
+        if not highlights and critical_hits:
+            highlights.append("关键结构关键词")
+        if not highlights and impacts:
+            top = sorted(impacts, key=lambda x: x.impact_score, reverse=True)[0]
+            if top.impact_score > 0:
+                highlights.append(f"函数 {top.function} 的调用链影响")
+        return "、".join(dict.fromkeys(highlights)) if highlights else "未发现额外高影响信号"
+
+    def _build_strategy_buckets(
+        self,
+        level_decision: LevelDecision,
+        rule_hits: List[Dict],
+        prerequisite_patches,
+    ) -> Dict:
+        rule_type_counter: Dict[str, int] = {}
+        for hit in rule_hits or []:
+            rule_type = self._classify_rule_type(hit.get("rule_id", ""))
+            rule_type_counter[rule_type] = rule_type_counter.get(rule_type, 0) + 1
+
+        prereqs = list(prerequisite_patches or [])
+        strong = sum(1 for p in prereqs if getattr(p, "grade", "") == "strong")
+        medium = sum(1 for p in prereqs if getattr(p, "grade", "") == "medium")
+        weak = sum(1 for p in prereqs if getattr(p, "grade", "") not in ("strong", "medium"))
+        if strong:
+            dependency_bucket = "required"
+        elif medium:
+            dependency_bucket = "recommended"
+        elif weak:
+            dependency_bucket = "weak_only"
+        else:
+            dependency_bucket = "independent"
+
+        return {
+            "level": level_decision.level,
+            "base_level": level_decision.base_level,
+            "rule_type_bucket": sorted(rule_type_counter.items()),
+            "dependency_bucket": dependency_bucket,
+            "dependency_counts": {
+                "strong": strong,
+                "medium": medium,
+                "weak": weak,
+                "total": len(prereqs),
+            },
+        }
+
+    def _classify_rule_type(self, rule_id: str) -> str:
+        if rule_id.startswith("prerequisite_") or rule_id == "independent_patch":
+            return "dependency"
+        if rule_id in ("direct_backport_candidate",):
+            return "direct_backport"
+        if rule_id in ("large_change",):
+            return "change_size"
+        if rule_id in ("call_chain_propagation", "call_chain_fanout"):
+            return "call_chain"
+        if rule_id in ("critical_structures",):
+            return "critical_structure"
+        if rule_id in ("l1_api_surface",):
+            return "api_surface"
+        if rule_id in ("single_line_high_impact",):
+            return "high_impact_single_line"
+        return "other"
 
     def _decide_level(self, base_method: str, base_level: str, rule_hits: List[Dict]) -> LevelDecision:
         final_level = derive_final_level(base_level, rule_hits)

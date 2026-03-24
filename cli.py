@@ -24,6 +24,7 @@ import tempfile
 import time
 from datetime import datetime
 from dataclasses import asdict
+from collections import Counter
 import re
 from urllib.parse import urlparse
 
@@ -238,6 +239,7 @@ def _collect_rules_metadata(policy_config, level_decision=None, validation_detai
             "rule_version": validation_details.get("rule_version", ""),
             "workflow_steps": validation_details.get("workflow_steps", []),
             "warnings": validation_details.get("warnings", []),
+            "strategy_buckets": validation_details.get("strategy_buckets", {}),
         }
 
     if level_decision:
@@ -251,6 +253,43 @@ def _collect_rules_metadata(policy_config, level_decision=None, validation_detai
             payload["rule_hits"] = list(level_decision.get("rule_hits", []) or [])
 
     return payload
+
+
+def _aggregate_strategy_buckets(results: list) -> dict:
+    level_counter = Counter()
+    dependency_counter = Counter()
+    rule_type_counter = Counter()
+    level_by_dependency = Counter()
+    level_by_rule_type = Counter()
+
+    for r in results or []:
+        vd = (r.get("validation_details") or {}) if isinstance(r, dict) else {}
+        sb = vd.get("strategy_buckets") or {}
+        level = sb.get("level") or ((r.get("level_decision") or {}).get("level") if isinstance(r, dict) else "")
+        dependency_bucket = sb.get("dependency_bucket", "")
+        rule_type_bucket = sb.get("rule_type_bucket", []) or []
+
+        if level:
+            level_counter[level] += 1
+        if dependency_bucket:
+            dependency_counter[dependency_bucket] += 1
+            if level:
+                level_by_dependency[f"{dependency_bucket}:{level}"] += 1
+        for item in rule_type_bucket:
+            if not isinstance(item, (list, tuple)) or len(item) != 2:
+                continue
+            rule_type, count = item[0], item[1]
+            rule_type_counter[rule_type] += int(count or 0)
+            if level:
+                level_by_rule_type[f"{rule_type}:{level}"] += int(count or 0)
+
+    return {
+        "level_distribution": dict(sorted(level_counter.items())),
+        "dependency_distribution": dict(sorted(dependency_counter.items())),
+        "rule_type_distribution": dict(sorted(rule_type_counter.items())),
+        "level_by_dependency": dict(sorted(level_by_dependency.items())),
+        "level_by_rule_type": dict(sorted(level_by_rule_type.items())),
+    }
 
 
 def _make_stage_trace_tracker(stage_callback=None):
@@ -333,6 +372,7 @@ def _build_analyze_payload(result, pipe: Pipeline, config, target: str,
             "rule_version": getattr(result.validation_details, "rule_version", ""),
             "workflow_steps": getattr(result.validation_details, "workflow_steps", []),
             "warnings": getattr(result.validation_details, "warnings", []),
+            "strategy_buckets": getattr(result.validation_details, "strategy_buckets", {}),
         }
 
     payload = {
@@ -2396,6 +2436,7 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
                     "warnings": result.validation_details.warnings,
                     "rule_profile": result.validation_details.rule_profile,
                     "rule_version": result.validation_details.rule_version,
+                    "strategy_buckets": result.validation_details.strategy_buckets,
                 } if result.validation_details else {}
             ),
             "function_impacts": [fi.__dict__ for fi in (result.function_impacts or [])],
@@ -2419,6 +2460,7 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
                     "rule_version": result.validation_details.rule_version,
                     "workflow_steps": result.validation_details.workflow_steps,
                     "warnings": result.validation_details.warnings,
+                    "strategy_buckets": result.validation_details.strategy_buckets,
                 } if result.validation_details else {},
             ),
         }
@@ -3005,12 +3047,14 @@ def cmd_batch_validate(args, config):
     full_report_path = os.path.join(
         out_dir, f"batch_validate_{tv}_{ts}_full.json")
     with open(full_report_path, "w", encoding="utf-8") as f:
+        strategy_summary = _aggregate_strategy_buckets(serializable_results)
         json.dump({
             "target": tv,
             "total_cves": len(cve_groups),
             "total_patches": total_patches,
             "skipped_parse_errors": skipped,
             "cve_results": serializable_results,
+            "strategy_summary": strategy_summary,
             "cve_summary": {
                 "passed": passed_list,
                 "failed": failed_list,

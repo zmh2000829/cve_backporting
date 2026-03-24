@@ -8,7 +8,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.config import PolicyConfig, POLICY_PROFILE_PRESETS
-from core.models import DryRunResult, PatchInfo
+from core.models import DependencyAnalysisDetails, DryRunResult, PatchInfo, PrerequisitePatch
 from core.policy_engine import PolicyEngine
 
 
@@ -53,6 +53,8 @@ class PolicyEngineRegressionTests(unittest.TestCase):
         self.assertEqual(vd.level_decision.base_level, "L0")
         self.assertTrue(vd.level_decision.harmless)
         self.assertIn("L0", vd.level_decision.strategy)
+        self.assertTrue(any(h.get("rule_id") == "direct_backport_candidate" for h in vd.level_decision.rule_hits))
+        self.assertEqual(vd.strategy_buckets.get("dependency_bucket"), "independent")
 
     def test_strict_critical_structure_promotes_out_of_l0(self):
         diff = """diff --git a/lock.c b/lock.c
@@ -135,9 +137,9 @@ void baz(void) {
         dr = DryRunResult(applies_cleanly=True, apply_method="context-C1")
         eng = PolicyEngine(PolicyConfig(profile="default"), llm_enabled=False)
         vd = eng.evaluate(p, dr, _MockGit({}), "any")
-        self.assertEqual(vd.level_decision.level, "L1")
-        self.assertEqual(vd.level_decision.review_mode, "llm-review")
-        self.assertTrue(any("签名" in w or "L1" in w or "调用点" in w for w in vd.warnings))
+        self.assertEqual(vd.level_decision.level, "L2")
+        self.assertEqual(vd.level_decision.review_mode, "targeted-review")
+        self.assertTrue(any("签名" in w or "入参" in w or "调用点" in w for w in vd.warnings))
 
     def test_l1_api_surface_disabled(self):
         diff = """diff --git a/f.c b/f.c
@@ -183,6 +185,61 @@ int foo(void) {
         self.assertEqual(vd.level_decision.base_level, "L0")
         self.assertEqual(vd.level_decision.level, "L4")
         self.assertTrue(any(h.get("rule_id") == "call_chain_propagation" for h in vd.level_decision.rule_hits))
+
+    def test_prerequisite_required_promotes_to_l3(self):
+        diff = """diff --git a/a.c b/a.c
+@@ -1,2 +1,2 @@
+-int x = 1;
++int x = 2;
+"""
+        p = _patch(diff, ["a.c"])
+        dr = DryRunResult(applies_cleanly=True, apply_method="strict")
+        prereqs = [PrerequisitePatch(commit_id="abc123456789", subject="prep", grade="strong")]
+        vd = PolicyEngine(PolicyConfig(profile="default"), llm_enabled=False).evaluate(
+            p,
+            dr,
+            _MockGit({}),
+            "any",
+            prerequisite_patches=prereqs,
+            dependency_details=DependencyAnalysisDetails(candidate_count=4, strong_count=1),
+        )
+        self.assertEqual(vd.level_decision.level, "L3")
+        self.assertTrue(any(h.get("rule_id") == "prerequisite_required" for h in vd.level_decision.rule_hits))
+        self.assertEqual(vd.strategy_buckets.get("dependency_bucket"), "required")
+
+    def test_independent_patch_rule_when_no_prereq(self):
+        diff = """diff --git a/a.c b/a.c
+@@ -1,2 +1,2 @@
+-int x = 1;
++int x = 2;
+"""
+        p = _patch(diff, ["a.c"])
+        dr = DryRunResult(applies_cleanly=True, apply_method="strict")
+        vd = PolicyEngine(PolicyConfig(profile="default"), llm_enabled=False).evaluate(
+            p,
+            dr,
+            _MockGit({}),
+            "any",
+            prerequisite_patches=[],
+            dependency_details=DependencyAnalysisDetails(candidate_count=3, strong_count=0, medium_count=0, weak_count=1),
+        )
+        self.assertTrue(any(h.get("rule_id") == "independent_patch" for h in vd.level_decision.rule_hits))
+        self.assertTrue(any("关联补丁判断" in s for s in vd.workflow_steps))
+        self.assertEqual(vd.strategy_buckets.get("dependency_bucket"), "independent")
+
+    def test_single_line_high_impact_rule(self):
+        diff = """diff --git a/lock.c b/lock.c
+@@ -1,2 +1,2 @@
+-if (!mutex_trylock(&foo))
++if (!mutex_lock_interruptible(&foo))
+"""
+        p = _patch(diff, ["lock.c"])
+        dr = DryRunResult(applies_cleanly=True, apply_method="strict")
+        vd = PolicyEngine(PolicyConfig(profile="default"), llm_enabled=False).evaluate(
+            p, dr, _MockGit({}), "any"
+        )
+        self.assertEqual(vd.level_decision.level, "L3")
+        self.assertTrue(any(h.get("rule_id") == "single_line_high_impact" for h in vd.level_decision.rule_hits))
 
     def test_profile_conservative_presets_exist(self):
         self.assertIn("conservative", POLICY_PROFILE_PRESETS)

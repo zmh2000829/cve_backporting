@@ -1,67 +1,122 @@
-# CVE Backporting Engine 演进计划（按优先级）
+# CVE Backporting Engine 演进计划（规则增强版）
 
-## 目标与约束
+## 总目标
 
 核心约束：
-- 不改动已有核心算法主流程（crawl/search/dependency/dryrun）。
-- 优先保证规则与输出可运营、可复用、可对外服务。
-- 采用 API-first + 批量闭环，统一验证口径。
+- [x] 不改动已有核心算法主流程，只在 `rules` 层补判断与解释。
+- [x] 让用户优先得到三个结论：能否直接回合、是否要考虑关联补丁、哪些改动可能影响较大。
+- [ ] 把规则结论统一沉淀到 `analyze`、`validate`、`batch-validate` 和 API 输出。
 
-## P0（本轮必须完成）
+## 第一优先级：先回答用户最关心的三类问题
 
-- [x] 增加 `server` CLI 入口与 URL 服务（已接入 `/api/analyze`、`/api/analyzer`、`/api/validate`、`/api/batch-validate`）。
-- [x] 完成 API 接口基础回归测试并生成 `UT-report.md`。
-- [ ] 重写 `plan.md`：以优先级、打勾/打叉形式展示当前里程碑（本次已完成）。
-- [ ] 在 `validate` 与 `batch-validate` 输出中补齐可复用的“规则驱动分级证据字段”，并统一展示 `level_decision`。
-- [ ] `batch-validate` 增加 L0-L5 全局统计：
-  - 场景占比（overall level distribution）
-  - 成功率与失败原因按 L0-L5 分桶
-  - 低级自动化优先（L0/L1）和高级别人工/建议模式清晰区分
-- [ ] `batch-validate` 的策略建议：默认努力把 L0 提升至 100% 可落地（在不引入额外风险前提下）。
+### A. 哪些补丁可以直接回合
 
-## P1（对交付有直接影响）
+- [x] 用 `DryRun base_level` 区分 `strict/context/3way/regenerated/...` 基线。
+- [x] 增加“直接回合候选”规则：
+  - `strict` 命中
+  - 无强/中依赖前置补丁
+  - 变更规模小
+  - 无明显调用链扩散
+  - 无锁/数据结构/引用计数等高敏感信号
+- [ ] 在最终输出中给出明确文案：
+  - `可直接回合`
+  - `补丁主体接近可直回，但需复核`
+  - `不建议直接回合`
 
-- [ ] 批量/单条 `analyze`、`validate` 的返回过程要完整：
-  - 输入处理到 patch 定位到 dryrun 的全过程都可追溯
-  - 规则触发、rule evidence、next_action 清晰输出
-- [ ] 分析结果中“补丁关联”统一使用完整 URL（含仓库 URL + commit 对象），避免仅展示裸 `commit_id`。
-- [ ] 补丁变更判断增强：
-  - 判断并明确标注“无变更”场景（patch 与目标无修改）
-  - 标注“仅单行修改但高影响”警告
-  - 报告变更行数与风险提示（warning 级别）
-- [ ] 函数级影响链增强：
-  - 明确“被调用 / 调用”对当前变更的影响判断
-  - 区分“有无实际影响”与“仅引用到”两类场景
-  - 增加调用链传播到关键 API 的风险分数
-- [ ] 数据结构与锁保护专项检测（高优先）：
-  - 修改/新增数据结构字段时的兼容性评估
-  - 锁变更（spinlock/mutex/rwlock/rcu 等）单独标红提示
-  - 将该类变更默认抬升到更高 review level
+### B. 哪些需要考虑 / 不考虑关联补丁
 
-## P2（规则治理与协作）
+- [x] 将依赖分析结果接入规则引擎，而不是只停留在 narrative。
+- [x] 增加关联补丁规则：
+  - `prerequisite_required`：存在 strong 依赖，必须考虑前置补丁
+  - `prerequisite_recommended`：存在 medium 依赖，建议一并审查
+  - `independent_patch`：无 strong/medium 依赖，可不把关联补丁作为首要阻塞项
+- [ ] 输出要从“列出前置补丁”升级为“解释为什么要考虑/不考虑”
+- [ ] 后续补充后置关联补丁规则：
+  - 当前修复是否会影响后续补丁吸收
+  - 当前 patch 是否只是一个 patchset 的中间步骤
 
-- [ ] 打造可插拔规则包标准文档（`rules/README.md`）：
-  - 规则 `rule_id`
-  - `severity` 与 `level_floor`
-  - `evidence` 字段规范
-  - 开关 `enabled` 与回退策略
-- [ ] 完成规则变更细则（版本化）：
-  - 新增/移除规则变更记录
-  - 对应的正例、反例、关闭开关行为
-- [ ] 将 `rules/policy.example.yaml` 作为统一配置入口，禁止在根配置散落规则配置（若有，执行清理）
+### C. 哪些变更可能有较大影响
 
-## P3（工程化交付）
+- [x] 保留并继续使用已有规则：
+  - 大改动行数 / hunk 数
+  - 调用链扩散
+  - 关键结构关键词
+  - L1 API surface
+- [x] 新增高影响补充规则：
+  - 单行但高影响变更
+  - 函数入参变化
+  - 锁、引用计数、生命周期、数据结构布局敏感点分类
+- [ ] 后续补齐更强场景：
+  - struct 字段新增/删除是否影响初始化、拷贝、比较、序列化
+  - 锁变更是否影响配对、顺序、嵌套与上下文
+  - 仅一行比较运算或错误路径变化导致的语义反转
 
-- [ ] 调整批量 validate 报告模板：
-  - L0-L5 按级别导出的 CSV/JSON 报表
-  - 高风险项（锁、数据结构、调用链）的归因字段
-  - 建议动作与审批状态（pass/review/manual)
-- [ ] 补充 API 文档与规则文档对齐（`README.md`、`README_zh.md`、`plan.md`）。
-- [ ] 提供最小闭环：每次规则/参数变更必须配套测试与报告更新，避免文档-实现分叉。
+## 第二优先级：L0-L5 的业务定义收紧
 
-## 运行验收（建议作为 CI 门禁）
+- [x] `L0`：严格命中且无风险规则，才允许 `harmless=true`
+- [x] `L1`：轻微上下文漂移，不再自动视为无害
+- [x] `L2`：中等风险，通常对应中依赖、3-way、大改动、入参变化
+- [x] `L3`：锁、结构、生命周期、单行高敏感语义等高影响场景
+- [x] `L4`：关键变更沿调用链扩散，或冲突适配后的高风险场景
+- [x] `L5`：未知/回退路径，按最低信心处理
+- [ ] 后续把每一级的人工动作再写死：
+  - `auto-pass`
+  - `llm-review`
+  - `targeted-review`
+  - `focused-review`
+  - `manual-approval`
+  - `fallback-review`
 
-- [ ] `batch-validate` 产出必须包含 `total/level_summary`（L0-L5）与 `coverage` 两类指标。
-- [ ] 任一默认规则触发后，`analysis_narrative` 必须附带 rule evidence 与升级原因。
-- [ ] 函数影响链中检测到锁变更时，结果中必须带 `severity_hint` 与 `next_action`.
-- [ ] API 返回中 `GET /health` 恒定可用；错误输入必须返回标准 JSON 错误对象。
+## 第三优先级：批量统计与规则运营
+
+- [x] `batch-validate` 已有 level 分布基础统计
+- [ ] 补齐 L0-L5 的业务化统计口径：
+  - 各 level 占比
+  - 各 level 的通过率 / 失败率
+  - 各 level 的主要触发规则
+  - 强依赖 / 中依赖 / 无依赖占比
+- [ ] 目标不是盲目提高通过率，而是尽量把可自动处理的样本压到 `L0`
+- [ ] 对高等级场景给出清晰动作：
+  - `L0`: 直接进入低风险流程
+  - `L1-L2`: 定向复核
+  - `L3-L5`: 人工审批 / 回归 / patch review
+
+## 第四优先级：规则资产化
+
+- [x] 规则继续集中在 `rules/` 目录下维护
+- [x] `rules/policy.example.yaml` 作为统一配置样例入口
+- [ ] 为每条规则固定资产字段：
+  - `rule_id`
+  - `severity`
+  - `level_floor`
+  - `message`
+  - `evidence`
+- [ ] 支持更细粒度配置：
+  - 直回阈值
+  - 单行高影响阈值
+  - 调用链 fanout 阈值
+  - 关键关键词分组
+- [ ] 允许团队按子系统扩展：
+  - net
+  - mm
+  - fs
+  - scheduler
+  - arch
+
+## 近期待补项
+
+- [ ] 将“完整 commit URL”贯穿到关联补丁输出，而不是只保留 commit id
+- [ ] `validate` 输出中补齐“为什么是这个级别”的简洁总结
+- [ ] `analyze` / `validate` / API 返回统一使用同一套规则证据结构
+- [ ] 为新增规则补最少正例 / 反例测试
+- [ ] 对锁与数据结构变更增加更明确的 review checklist
+
+## 验收标准
+
+- [ ] 任一结果都能回答：
+  - 能不能直接回合
+  - 是否必须考虑关联补丁
+  - 风险最高的变更点是什么
+- [ ] 任一规则命中后都带 `evidence`
+- [ ] `batch-validate` 能按 L0-L5 做分桶统计
+- [ ] 规则增强不改变原有核心算法决策链，只做风险编排与解释增强

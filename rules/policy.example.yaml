@@ -8,16 +8,22 @@ policy:
   profile: "balanced"
 
   # 规则开关
+  prerequisite_rules_enabled: true
+  direct_backport_rules_enabled: true
   large_change_rules_enabled: true
   call_chain_rules_enabled: true
   critical_structure_rules_enabled: true
   l1_api_surface_rules_enabled: true
+  high_impact_single_line_rules_enabled: true
 
   # 阈值
+  direct_backport_line_threshold: 24
+  direct_backport_hunk_threshold: 2
   large_change_line_threshold: 80
   large_hunk_threshold: 8
   call_chain_fanout_threshold: 6
   l1_return_line_delta_threshold: 2
+  single_line_impact_max_changed_lines: 4
 
   # 关键结构关键词
   critical_structure_keywords:

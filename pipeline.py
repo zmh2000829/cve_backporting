@@ -312,6 +312,8 @@ class Pipeline:
                 self.git_mgr,
                 target_version,
                 path_mapper=self.analysis.path_mapper,
+                prerequisite_patches=result.prerequisite_patches,
+                dependency_details=result.dependency_details,
             )
             result.level_decision = result.validation_details.level_decision
             result.function_impacts = result.validation_details.function_impacts

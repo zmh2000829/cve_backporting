@@ -6,6 +6,26 @@ from typing import Dict, List, Optional
 from rules.base import PolicyRule, RuleContext, RuleRegistry
 
 
+def _changed_bodies(diff_text: str) -> List[str]:
+    bodies = []
+    for line in (diff_text or "").split("\n"):
+        if line.startswith(("+++", "---")):
+            continue
+        if len(line) >= 2 and line[0] in "+-":
+            bodies.append(line[1:].strip())
+    return bodies
+
+
+def _count_params(signature: str) -> int:
+    m = re.search(r"\((.*)\)", signature)
+    if not m:
+        return -1
+    inner = m.group(1).strip()
+    if not inner or inner == "void":
+        return 0
+    return len([p for p in inner.split(",") if p.strip()])
+
+
 class LargeChangeRule(PolicyRule):
     rule_id = "large_change"
     name = "Large Change Warning"
@@ -42,13 +62,129 @@ class CriticalStructureRule(PolicyRule):
         if not ctx.critical_structure_hits:
             return None
         uniq = sorted(set(ctx.critical_structure_hits))
+        categories = []
+        if any(k in uniq for k in ("spin_lock", "mutex", "rcu")):
+            categories.append("locking")
+        if any(k in uniq for k in ("refcount", "kref", "atomic")):
+            categories.append("lifetime")
+        if "struct" in uniq:
+            categories.append("layout")
         return {
             "rule_id": self.rule_id,
             "name": self.name,
             "severity": self.severity,
             "level_floor": "L3",
             "message": "检测到关键结构/锁变更: " + ", ".join(uniq[:6]),
-            "evidence": {"keywords": uniq},
+            "evidence": {"keywords": uniq, "categories": categories},
+        }
+
+
+class PrerequisiteRequiredRule(PolicyRule):
+    rule_id = "prerequisite_required"
+    name = "Strong Prerequisite Required"
+    severity = "high"
+
+    def evaluate(self, ctx: RuleContext) -> Optional[Dict]:
+        strong = [p for p in ctx.prerequisite_patches if getattr(p, "grade", "") == "strong"]
+        if not strong:
+            return None
+        return {
+            "rule_id": self.rule_id,
+            "name": self.name,
+            "severity": self.severity,
+            "level_floor": "L3",
+            "message": f"检测到 {len(strong)} 个强依赖前置补丁，不能忽略关联补丁顺序",
+            "evidence": {
+                "count": len(strong),
+                "commits": [p.commit_id[:12] for p in strong[:6]],
+                "subjects": [p.subject for p in strong[:3]],
+            },
+        }
+
+
+class PrerequisiteRecommendedRule(PolicyRule):
+    rule_id = "prerequisite_recommended"
+    name = "Prerequisite Review Recommended"
+    severity = "warn"
+
+    def evaluate(self, ctx: RuleContext) -> Optional[Dict]:
+        medium = [p for p in ctx.prerequisite_patches if getattr(p, "grade", "") == "medium"]
+        if not medium:
+            return None
+        return {
+            "rule_id": self.rule_id,
+            "name": self.name,
+            "severity": self.severity,
+            "level_floor": "L2",
+            "message": f"检测到 {len(medium)} 个中等依赖，建议同时评估关联补丁",
+            "evidence": {
+                "count": len(medium),
+                "commits": [p.commit_id[:12] for p in medium[:6]],
+                "subjects": [p.subject for p in medium[:3]],
+            },
+        }
+
+
+class IndependentPatchRule(PolicyRule):
+    rule_id = "independent_patch"
+    name = "Independent Patch Hint"
+    severity = "info"
+
+    def evaluate(self, ctx: RuleContext) -> Optional[Dict]:
+        if ctx.prerequisite_patches:
+            return None
+        if ctx.dependency_details is None:
+            return None
+        return {
+            "rule_id": self.rule_id,
+            "name": self.name,
+            "severity": self.severity,
+            "level_floor": "L0",
+            "message": "当前未发现强/中依赖，关联补丁可不作为首要阻塞项",
+            "evidence": {
+                "candidate_count": getattr(ctx.dependency_details, "candidate_count", 0),
+                "strong_count": getattr(ctx.dependency_details, "strong_count", 0),
+                "medium_count": getattr(ctx.dependency_details, "medium_count", 0),
+                "weak_count": getattr(ctx.dependency_details, "weak_count", 0),
+            },
+        }
+
+
+class DirectBackportRule(PolicyRule):
+    rule_id = "direct_backport_candidate"
+    name = "Direct Backport Candidate"
+    severity = "info"
+
+    def __init__(self, line_threshold: int, hunk_threshold: int):
+        self.line_threshold = line_threshold
+        self.hunk_threshold = hunk_threshold
+
+    def evaluate(self, ctx: RuleContext) -> Optional[Dict]:
+        max_fanout = max(
+            [len(fi.callers) + len(fi.callees) for fi in ctx.function_impacts] or [0]
+        )
+        if ctx.base_level != "L0":
+            return None
+        if ctx.prerequisite_patches:
+            return None
+        if ctx.changed_lines > self.line_threshold or ctx.hunk_count > self.hunk_threshold:
+            return None
+        if ctx.critical_structure_hits or max_fanout > 0:
+            return None
+        return {
+            "rule_id": self.rule_id,
+            "name": self.name,
+            "severity": self.severity,
+            "level_floor": "L0",
+            "message": "满足直接回合候选条件：strict 命中、无前置依赖、改动规模小、无明显调用链牵连",
+            "evidence": {
+                "base_level": ctx.base_level,
+                "changed_lines": ctx.changed_lines,
+                "hunk_count": ctx.hunk_count,
+                "max_fanout": max_fanout,
+                "line_threshold": self.line_threshold,
+                "hunk_threshold": self.hunk_threshold,
+            },
         }
 
 
@@ -157,11 +293,19 @@ class L1APISurfaceRule(PolicyRule):
                 minus_sigs.append(re.sub(r"\s+", " ", body.strip()))
         sig_change = bool(plus_sigs and minus_sigs and set(plus_sigs) != set(minus_sigs))
         ret_delta = abs(plus_ret - minus_ret)
+        plus_param_counts = [_count_params(sig) for sig in plus_sigs]
+        minus_param_counts = [_count_params(sig) for sig in minus_sigs]
+        param_count_changed = bool(
+            plus_param_counts and minus_param_counts and set(plus_param_counts) != set(minus_param_counts)
+        )
         return {
             "sig_change": sig_change,
             "return_delta": ret_delta,
             "plus_return": plus_ret,
             "minus_return": minus_ret,
+            "param_count_changed": param_count_changed,
+            "plus_param_counts": plus_param_counts,
+            "minus_param_counts": minus_param_counts,
         }
 
     def evaluate(self, ctx: RuleContext) -> Optional[Dict]:
@@ -169,6 +313,10 @@ class L1APISurfaceRule(PolicyRule):
         parts = []
         if scan["sig_change"]:
             parts.append("函数定义/签名行在 diff 中同时增删且文本不一致，可能存在形参、修饰符或 ABI 变化")
+        if scan["param_count_changed"]:
+            parts.append(
+                f"函数入参数量发生变化（-{scan['minus_param_counts'][:2]} / +{scan['plus_param_counts'][:2]}）"
+            )
         if scan["return_delta"] >= self.return_delta_threshold:
             parts.append(
                 f"return 语句增删差 {scan['return_delta']}（+{scan['plus_return']}/-{scan['minus_return']}），"
@@ -177,7 +325,7 @@ class L1APISurfaceRule(PolicyRule):
         if not parts:
             return None
 
-        level_floor = "L1" if ctx.base_level == "L1" else "L2"
+        level_floor = "L2" if scan["param_count_changed"] else ("L1" if ctx.base_level == "L1" else "L2")
         return {
             "rule_id": self.rule_id,
             "name": self.name,
@@ -192,11 +340,70 @@ class L1APISurfaceRule(PolicyRule):
         }
 
 
+class SingleLineHighImpactRule(PolicyRule):
+    rule_id = "single_line_high_impact"
+    name = "Single Line But High Impact"
+    severity = "warn"
+
+    CATEGORY_PATTERNS = {
+        "locking": re.compile(r"\b(spin_lock|spin_unlock|mutex_lock|mutex_unlock|read_lock|write_lock|rcu_|rwlock|down_write|up_write)\b"),
+        "lifetime": re.compile(r"\b(refcount|kref|atomic_|kfree|kvfree|kmalloc|kzalloc|list_del|list_add)\b"),
+        "control_flow": re.compile(r"\b(if|else|goto|return|break|continue)\b"),
+        "error_path": re.compile(r"\b(NULL|ERR_|IS_ERR|PTR_ERR|WARN_ON|BUG_ON)\b"),
+        "layout": re.compile(r"\b(sizeof|offsetof|container_of|struct)\b"),
+    }
+
+    def __init__(self, max_changed_lines: int):
+        self.max_changed_lines = max_changed_lines
+
+    def evaluate(self, ctx: RuleContext) -> Optional[Dict]:
+        if ctx.changed_lines == 0 or ctx.changed_lines > self.max_changed_lines:
+            return None
+        matched_categories = []
+        sample_lines = []
+        for body in _changed_bodies(ctx.patch.diff_code or ""):
+            for name, pattern in self.CATEGORY_PATTERNS.items():
+                if pattern.search(body):
+                    matched_categories.append(name)
+                    if len(sample_lines) < 4:
+                        sample_lines.append(body)
+        if not matched_categories:
+            return None
+        uniq = sorted(set(matched_categories))
+        high_risk = any(cat in uniq for cat in ("locking", "lifetime", "layout"))
+        return {
+            "rule_id": self.rule_id,
+            "name": self.name,
+            "severity": "high" if high_risk else self.severity,
+            "level_floor": "L3" if high_risk else "L2",
+            "message": (
+                f"变更行数仅 {ctx.changed_lines} 行，但涉及高敏感语义: {', '.join(uniq)}"
+            ),
+            "evidence": {
+                "changed_lines": ctx.changed_lines,
+                "categories": uniq,
+                "sample_lines": sample_lines,
+                "max_changed_lines": self.max_changed_lines,
+            },
+        }
+
+
 def register_rules(registry: RuleRegistry, config=None):
+    direct_line_threshold = getattr(config, "direct_backport_line_threshold", 24) if config else 24
+    direct_hunk_threshold = getattr(config, "direct_backport_hunk_threshold", 2) if config else 2
     line_threshold = getattr(config, "large_change_line_threshold", 80) if config else 80
     hunk_threshold = getattr(config, "large_hunk_threshold", 8) if config else 8
     fanout_threshold = getattr(config, "call_chain_fanout_threshold", 6) if config else 6
     return_delta = getattr(config, "l1_return_line_delta_threshold", 2) if config else 2
+    single_line_max = getattr(config, "single_line_impact_max_changed_lines", 4) if config else 4
+
+    if not config or getattr(config, "prerequisite_rules_enabled", True):
+        registry.register(PrerequisiteRequiredRule())
+        registry.register(PrerequisiteRecommendedRule())
+        registry.register(IndependentPatchRule())
+
+    if not config or getattr(config, "direct_backport_rules_enabled", True):
+        registry.register(DirectBackportRule(direct_line_threshold, direct_hunk_threshold))
 
     if not config or getattr(config, "large_change_rules_enabled", True):
         registry.register(LargeChangeRule(line_threshold, hunk_threshold))
@@ -210,3 +417,6 @@ def register_rules(registry: RuleRegistry, config=None):
 
     if not config or getattr(config, "l1_api_surface_rules_enabled", True):
         registry.register(L1APISurfaceRule(return_delta))
+
+    if not config or getattr(config, "high_impact_single_line_rules_enabled", True):
+        registry.register(SingleLineHighImpactRule(single_line_max))
