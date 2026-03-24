@@ -249,8 +249,133 @@ python cli.py validate --cve CVE-2024-26633 --target 5.10-hulk --known-fix <comm
 # 批量验证
 python cli.py batch-validate --file cve_data.json --target 5.10-hulk
 
+# 启动 HTTP API 服务（analyze / validate / batch-validate）
+python cli.py server --host 0.0.0.0 --port 8000
+
 # 基准评估
 python cli.py benchmark --file benchmarks.yaml --target 5.10-hulk
+```
+
+说明：`/api/analyze` 与 `/api/analyzer` 可互通，均支持 `target_version` 或 `target` 字段；所有返回均以 JSON 形式给出完整过程与规则详情。
+
+## HTTP API（server 模式）
+
+### 启动 API 服务
+
+```bash
+python cli.py server --host 127.0.0.1 --port 8000 --config config.yaml
+```
+
+- 通用参数包含 `--host`（监听地址，默认 `127.0.0.1`）、`--port`（监听端口，默认 `8000`）、`--config`（同 CLI 的配置文件，默认 `config.yaml`）
+- 路由：`GET /health`
+- 路由：`POST /api/analyze`
+- 路由：`POST /api/analyzer`（兼容别名）
+- 路由：`POST /api/validate`
+- 路由：`POST /api/batch-validate`
+
+成功响应统一返回：
+
+```json
+{
+  "ok": true,
+  "data": { ... }
+}
+```
+
+失败响应返回 HTTP `400/404/500`，例如：
+
+```json
+{
+  "ok": false,
+  "error": "错误信息"
+}
+```
+
+### `POST /api/analyze` / `POST /api/analyzer`
+
+```json
+{
+  "target_version": "5.10-hulk",
+  "cve_id": "CVE-2024-26633",
+  "deep": false,
+  "no_dryrun": false
+}
+```
+
+或批量请求：
+
+```json
+{
+  "target": "5.10-hulk",
+  "cves": ["CVE-2024-26633", "CVE-2024-26634"],
+  "cve_ids": ["CVE-2024-26635"],
+  "deep": true
+}
+```
+
+`cve_id`、`cves`、`cve_ids` 会被合并并统一处理。
+
+### `POST /api/validate`
+
+```json
+{
+  "target_version": "5.10-hulk",
+  "cve_id": "CVE-2024-26633",
+  "known_fix": "da23bd709b46",
+  "known_prereqs": "abc111,def222",
+  "mainline_fix": "aaabbb000111",
+  "mainline_intro": "bbb222ccc333",
+  "deep": false
+}
+```
+
+`known_prereqs` 也可传数组：
+
+```json
+{
+  "known_prereqs": ["abc111", "def222"]
+}
+```
+
+### `POST /api/batch-validate`
+
+```json
+{
+  "target": "5.10-hulk",
+  "deep": false,
+  "items": [
+    {
+      "cve_id": "CVE-2024-26633",
+      "known_fix": "da23bd709b46",
+      "known_prereqs": ["abc111"],
+      "mainline_fix": "aaabbb000111",
+      "mainline_intro": "bbb222ccc333"
+    },
+    {
+      "cve_id": "CVE-2024-26634",
+      "known_fix": "11aabbeff",
+      "known_prereqs": "111,222"
+    }
+  ]
+}
+```
+
+返回结果包含 `results` / `errors` / `summary`：
+
+```json
+{
+  "ok": true,
+  "data": {
+    "operation": "batch-validate",
+    "results": [],
+    "errors": [],
+    "summary": {
+      "total": 0,
+      "success": 0,
+      "error": 0
+    }
+  }
+}
 ```
 
 ---

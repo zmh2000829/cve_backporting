@@ -21,7 +21,11 @@ import sys
 import os
 import logging
 import tempfile
+import time
 from datetime import datetime
+from dataclasses import asdict
+import re
+from urllib.parse import urlparse
 
 from rich.console import Console, Group
 from rich.panel import Panel
@@ -64,6 +68,329 @@ def _make_git_mgr(config, tv: str) -> GitRepoManager:
     )
 
 
+def _coerce_commit_list(values):
+    """将配置/请求参数中的 commit 列表统一成标准 list[str]。"""
+    if not values:
+        return []
+    if isinstance(values, str):
+        return [v.strip() for v in values.split(",") if v.strip()]
+    if isinstance(values, (list, tuple, set)):
+        return [str(v).strip() for v in values if str(v).strip()]
+    return [str(values).strip()] if str(values).strip() else []
+
+
+def _coerce_commit_url_base(value: str) -> str:
+    if not value:
+        return ""
+    v = value.strip().rstrip("/")
+    if v.endswith(".git"):
+        v = v[:-4]
+    return v
+
+
+def _build_commit_url_from_remote(remote_url: str, commit_id: str) -> str:
+    if not remote_url or not commit_id:
+        return ""
+    candidate = _coerce_commit_url_base(remote_url.strip())
+    if not candidate:
+        return ""
+
+    # git@host:group/repo 或 ssh://git@host/group/repo
+    if candidate.startswith("git@") or candidate.startswith("ssh://git@"):
+        m = re.match(r"^(?:ssh://)?git@(?P<host>[^:]+):(?P<path>.+)$", candidate)
+        if m:
+            host = m.group("host")
+            path = _coerce_commit_url_base(m.group("path"))
+            path = path.lstrip("/")
+            base = f"https://{host}/{path}"
+        else:
+            base = candidate
+    elif "://" in candidate:
+        parsed = urlparse(candidate)
+        base = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+    else:
+        base = candidate
+
+    base = _coerce_commit_url_base(base)
+    host = ""
+    if "://" in base:
+        parsed = urlparse(base)
+        host = parsed.netloc.lower()
+    elif "@" in base and ":" in base.split("@", 1)[1]:
+        host = base.split("@", 1)[1].split(":", 1)[0].lower()
+    else:
+        host = ""
+
+    if "github.com" in host:
+        return f"{base}/commit/{commit_id}"
+    if "gitlab.com" in host:
+        return f"{base}/-/commit/{commit_id}"
+    if "bitbucket.org" in host:
+        return f"{base}/commits/{commit_id}"
+    return f"{base}/commit/{commit_id}"
+
+
+def _resolve_repo_config(config, target: str) -> dict:
+    rc = config.repositories.get(target, {})
+    if isinstance(rc, dict):
+        return rc
+    return {"path": rc} if rc else {}
+
+
+def _resolve_commit_url(config, git_mgr, target: str, commit_id: str) -> str:
+    if not commit_id:
+        return ""
+
+    rc = _resolve_repo_config(config, target)
+    tmpl = (rc.get("commit_url_template")
+            or rc.get("commit_url")
+            or rc.get("web_url")
+            or rc.get("url")
+            or rc.get("remote_url"))
+
+    if tmpl:
+        try:
+            return tmpl.format(
+                commit=commit_id,
+                commit_id=commit_id,
+                short_commit=commit_id[:12],
+                cve_repo=target,
+                target=target,
+            )
+        except Exception:
+            url = _coerce_commit_url_base(tmpl)
+            if any(s in url.lower() for s in ("http://", "https://", "git@")):
+                return _build_commit_url_from_remote(url, commit_id)
+
+    try:
+        remote = git_mgr.run_git(["git", "remote", "get-url", "origin"], target, timeout=10)
+    except Exception:
+        remote = None
+    if remote:
+        return _build_commit_url_from_remote(remote, commit_id)
+    return ""
+
+
+def _serialize_commit_reference(config, git_mgr, target: str, commit_id: str, *,
+                               extra: dict = None) -> dict:
+    cid = (commit_id or "").strip()
+    if not cid:
+        return {"commit_id": "", "commit_id_short": ""}
+    data = {"commit_id": cid, "commit_id_short": cid[:12]}
+    if extra:
+        data.update(extra)
+    url = _resolve_commit_url(config, git_mgr, target, cid)
+    if url:
+        data["commit_url"] = url
+    return data
+
+
+def _collect_prereq_patches(patches, config, git_mgr, target: str):
+    out = []
+    for p in patches or []:
+        d = asdict(p) if hasattr(p, "__dict__") else dict(p)
+        cid = d.get("commit_id", "")
+        ref = _serialize_commit_reference(config, git_mgr, target, cid)
+        d.update(ref)
+        out.append(d)
+    return out
+
+
+def _collect_level_policies():
+    try:
+        from rules.level_policies import LEVEL_POLICIES
+    except Exception:
+        return []
+    out = []
+    for p in LEVEL_POLICIES:
+        out.append({
+            "level": p.level,
+            "methods": list(getattr(p, "methods", [])),
+            "strategy": getattr(p, "strategy", ""),
+            "review_mode": getattr(p, "review_mode", ""),
+            "next_action": getattr(p, "next_action", ""),
+            "confidence_with_llm": getattr(p, "confidence_with_llm", ""),
+            "confidence_without_llm": getattr(p, "confidence_without_llm", ""),
+        })
+    return out
+
+
+def _collect_rules_metadata(policy_config, level_decision=None, validation_details=None):
+    payload = {
+        "profile": getattr(policy_config, "profile", "default") if policy_config else "default",
+        "enabled": bool(getattr(policy_config, "enabled", True)),
+        "policy_overrides": {
+            "large_change_rules_enabled": bool(getattr(policy_config, "large_change_rules_enabled", True)),
+            "call_chain_rules_enabled": bool(getattr(policy_config, "call_chain_rules_enabled", True)),
+            "critical_structure_rules_enabled": bool(getattr(policy_config, "critical_structure_rules_enabled", True)),
+            "l1_api_surface_rules_enabled": bool(getattr(policy_config, "l1_api_surface_rules_enabled", True)),
+            "large_change_line_threshold": getattr(policy_config, "large_change_line_threshold", 80),
+            "large_hunk_threshold": getattr(policy_config, "large_hunk_threshold", 8),
+            "call_chain_fanout_threshold": getattr(policy_config, "call_chain_fanout_threshold", 6),
+            "l1_return_line_delta_threshold": getattr(policy_config, "l1_return_line_delta_threshold", 2),
+        },
+        "level_policies": _collect_level_policies(),
+    }
+
+    if validation_details:
+        payload["validation_context"] = {
+            "rule_profile": validation_details.get("rule_profile", ""),
+            "rule_version": validation_details.get("rule_version", ""),
+            "workflow_steps": validation_details.get("workflow_steps", []),
+            "warnings": validation_details.get("warnings", []),
+        }
+
+    if level_decision:
+        if hasattr(level_decision, "__dict__"):
+            payload["level_decision"] = asdict(level_decision)
+        elif isinstance(level_decision, dict):
+            payload["level_decision"] = level_decision
+        if hasattr(level_decision, "rule_hits"):
+            payload["rule_hits"] = list(getattr(level_decision, "rule_hits", []) or [])
+        elif isinstance(level_decision, dict):
+            payload["rule_hits"] = list(level_decision.get("rule_hits", []) or [])
+
+    return payload
+
+
+def _make_stage_trace_tracker(stage_callback=None):
+    events = []
+    starts = {}
+
+    def track(key, status, detail=""):
+        now = time.time()
+        if status == "running":
+            starts[key] = now
+            events.append({
+                "stage": key,
+                "status": "running",
+                "detail": detail,
+                "duration_ms": 0.0,
+            })
+        else:
+            st = starts.pop(key, None)
+            duration_ms = round((now - st) * 1000, 2) if st is not None else 0.0
+            events.append({
+                "stage": key,
+                "status": status,
+                "detail": detail,
+                "duration_ms": duration_ms,
+            })
+        if stage_callback:
+            stage_callback(key, status, detail)
+
+    return events, track
+
+
+def _build_analyze_payload(result, pipe: Pipeline, config, target: str,
+                          stage_events: list = None,
+                          policy_config=None, deep_analysis=None):
+    prereqs = _collect_prereq_patches(
+        result.prerequisite_patches, config, pipe.git_mgr, target)
+
+    cve_commit_urls = {}
+    if result.cve_info and result.cve_info.version_commit_mapping:
+        for ver, cid in result.cve_info.version_commit_mapping.items():
+            cve_commit_urls[ver] = _serialize_commit_reference(
+                config, pipe.git_mgr, target, cid, extra={"version": ver}
+            )
+
+    dr_detail = {}
+    if result.dry_run:
+        dr = result.dry_run
+        dr_detail = {
+            "applies_cleanly": dr.applies_cleanly,
+            "apply_method": dr.apply_method,
+            "conflicting_files": dr.conflicting_files,
+            "error_output": dr.error_output[:500] if dr.error_output else "",
+            "has_adapted_patch": bool(dr.adapted_patch),
+            "apply_attempts": dr.apply_attempts,
+        }
+
+    fix_patch_detail = {}
+    if result.fix_patch:
+        fp = result.fix_patch
+        fix_patch_detail = _serialize_commit_reference(
+            config, pipe.git_mgr, target, fp.commit_id,
+            extra={
+                "subject": fp.subject,
+                "author": fp.author,
+                "modified_files": fp.modified_files,
+                "diff_lines": len((fp.diff_code or "").splitlines()),
+            }
+        )
+
+    try:
+        narrative = _build_analysis_narrative(
+            result, dr_detail, {}, {}, is_validate=False)
+    except Exception:
+        narrative = {}
+
+    valid_details = {}
+    if result.validation_details:
+        valid_details = {
+            "rule_profile": getattr(result.validation_details, "rule_profile", ""),
+            "rule_version": getattr(result.validation_details, "rule_version", ""),
+            "workflow_steps": getattr(result.validation_details, "workflow_steps", []),
+            "warnings": getattr(result.validation_details, "warnings", []),
+        }
+
+    payload = {
+        "cve_id": result.cve_id,
+        "target_version": target,
+        "is_vulnerable": result.is_vulnerable,
+        "is_fixed": result.is_fixed,
+        "dry_run_clean": result.dry_run.applies_cleanly if result.dry_run else None,
+        "dryrun_detail": dr_detail,
+        "prerequisite_patches": prereqs,
+        "version_commit_mapping_urls": cve_commit_urls,
+        "rules": _collect_rules_metadata(
+            policy_config,
+            level_decision=result.level_decision,
+            validation_details=valid_details,
+        ),
+        "analysis_narrative": narrative,
+        "recommendations": result.recommendations,
+        "analysis_stages": stage_events or [],
+        "fix_patch_detail": fix_patch_detail,
+        "level_decision": result.level_decision.__dict__ if result.level_decision else {},
+        "validation_details": valid_details,
+        "function_impacts": [fi.__dict__ for fi in (result.function_impacts or [])],
+    }
+    if deep_analysis is not None:
+        payload["deep_analysis"] = _v2_to_json(deep_analysis)
+
+    return payload
+
+
+def run_analyze_payload(cve_id: str, target_version: str, config, *,
+                       enable_dryrun: bool = True, deep: bool = False,
+                       stage_callback=None):
+    git_mgr = _make_git_mgr(config, target_version)
+    pipe = Pipeline(git_mgr, path_mappings=config.path_mappings,
+                    llm_config=config.llm,
+                    policy_config=getattr(config, "policy", None))
+
+    stage_events, record_stage = _make_stage_trace_tracker(
+        stage_callback=stage_callback)
+
+    result = pipe.analyze(cve_id, target_version,
+                          enable_dryrun=enable_dryrun,
+                          on_stage=record_stage)
+
+    deep_analysis = None
+    if deep:
+        deep_analysis = pipe.analyze_deep(cve_id, target_version,
+                                         on_stage=record_stage)
+
+    return _build_analyze_payload(
+        result, pipe, config, target_version,
+        stage_events=stage_events,
+        policy_config=getattr(config, "policy", None),
+        deep_analysis=deep_analysis,
+    )
+
+
 # ─── analyze ─────────────────────────────────────────────────────────
 
 def cmd_analyze(args, config):
@@ -86,16 +413,20 @@ def cmd_analyze(args, config):
     deep = getattr(args, "deep", False)
     for cve_id in cves:
         if deep:
-            _analyze_deep(pipe, cve_id, args.target_version, out_dir=out_dir)
+            _analyze_deep(pipe, cve_id, args.target_version, out_dir=out_dir,
+                         policy_config=getattr(config, "policy", None))
         else:
             _analyze_one(pipe, cve_id, args.target_version,
-                         enable_dryrun=not args.no_dryrun, out_dir=out_dir)
+                         config,
+                         enable_dryrun=not args.no_dryrun, out_dir=out_dir,
+                         policy_config=getattr(config, "policy", None))
 
 
 def _analyze_one(pipe: Pipeline, cve_id: str, target: str,
-                 enable_dryrun: bool, out_dir: str):
+                 enable_dryrun: bool, out_dir: str, config, policy_config=None):
     tracker = StageTracker(STAGES)
     header = make_header(cve_id, target)
+    stage_events, record_stage = _make_stage_trace_tracker()
 
     def on_stage(key, status, detail=""):
         tracker.start(key) if status == "running" else tracker.done(key, status, detail)
@@ -106,6 +437,7 @@ def _analyze_one(pipe: Pipeline, cve_id: str, target: str,
     with Live(_layout(), console=console, refresh_per_second=8) as live:
         def _update(key, status, detail=""):
             on_stage(key, status, detail)
+            record_stage(key, status, detail)
             live.update(_layout())
 
         result = pipe.analyze(cve_id, target,
@@ -113,7 +445,7 @@ def _analyze_one(pipe: Pipeline, cve_id: str, target: str,
                               on_stage=_update)
 
     console.print()
-    console.print(render_report(result))
+    console.print(render_report(result, policy_config=policy_config))
     console.print(render_recommendations(result))
 
     # 输出生成的 patch 文件
@@ -125,46 +457,19 @@ def _analyze_one(pipe: Pipeline, cve_id: str, target: str,
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     fp = os.path.join(out_dir, f"{cve_id}_{target}_{ts}.json")
-    from dataclasses import asdict
-    prereqs = [asdict(p) for p in result.prerequisite_patches] if result.prerequisite_patches else []
-
-    dr_detail = {}
-    if result.dry_run:
-        dr = result.dry_run
-        dr_detail = {
-            "applies_cleanly": dr.applies_cleanly,
-            "apply_method": dr.apply_method,
-            "conflicting_files": dr.conflicting_files,
-            "error_output": dr.error_output[:500] if dr.error_output else "",
-            "has_adapted_patch": bool(dr.adapted_patch),
-            "apply_attempts": dr.apply_attempts,
-        }
-
-    try:
-        narrative = _build_analysis_narrative(
-            result, dr_detail, {}, {},
-            is_validate=False)
-    except Exception:
-        narrative = {}
+    payload = _build_analyze_payload(
+        result, pipe, config, target,
+        stage_events=stage_events,
+        policy_config=policy_config)
 
     with open(fp, "w", encoding="utf-8") as f:
-        json.dump({
-            "cve_id": result.cve_id,
-            "target_version": result.target_version,
-            "is_vulnerable": result.is_vulnerable,
-            "is_fixed": result.is_fixed,
-            "dry_run_clean": result.dry_run.applies_cleanly if result.dry_run else None,
-            "dryrun_detail": dr_detail,
-            "prerequisite_patches": prereqs,
-            "recommendations": result.recommendations,
-            "analysis_narrative": narrative,
-        }, f, indent=2, ensure_ascii=False, default=str)
+        json.dump(payload, f, indent=2, ensure_ascii=False, default=str)
     console.print(f"[dim]报告已保存: {fp}[/]")
 
 
 # ─── analyze --deep ──────────────────────────────────────────────────
 
-def _analyze_deep(pipe, cve_id: str, target: str, out_dir: str):
+def _analyze_deep(pipe, cve_id: str, target: str, out_dir: str, policy_config=None):
     """深度分析模式: v1 基础 + v2 扩展 (社区/漏洞/检视/风险/建议)"""
     from pipeline import STAGES_DEEP
 
@@ -188,7 +493,7 @@ def _analyze_deep(pipe, cve_id: str, target: str, out_dir: str):
 
     base = v2.base
     if base:
-        console.print(render_report(base))
+        console.print(render_report(base, policy_config=policy_config))
         console.print(render_recommendations(base))
 
     _render_deep_report(v2)
@@ -1757,7 +2062,7 @@ def _compare_generated_vs_real(generated_patch: str, real_diff: str) -> dict:
 
 def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
                          git_mgr=None, show_stages=True,
-                         cve_info=None, deep=False):
+                         cve_info=None, deep=False, stage_callback=None):
     """执行单个 CVE 的回退验证，返回结果 dict。
     cve_info: 可选的预构建 CveInfo，提供后跳过 MITRE 爬取。
     deep: 是否同时执行 v2 深度分析。"""
@@ -1782,6 +2087,8 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
         return {"cve_id": cve_id, "known_fix": known_fix, "target": tv,
                 "worktree_commit": rollback, "checks": {},
                 "overall_pass": False, "summary": "创建worktree失败"}
+
+    stage_events, record_stage = _make_stage_trace_tracker(stage_callback=stage_callback)
 
     try:
         wt_mgr = GitRepoManager(
@@ -1811,6 +2118,7 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
                 def _update(key, st, detail=""):
                     on_stage(key, st, detail)
                     live.update(_layout())
+                    record_stage(key, st, detail)
                 result = pipe.analyze(cve_id, tv, enable_dryrun=True,
                                       force_dryrun=True,
                                       on_stage=_update,
@@ -1818,7 +2126,8 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
         else:
             result = pipe.analyze(cve_id, tv, enable_dryrun=True,
                                   force_dryrun=True,
-                                  cve_info=cve_info)
+                                  cve_info=cve_info,
+                                  on_stage=record_stage)
 
         if result.cve_info is None or not result.cve_info.fix_commit_id:
             return {
@@ -1917,12 +2226,14 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
         if kf_meta:
             lines = kf_meta.strip().split("\n")
             if len(lines) >= 3:
-                known_fix_detail = {
-                    "commit_id": lines[0][:12],
-                    "subject": lines[1],
-                    "author": lines[2],
-                    "stat": "\n".join(lines[3:])[:500],
-                }
+                known_fix_detail = _serialize_commit_reference(
+                    config, git_mgr, tv, lines[0].strip(),
+                    extra={
+                        "subject": lines[1],
+                        "author": lines[2],
+                        "stat": "\n".join(lines[3:])[:500],
+                    }
+                )
         kf_raw = git_mgr.run_git(
             ["git", "show", "--format=", known_fix], tv, timeout=30)
         if kf_raw:
@@ -1936,11 +2247,17 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
                                           known_prereqs, result.dry_run)
 
         tool_prereqs_detail = [
-            {"commit_id": p.commit_id[:12], "subject": p.subject,
-             "grade": p.grade, "score": round(p.score, 2),
-             "overlap_hunks": p.overlap_hunks,
-             "adjacent_hunks": p.adjacent_hunks,
-             "overlap_funcs": p.overlap_funcs[:5]}
+            _serialize_commit_reference(
+                config, git_mgr, tv, p.commit_id,
+                extra={
+                    "subject": p.subject,
+                    "grade": p.grade,
+                    "score": round(p.score, 2),
+                    "overlap_hunks": p.overlap_hunks,
+                    "adjacent_hunks": p.adjacent_hunks,
+                    "overlap_funcs": p.overlap_funcs[:5],
+                },
+            )
             for p in (result.prerequisite_patches or [])
         ]
 
@@ -1951,14 +2268,17 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
                 tv, timeout=10)
             if info:
                 parts = info.strip().split("\x1e")
-                known_prereqs_detail.append({
-                    "commit_id": parts[0][:12],
-                    "subject": parts[1] if len(parts) > 1 else "",
-                    "author": parts[2] if len(parts) > 2 else "",
-                })
+                known_prereqs_detail.append(_serialize_commit_reference(
+                    config, git_mgr, tv, parts[0],
+                    extra={
+                        "subject": parts[1] if len(parts) > 1 else "",
+                        "author": parts[2] if len(parts) > 2 else "",
+                    },
+                ))
             else:
-                known_prereqs_detail.append({"commit_id": kid[:12],
-                                             "subject": "", "author": ""})
+                known_prereqs_detail.append(_serialize_commit_reference(
+                    config, git_mgr, tv, kid,
+                    extra={"subject": "", "author": ""}))
 
         recommendations = result.recommendations if result.recommendations else []
 
@@ -2060,6 +2380,7 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
 
         out = {
             "cve_id": cve_id, "known_fix": known_fix, "target": tv,
+            "target_version": tv,
             "worktree_commit": rollback_hash[:16] if rollback_hash else rollback,
             "checks": checks,
             "overall_pass": overall and not issues,
@@ -2088,6 +2409,18 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
             "patch_file": patch_file,
             "community_patch_file": community_patch_file,
             "real_fix_patch_file": real_fix_patch_file,
+            "analysis_stages": stage_events,
+            "known_prereqs": known_prereqs,
+            "rules": _collect_rules_metadata(
+                getattr(config, "policy", None),
+                level_decision=result.level_decision,
+                validation_details={
+                    "rule_profile": result.validation_details.rule_profile,
+                    "rule_version": result.validation_details.rule_version,
+                    "workflow_steps": result.validation_details.workflow_steps,
+                    "warnings": result.validation_details.warnings,
+                } if result.validation_details else {},
+            ),
         }
         if deep_analysis is not None:
             out["deep_analysis"] = deep_analysis
@@ -2212,7 +2545,7 @@ def cmd_validate(args, config):
             result["llm_status"] = "LLM 未启用 (config.yaml → llm.enabled: true)"
 
     console.print()
-    render_validate_report(result)
+    render_validate_report(result, policy_config=getattr(config, "policy", None))
 
     v2 = result.get("deep_analysis")
     if v2 is not None:
@@ -2664,7 +2997,8 @@ def cmd_batch_validate(args, config):
             passed_list, failed_list, error_list)
 
     console.print(f"\n{'━' * 60}\n")
-    render_batch_validate_report(cve_results, tv)
+    render_batch_validate_report(
+        cve_results, tv, policy_config=getattr(config, "policy", None))
 
     serializable_results = [
         _prepare_validate_json(r) for r in cve_results]
@@ -2792,6 +3126,26 @@ def cmd_search(args, config):
         console.print(f"[yellow]未找到:[/] {args.commit_id}")
 
 
+# ─── server ───────────────────────────────────────────────────────
+
+
+def cmd_server(args, config):
+    """启动 HTTP API 服务，暴露 analyze / validate / batch-validate。"""
+    from api_server import run_api_server
+
+    host = args.host
+    port = args.port
+    config_path = args.config if hasattr(args, "config") else "config.yaml"
+
+    console.print(
+        f"[green]启动 API 服务:[/] {host}:{port}\n"
+        f"[dim]配置文件: {config_path}\n"
+        f"可用路由: /health, /api/analyze, /api/analyzer, "
+        f"/api/validate, /api/batch-validate[/]"
+    )
+    run_api_server(host, port, config_path=config_path)
+
+
 # ─── main ────────────────────────────────────────────────────────────
 
 def main():
@@ -2861,6 +3215,10 @@ def main():
     sp.add_argument("--commit", dest="commit_id", required=True)
     sp.add_argument("--target", dest="target_version", required=True)
 
+    srv = sub.add_parser("server", help="启动 HTTP API 服务", parents=[parent])
+    srv.add_argument("--host", default="127.0.0.1")
+    srv.add_argument("--port", type=int, default=8000)
+
     args = p.parse_args()
     if not args.command:
         p.print_help()
@@ -2878,6 +3236,7 @@ def main():
         "batch-validate": cmd_batch_validate,
         "build-cache": cmd_build_cache,
         "search": cmd_search,
+        "server": cmd_server,
     }
     dispatch[args.command](args, config)
 

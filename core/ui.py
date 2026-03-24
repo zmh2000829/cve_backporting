@@ -4,8 +4,9 @@ Rich 终端 UI
 """
 
 import time
+from collections import Counter
 from typing import Optional, Callable
-from rich.console import Console
+from rich.console import Console, Group
 from rich.panel import Panel
 from rich.table import Table
 from rich.progress import Progress, BarColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn, SpinnerColumn
@@ -15,6 +16,203 @@ from rich.columns import Columns
 from rich import box
 
 console = Console()
+
+
+def _to_dict_like(value):
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    if hasattr(value, "__dict__"):
+        return dict(value.__dict__)
+    return {}
+
+
+def _truncate(text: str, max_len: int = 60) -> str:
+    if text is None:
+        return ""
+    s = str(text).replace("\n", " ")
+    if len(s) <= max_len:
+        return s
+    return s[: max_len - 3] + "..."
+
+
+def _to_value_str(value):
+    if isinstance(value, bool):
+        return "是" if value else "否"
+    if isinstance(value, (list, tuple, set)):
+        joined = ", ".join(str(x) for x in list(value)[:12])
+        if len(value) > 12:
+            joined += f", +{len(value) - 12}"
+        return joined
+    if isinstance(value, dict):
+        return ", ".join(f"{k}={v}" for k, v in value.items())
+    return "" if value is None else str(value)
+
+
+def _policy_config_panel(policy_config) -> Table:
+    if not policy_config:
+        return None
+
+    fields = [
+        ("profile", "规则 Profile"),
+        ("enabled", "规则引擎"),
+        ("large_change_rules_enabled", "大改动规则"),
+        ("large_change_line_threshold", "large_change line"),
+        ("large_hunk_threshold", "large_change hunk"),
+        ("call_chain_rules_enabled", "调用链规则"),
+        ("call_chain_fanout_threshold", "调用链 fanout"),
+        ("critical_structure_rules_enabled", "关键结构规则"),
+        ("l1_api_surface_rules_enabled", "L1 API 规则"),
+        ("l1_return_line_delta_threshold", "L1 返回差异阈值"),
+    ]
+
+    tbl = Table(box=box.SIMPLE, show_header=False,
+                padding=(0, 1), expand=True, show_edge=False)
+    tbl.add_column("配置项", width=18, style="bold")
+    tbl.add_column("值", ratio=1)
+
+    for key, label in fields:
+        if hasattr(policy_config, key):
+            tbl.add_row(label, _to_value_str(getattr(policy_config, key)))
+
+    if getattr(policy_config, "critical_structure_keywords", None):
+        kws = getattr(policy_config, "critical_structure_keywords", [])
+        tbl.add_row("关键结构关键词", ", ".join(kws))
+
+    return tbl
+
+
+def _level_policy_table() -> Optional[Table]:
+    try:
+        from rules.level_policies import LEVEL_POLICIES
+    except Exception:
+        return None
+
+    tbl = Table(box=box.SIMPLE, show_header=True, padding=(0, 1),
+                expand=True, show_edge=False)
+    tbl.add_column("级别", width=4)
+    tbl.add_column("方法", width=22)
+    tbl.add_column("审查模式", width=14)
+    tbl.add_column("置信度", width=10)
+    tbl.add_column("策略动作", ratio=1)
+
+    for p in LEVEL_POLICIES:
+        tbl.add_row(
+            p.level,
+            ", ".join(p.methods) or "-",
+            p.review_mode or "-",
+            f"LLM {p.confidence_with_llm}/{p.confidence_without_llm}",
+            _truncate(p.next_action or "", 45),
+        )
+    return tbl
+
+
+def _render_rules_overview_panel(
+    *,
+    policy_config=None,
+    level_decision=None,
+    rule_hits=None,
+    rule_profile=None,
+    rule_version=None,
+    title: str = "[bold]规则与分级策略[/]",
+    max_hits: int = 6,
+):
+    ld = _to_dict_like(level_decision)
+    hits = rule_hits if rule_hits is not None else (ld.get("rule_hits") or [])
+
+    if not (policy_config or ld or hits or rule_profile or rule_version):
+        return None
+
+    parts = []
+
+    cfg = _policy_config_panel(policy_config)
+    if cfg is not None:
+        parts.append(cfg)
+
+    rule_meta = Table(box=box.SIMPLE, show_header=False,
+                     padding=(0, 1), expand=True, show_edge=False)
+    rule_meta.add_column("字段", width=18, style="bold")
+    rule_meta.add_column("值", ratio=1)
+
+    if rule_profile:
+        rule_meta.add_row("规则 Profile", str(rule_profile))
+    if rule_version:
+        rule_meta.add_row("规则版本", str(rule_version))
+
+    if ld:
+        rule_meta.add_row("DryRun 基线",
+                         f"{ld.get('base_level', 'N/A')} / {ld.get('base_method', 'none') or 'none'}")
+        rule_meta.add_row("判定级别", f"{ld.get('level', 'N/A')} ({ld.get('strategy', '')})")
+        rule_meta.add_row("审查模式", ld.get('review_mode', ''))
+        rule_meta.add_row("下一步", _truncate(ld.get('next_action', ''), 50))
+        rule_meta.add_row("无害判定", "是" if ld.get('harmless') else "否")
+        rule_meta.add_row("置信度", ld.get('confidence', ''))
+        if ld.get('warnings'):
+            rule_meta.add_row("告警条目", str(len(ld['warnings'])))
+
+    if hits:
+        severity_counter = Counter(h.get("severity", "warn") for h in hits)
+        floor_counter = Counter(h.get("level_floor", "-") for h in hits)
+        rule_meta.add_row("规则命中",
+                         f"{len(hits)} 条"
+                         f"（warn={severity_counter.get('warn',0)} / "
+                         f"high={severity_counter.get('high',0)} / "
+                         f"info={severity_counter.get('info',0)}）")
+        if floor_counter:
+            rule_meta.add_row("命中抬升", " / ".join(
+                f"{k}:{v}" for k, v in sorted(floor_counter.items()) if v))
+
+    if len(rule_meta.rows):
+        parts.append(rule_meta)
+
+    lp = _level_policy_table()
+    if lp is not None:
+        lp.title = "[bold]L0-L5 级别策略[/]"
+        parts.append(lp)
+
+    if hits:
+        hit_tbl = Table(box=box.SIMPLE, show_header=True, padding=(0, 1),
+                        expand=True, show_edge=False, title="[bold]命中规则（按优先级）[/]")
+        hit_tbl.add_column("等级", width=7)
+        hit_tbl.add_column("规则ID", width=18)
+        hit_tbl.add_column("严重性", width=7)
+        hit_tbl.add_column("消息", ratio=1)
+
+        def _sev_key(hit):
+            sev = hit.get("severity", "info")
+            if sev == "high":
+                return 0
+            if sev == "warn":
+                return 1
+            return 2
+
+        ordered = sorted(
+            (h for h in hits if isinstance(h, dict)),
+            key=lambda h: (_sev_key(h), h.get("rule_id", ""))
+        )
+
+        for h in ordered[:max_hits]:
+            hit_tbl.add_row(
+                h.get("level_floor", "-"),
+                str(h.get("rule_id", "")),
+                str(h.get("severity", "")),
+                _truncate(h.get("message", ""), 70),
+            )
+
+        if max_hits and len(ordered) > max_hits:
+            hit_tbl.add_row("", f"... 共 {len(ordered)} 条，显示前 {max_hits} 条", "", "")
+        parts.append(hit_tbl)
+
+    if not parts:
+        return None
+
+    return Panel(
+        Group(*parts),
+        title=title,
+        border_style="yellow",
+        padding=(0, 1),
+    )
 
 # ─── 阶段状态图标 ───────────────────────────────────────────────────
 
@@ -88,7 +286,7 @@ def make_header(cve_id: str, target: str, extra: str = "") -> Panel:
     return Panel(subtitle, title=title, border_style="blue", padding=(0, 2))
 
 
-def render_report(result) -> Panel:
+def render_report(result, policy_config=None) -> Panel:
     """渲染最终分析报告为 Rich Panel"""
     from rich.console import Group
     from core.models import AnalysisResult, PrerequisitePatch
@@ -123,6 +321,7 @@ def render_report(result) -> Panel:
         grid.add_row("修改文件", files_str)
 
     grid.add_row("", "")
+    report_parts = [grid]
 
     # 状态
     vuln = "[red bold]是[/]" if r.is_vulnerable else "[green]未确认[/]"
@@ -130,22 +329,21 @@ def render_report(result) -> Panel:
     grid.add_row("受影响", vuln)
     grid.add_row("已修复", fixed)
 
-    # L0-L5 级别判定
-    if getattr(r, "level_decision", None):
-        ld = r.level_decision
-        lv_style = {
-            "L0": "green bold", "L1": "cyan bold", "L2": "yellow bold",
-            "L3": "yellow", "L4": "red", "L5": "red bold",
-        }.get(ld.level, "white")
-        harmless_str = "是" if ld.harmless else "否"
-        grid.add_row("策略级别", f"[{lv_style}]{ld.level}[/] ({ld.strategy})")
-        if getattr(ld, "base_level", ""):
-            grid.add_row("DryRun 基线", f"{ld.base_level} / {ld.base_method or 'none'}")
-        if getattr(ld, "review_mode", ""):
-            grid.add_row("审查模式", ld.review_mode)
-        grid.add_row("无害判定", harmless_str)
-        if ld.warnings:
-            grid.add_row("级别告警", ld.warnings[0][:90])
+    validation_details = getattr(r, "validation_details", None)
+    level_decision = r.level_decision if getattr(r, "level_decision", None) else None
+
+    # 规则与分级策略（单次分析内一次展示，包含策略与命中）
+    rules_panel = _render_rules_overview_panel(
+        policy_config=policy_config,
+        level_decision=level_decision,
+        rule_hits=level_decision.rule_hits if level_decision else [],
+        rule_profile=getattr(validation_details, "rule_profile", None),
+        rule_version=getattr(validation_details, "rule_version", None),
+        max_hits=4,
+    )
+    if rules_panel is not None:
+        report_parts.append(Text(""))
+        report_parts.append(rules_panel)
 
     # 搜索结果 + 步骤
     if r.introduced_search and r.introduced_search.found:
@@ -187,8 +385,6 @@ def render_report(result) -> Panel:
 
     border = "green" if r.is_fixed else ("red" if r.is_vulnerable else "yellow")
     verdict = "已修复" if r.is_fixed else ("需修复" if r.is_vulnerable else "待确认")
-
-    report_parts = [grid]
 
     # 搜索过程详情（含候选列表，供人工参考）
     for label, sr in [("引入 Commit 搜索", r.introduced_search), ("修复 Commit 搜索", r.fix_search)]:
@@ -635,7 +831,7 @@ def render_multi_strategy(msr, mode: str = "intro") -> Panel:
                  border_style=border, padding=(1, 2))
 
 
-def render_validate_report(result: dict):
+def render_validate_report(result: dict, policy_config=None):
     """渲染增强版单 CVE 验证报告，包含差异分析细节"""
     from rich.console import Group
     from rich.markdown import Markdown
@@ -696,52 +892,19 @@ def render_validate_report(result: dict):
     sections.append(ct)
     sections.append(Text(""))
 
-    # ── 2.5) L0-L5 级别判定 & 规则命中 ──────────────────────
+    # ── 2.5) L0-L5 级别判定 & 规则命中 — 合并为统一面板（减少重复） ─────
     level_decision = result.get("level_decision", {}) or {}
-    if level_decision:
-        ld_tbl = Table(box=box.SIMPLE_HEAVY, show_header=False,
-                       padding=(0, 1), expand=True,
-                       title="[bold]策略分级判定 (L0-L5)[/]")
-        ld_tbl.add_column("K", width=18, style="bold")
-        ld_tbl.add_column("V", ratio=1)
-
-        level = level_decision.get("level", "")
-        harmless = level_decision.get("harmless", False)
-        conf = level_decision.get("confidence", "")
-        strategy = level_decision.get("strategy", "")
-        base_level = level_decision.get("base_level", "")
-        base_method = level_decision.get("base_method", "")
-        review_mode = level_decision.get("review_mode", "")
-        next_action = level_decision.get("next_action", "")
-        reason = level_decision.get("reason", "")
-
-        level_style = {
-            "L0": "green bold", "L1": "cyan bold", "L2": "yellow bold",
-            "L3": "yellow", "L4": "red", "L5": "red bold",
-        }.get(level, "white")
-
-        ld_tbl.add_row("级别", f"[{level_style}]{level}[/]")
-        if base_level:
-            ld_tbl.add_row("DryRun 基线", f"{base_level} / {base_method or 'none'}")
-        ld_tbl.add_row("策略", strategy)
-        if review_mode:
-            ld_tbl.add_row("审查模式", review_mode)
-        if next_action:
-            ld_tbl.add_row("下一步", next_action)
-        ld_tbl.add_row("无害判定", "[green]是[/]" if harmless else "[yellow]否[/]")
-        ld_tbl.add_row("置信度", conf)
-        if reason:
-            ld_tbl.add_row("理由", reason)
-
-        rule_hits = level_decision.get("rule_hits", []) or []
-        if rule_hits:
-            ld_tbl.add_row("规则命中数", str(len(rule_hits)))
-            for h in rule_hits[:6]:
-                sev = h.get("severity", "info")
-                color = "red" if sev == "high" else ("yellow" if sev == "warn" else "dim")
-                ld_tbl.add_row("", f"[{color}]{h.get('rule_id','')}: {h.get('message','')}[/]")
-
-        sections.append(ld_tbl)
+    validation_details = result.get("validation_details", {}) or {}
+    rules_panel = _render_rules_overview_panel(
+        policy_config=policy_config,
+        level_decision=level_decision,
+        rule_hits=level_decision.get("rule_hits", []) or [],
+        rule_profile=validation_details.get("rule_profile"),
+        rule_version=validation_details.get("rule_version"),
+        max_hits=8,
+    )
+    if rules_panel is not None:
+        sections.append(rules_panel)
         sections.append(Text(""))
 
     # ── 2.6) 函数调用链影响分析 ─────────────────────────────
@@ -1670,7 +1833,7 @@ def render_benchmark_report(results: list, target: str):
     console.print(p)
 
 
-def render_batch_validate_report(results: list, target: str):
+def render_batch_validate_report(results: list, target: str, policy_config=None):
     """渲染批量验证汇总报告 — CVE 维度统计"""
     total = len(results)
     if total == 0:
@@ -1678,6 +1841,10 @@ def render_batch_validate_report(results: list, target: str):
         return
 
     verdict_counts = {}
+    level_counts = Counter()
+    profile_counts = Counter()
+    version_counts = Counter()
+    warning_counter = Counter()
     core_sims = []
     method_counts = {}
     pass_count = 0
@@ -1701,6 +1868,18 @@ def render_batch_validate_report(results: list, target: str):
         pcv = r.get("prereq_cross_validation", {})
         if pcv.get("recall") is not None:
             prereq_recalls.append(pcv["recall"])
+        ld = r.get("level_decision", {}) or {}
+        level = ld.get("level", "")
+        if level:
+            level_counts[level] += 1
+        vd = r.get("validation_details", {}) or {}
+        if vd.get("rule_profile"):
+            profile_counts[vd["rule_profile"]] += 1
+        if vd.get("rule_version"):
+            version_counts[vd["rule_version"]] += 1
+        for hit in ld.get("rule_hits", []) or []:
+            if isinstance(hit, dict):
+                warning_counter[hit.get("severity", "info")] += 1
 
     accurate = (verdict_counts.get("identical", 0)
                 + verdict_counts.get("essentially_same", 0))
@@ -1769,6 +1948,19 @@ def render_batch_validate_report(results: list, target: str):
         if m not in method_order and cnt:
             method_parts.append(f"{m}: {cnt}")
     summary.add_row("DryRun 方法分布", "  ".join(method_parts))
+
+    if level_counts:
+        level_parts = [f"{k}: {v}" for k, v in sorted(level_counts.items()) if v]
+        summary.add_row("规则级别分布", "  ".join(level_parts))
+    if profile_counts:
+        profile_parts = [f"{k}: {v}" for k, v in sorted(profile_counts.items())]
+        summary.add_row("规则 Profile", "  ".join(profile_parts))
+    if version_counts:
+        version_parts = [f"{k}: {v}" for k, v in sorted(version_counts.items())]
+        summary.add_row("规则版本", "  ".join(version_parts))
+    if warning_counter:
+        warn_parts = [f"{k}: {v}" for k, v in sorted(warning_counter.items())]
+        summary.add_row("规则命中标签", "  ".join(warn_parts))
 
     sim_buckets = {">=90%": 0, "75-89%": 0, "50-74%": 0, "<50%": 0}
     for s in core_sims:
@@ -1885,9 +2077,23 @@ def render_batch_validate_report(results: list, target: str):
                 row.append("[dim]-[/]")
         detail.add_row(*row)
 
+    report_parts = [summary, Text("")]
+    lp = _level_policy_table()
+    if lp is not None:
+        lp.title = "[bold]L0-L5 策略配置（全局）[/]"
+        report_parts.append(lp)
+        report_parts.append(Text(""))
+    if policy_config is not None:
+        cfg_panel = _policy_config_panel(policy_config)
+        if cfg_panel is not None:
+            report_parts.append(cfg_panel)
+            report_parts.append(Text(""))
+
+    report_parts.append(detail)
+
     from rich.console import Group
     p = Panel(
-        Group(summary, Text(""), detail),
+        Group(*report_parts),
         title="[bold]Batch Validate Report — 补丁生成准确度[/]",
         border_style="magenta",
         padding=(1, 2),

@@ -254,6 +254,135 @@ python cli.py batch-validate --file cve_data.json --target 5.10-hulk
 python cli.py batch-validate --file cve_data.json --target 5.10-hulk --limit 10
 ```
 
+## `server` CLI and HTTP API
+
+### Start API service
+
+```bash
+python cli.py server --host 127.0.0.1 --port 8000 --config config.yaml
+```
+
+- Shared options include `--host` (listen address, default `127.0.0.1`), `--port` (listen port, default `8000`), and `--config` (same config file used by CLI, default `config.yaml`).
+- Route: `GET /health`
+- Route: `POST /api/analyze`
+- Route: `POST /api/analyzer` (compatibility alias)
+- Route: `POST /api/validate`
+- Route: `POST /api/batch-validate`
+
+All successful responses follow:
+
+```json
+{
+  "ok": true,
+  "data": { ... }
+}
+```
+
+Error responses use HTTP status `400`/`404`/`500` with:
+
+```json
+{
+  "ok": false,
+  "error": "error message"
+}
+```
+
+### Common request fields
+
+- Target repository: `target_version` (preferred) | `target` | `repo`
+- `deep`: boolean, default `false`
+
+### `POST /api/analyze` / `POST /api/analyzer`
+
+Input body accepts:
+
+```json
+{
+  "target_version": "5.10-hulk",
+  "cve_id": "CVE-2024-26633",
+  "deep": false,
+  "no_dryrun": false
+}
+```
+
+Or batch call in one request:
+
+```json
+{
+  "target": "5.10-hulk",
+  "cves": ["CVE-2024-26633", "CVE-2024-26634"],
+  "cve_ids": ["CVE-2024-26635"],
+  "deep": true
+}
+```
+
+`cve_id`, `cves`, `cve_ids` are all accepted and merged by server.
+
+### `POST /api/validate`
+
+```json
+{
+  "target_version": "5.10-hulk",
+  "cve_id": "CVE-2024-26633",
+  "known_fix": "da23bd709b46",
+  "known_prereqs": "abc111,def222",
+  "mainline_fix": "aaabbb000111",
+  "mainline_intro": "bbb222ccc333",
+  "deep": false
+}
+```
+
+`known_prereqs` can also be an array:
+
+```json
+{
+  "known_prereqs": ["abc111", "def222"]
+}
+```
+
+### `POST /api/batch-validate`
+
+```json
+{
+  "target": "5.10-hulk",
+  "deep": false,
+  "items": [
+    {
+      "cve_id": "CVE-2024-26633",
+      "known_fix": "da23bd709b46",
+      "known_prereqs": ["abc111"],
+      "mainline_fix": "aaabbb000111",
+      "mainline_intro": "bbb222ccc333"
+    },
+    {
+      "cve_id": "CVE-2024-26634",
+      "known_fix": "11aabbeff",
+      "known_prereqs": "111,222"
+    }
+  ]
+}
+```
+
+Response includes per-item result list and summary:
+
+```json
+{
+  "ok": true,
+  "data": {
+    "operation": "batch-validate",
+    "results": [],
+    "errors": [],
+    "summary": {
+      "total": 0,
+      "success": 0,
+      "error": 0
+    }
+  }
+}
+```
+
+**JSON input format** — top-level dict keyed by CVE ID:
+
 **JSON input format** — top-level dict keyed by CVE ID:
 
 ```json
@@ -294,6 +423,21 @@ Builds SQLite + FTS5 index for multi-million commit repos. Supports incremental 
 python cli.py build-cache --target 5.10-hulk          # incremental (default)
 python cli.py build-cache --target 5.10-hulk --full    # full rebuild
 ```
+
+### `server` — HTTP API Gateway
+
+Start the API service and call `analyze` / `validate` / `batch-validate` by URL.
+
+```bash
+python cli.py server --host 0.0.0.0 --port 8000
+```
+
+Available routes:
+
+- `GET /health`
+- `POST /api/analyze` (alias: `POST /api/analyzer`)
+- `POST /api/validate`
+- `POST /api/batch-validate`
 
 ---
 
