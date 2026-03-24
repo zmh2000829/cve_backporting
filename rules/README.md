@@ -27,13 +27,14 @@
 
 插件约定：
 
-1. 自定义规则建议直接放到 `rules/*.py`，并在 `config.yaml` / `config.example.yaml` 的 `policy.extra_rule_modules` 中声明模块名。
+1. 自定义规则建议直接放到 `rules/*.py`，并在 `config.yaml` 中声明 `policy.extra_rule_modules`。
 2. 模块可通过以下任一方式暴露能力：
    - `register_rules(registry, config=None)`
    - `RULES`
    - `register_level_policies(registry, config=None)`
    - `LEVEL_POLICIES`
 3. `rule_hits` 建议始终提供 `rule_id`、`severity`、`message`、`evidence`，并可选提供 `level_floor` 用于把最终场景抬升到至少某一级。
+4. 规则配置示例统一放在 [rules/policy.example.yaml](/Users/junxiaoqiong/Workplace/cve_backporting/rules/policy.example.yaml)，与规则代码一起维护。
 
 当前约束文档：
 

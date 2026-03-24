@@ -112,6 +112,8 @@ repositories:
     branch: "linux-5.10.y"
 ```
 
+如需配置 `L0-L5` 策略分级与规则插件，请把 [rules/policy.example.yaml](/Users/junxiaoqiong/Workplace/cve_backporting/rules/policy.example.yaml) 中的 `policy:` 段复制到你的 `config.yaml`。
+
 ### 4. 构建提交缓存（首次必做）
 
 ```bash
@@ -205,6 +207,7 @@ Patch Input
 
 - `rules/default_rules.py`：大改动、关键结构、调用链牵连、L1 API surface
 - `rules/level_policies.py`：L0-L5 默认策略与 `level_floor` 抬升逻辑
+- `rules/policy.example.yaml`：规则配置示例
 
 后续业务规则可直接放到 `rules/*.py`，并通过 `policy.extra_rule_modules` 以插件方式加载。
 
@@ -256,6 +259,19 @@ python cli.py benchmark --file benchmarks.yaml --target 5.10-hulk
 
 1. `README.md`（英文总览）
 2. `README_zh.md`（中文落地说明）
-3. `docs/TECHNICAL.md`（架构与模块）
-4. `docs/ADAPTIVE_DRYRUN.md`（五层 DryRun 原理）
-5. `docs/MULTI_LEVEL_ALGORITHM.md`（多级算法全景）
+3. `plan.md`（当前演进方向与验收标准）
+4. `docs/presentation.md`（汇报材料）
+5. `docs/TECHNICAL.md`（架构与模块）
+6. `docs/ADAPTIVE_DRYRUN.md`（五层 DryRun 原理）
+7. `docs/MULTI_LEVEL_ALGORITHM.md`（多级算法全景）
+
+---
+
+## 下一步演进重点
+
+当前阶段的主任务不是继续叠加算法分支，而是把已有能力收敛成可运营体系：
+
+1. 把 `rules/` 变成规则代码、规则文档、规则配置样例的统一入口。
+2. 建立 20+ CVE 的标准样本验证清单，验证 `L0-L5` 与 warning 判定质量。
+3. 把 `level_decision` 输出真正用于人工审查、审批门禁和专家答辩材料。
+4. 删除不再作为主入口维护的冗余文档，避免文档继续分叉。

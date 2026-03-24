@@ -35,7 +35,7 @@
 2. YAML 显式配置项覆盖 profile 预设的行为必须有测试保护。
 3. 每次修改 profile 阈值时，必须同步更新：
    - `core/config.py`
-   - `config.example.yaml`
+   - `rules/policy.example.yaml`
    - 相关 README / 设计说明
    - 回归测试
 

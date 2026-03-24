@@ -1,582 +1,253 @@
-# 项目计划与技术原理
+# 项目演进计划
+
+## 1. 当前项目定位
+
+`CVE Backporting Engine` 当前已经具备一条可运行的端到端主链路：
+
+- CVE 情报采集：`Crawler Agent`
+- 修复/引入定位：`Analysis Agent`
+- 前置依赖分析：`Dependency Agent`
+- 多级 DryRun 与适配：`DryRun Agent`
+- 深度分析与报告增强：`--deep`、`analysis_narrative`
+- 风险编排：`DryRun 基线级别 + rules/ 规则抬升`
+
+当前规则系统已经完成第一轮收口：
+
+- 默认级别策略位于 [rules/level_policies.py](/Users/junxiaoqiong/Workplace/cve_backporting/rules/level_policies.py)
+- 默认风险规则位于 [rules/default_rules.py](/Users/junxiaoqiong/Workplace/cve_backporting/rules/default_rules.py)
+- 输出字段已包含 `base_level`、`base_method`、`review_mode`、`next_action`
+- `rules/` 目录已支持插件式规则扩展
+
+这意味着项目已经从“能分析、能适配”进入“要稳定、可审计、可运营”的阶段。
 
 ---
 
-## 一、项目完成状态总览
+## 2. 当前阶段的核心问题
 
-### Phase 0 — 基础模块化与核心流程 ✅
+下一步不是继续堆算法名词，而是补齐下面五类短板。
 
-| 完成项 | 说明 |
-|--------|------|
-| 四 Agent 模块化 | Crawler / Analysis / Dependency / DryRun 独立分层 |
-| Pipeline 编排 | 五阶段全链路串联（情报→引入→修复→依赖→DryRun）|
-| 三级搜索引擎 | L1 ID → L2 Subject → L3 Diff，短路优化 |
-| SQLite + FTS5 缓存 | 千万级 commit 流式构建，50K 批写入 + WAL + mmap |
-| Rich CLI 交互 | 阶段追踪、进度条、彩色报告面板 |
+### 2.1 规则体系已成型，但还没有形成业务可运营的规则资产
 
-### Phase 1 — 依赖分析精细化与 UI 增强 ✅
+当前已经有大改动、关键结构、调用链牵连、L1 API surface 等规则，但仍然存在：
 
-| 完成项 | 说明 |
-|--------|------|
-| 时间窗口约束 | `search_by_files(after_ts, no_merges)` 限定搜索范围 |
-| Hunk 级重叠分析 | `extract_hunks_from_diff` + `compute_hunk_overlap`，行级精确比对 |
-| 三级依赖分级 | 强（hunk 直接重叠）/ 中（相邻 ±50 行）/ 弱（同文件），评分公式量化 |
-| 前置依赖详情表 | Rich Table 展示 commit/score/hunk 重叠/函数列表 |
-| DryRun 冲突详情 | `--stat` 统计 + 冲突文件列表 + 错误行号 |
-| 搜索过程可视化 | `SearchStep` 记录 L1→L2→L3 每级状态/耗时 |
+- 规则主要是通用规则，缺少子系统/业务团队可独立沉淀的目录规范
+- 规则示例配置此前仍散落在根级 `config.example.yaml`
+- 新规则接入流程、开关、证据字段、回归要求需要进一步固化
 
-### Phase 2 — 核心算法增强 ✅
+### 2.2 L1“可无害”路径已有编排，但还没形成真正稳定的判定闭环
 
-| 完成项 | 说明 |
-|--------|------|
-| Diff Containment 算法 | Multiset 单向包含度，解决 squash commit 场景（传统相似度 ~30% → 包含度 95%+）|
-| PathMapper 跨版本路径映射 | 8 组内置规则 + 自定义扩展 |
-| 多源补丁获取 | `git.kernel.org` → `googlesource.com` → 本地 Git，三级回退 |
-| check-intro / check-fix 独立命令 | 独立漏洞引入/修复检测 |
-| 增量缓存构建 | `get_latest_cached_commit` + 增量拉取 |
+当前能力：
 
-### Phase 3 — 多级自适应 DryRun 引擎 ✅
+- L1 已不再自动 `harmless`
+- 已提供 `review_mode=llm-review`
+- 已有 `l1_api_surface` 的签名/返回路径启发式
 
-| 完成项 | 说明 |
-|--------|------|
-| L0-L4 六级自适应 | strict → C1 → 3way → regenerated → conflict-adapted |
-| L5 Verified-Direct | 绕过 git apply，内存级直接验证 |
-| L3.5 Zero-Context | 零上下文 diff，仅保留 ±行 |
-| 符号/宏映射 | 自动检测重命名并替换 |
-| 缩进适配 | tab↔space 自动调整 |
+仍然缺的部分：
 
-### Phase 4 — 批量验证与 CVE 级聚合 ✅
+- 负样本约束不够系统
+- 尚未形成“规则证据 + LLM 结论 + 人工复核”三段式稳定闭环
+- 还没有样本集支撑误报/漏报评估
 
-| 完成项 | 说明 |
-|--------|------|
-| batch-validate 命令 | 从 JSON 批量运行 validate，实时 JSON 报告 |
-| CVE 级聚合 | 自动识别主修复 vs 前置补丁 |
-| 前置补丁交叉验证 | 工具推荐 vs 已知真值的 Precision/Recall |
+### 2.3 调用链分析能提示风险，但边界仍局限于“修改文件集合内”
 
-### Phase 5 — 分析过程可视化 ✅
+当前实现已经能识别：
 
-| 完成项 | 说明 |
-|--------|------|
-| Analysis Narrative | 结构化 JSON 叙述工具的分析逻辑和结论 |
-| 集成 validate / batch-validate | 验证模式额外包含补丁质量评估 |
+- 修改函数的 `callers`
+- 修改函数的 `callees`
+- 跨文件调用/被调用牵连
 
-### Phase 6 — Validate 模式修复 ✅
+但仍然要明确：
 
-| 完成项 | 说明 |
-|--------|------|
-| force_dryrun | 确保 validate 模式下 DryRun 始终执行 |
-| worktree 假阳性修正 | `git merge-base --is-ancestor` 替代 subject_match |
+- 这不是全仓库调用图
+- 目前更适合作为风险提示，而不是强约束决策
+- 后续需要为全仓库符号索引预留升级路径
 
-### Phase 7 — v2.0 深度分析能力 ✅
+### 2.4 验证能力还没有升级为可复跑、可对外答辩的样本体系
 
-| 完成项 | 说明 |
-|--------|------|
-| 统一 LLM 客户端 | `LLMClient` 封装 chat/chat_json，确定性兜底 |
-| VulnAnalysisAgent | 漏洞类型分类、根因分析、触发路径、检测方法 |
-| CommunityAgent | lore.kernel.org + bugzilla + CVE 引用链接收集 |
-| PatchReviewAgent | 函数映射、调用拓扑、数据结构检测、安全模式检视 |
-| RiskBenefitAnalyzer | 四维量化 + 文字等级描述（无裸数值） |
-| MergeAdvisorAgent | 规则引擎 + 关联补丁完整分析 + 检视 checklist |
-| 关联补丁完整分析 | 前置/后置补丁无论有无都给出分析理由和结论 |
-| --deep 标志集成 | analyze / validate / batch-validate 均支持 --deep |
-| C 函数名提取修复 | 跳过 static/int/void 等噪声词，正确提取函数名 |
-| TUI 面板增强 | 关联补丁分析面板、风险收益文字描述面板 |
+当前仓库有：
 
-### Phase 8 — L0-L5 分级编排与可插拔规则引擎 ✅（本轮新增）
+- `validate`
+- `batch-validate`
+- `benchmarks.example.yaml`
 
-| 完成项 | 说明 |
-|--------|------|
-| L0-L5 最终分级改造 | 改为 `DryRun 基线级别 + 规则 level_floor 抬升`，不再把最终级别硬编码成 `apply_method→level` |
-| 基线与最终级别分离 | `level_decision.base_level` / `base_method` 表示 DryRun 基线，`level_decision.level` 表示最终场景 |
-| 分级策略文案 | `level_decision.strategy` / `reason` / `review_mode` / `next_action` 区分 L0~L5 含义；**仅最终 L0 且无 high/warn 规则** 才 `harmless=true` |
-| 无害判定收敛 | L1 进入 LLM/人工复核路径，不自动无害；与 `l1_api_surface`、大改动、扇出、关键结构规则联动 |
-| 调用链影响分析 | 修改文件范围内 **跨文件** 符号边合并；同时输出 callers/callees、扇出与调用/被调用牵连告警 |
-| 大改动告警 | 按改动行数 / hunk 数阈值触发 warning |
-| 关键结构变更告警 | 锁/RCU/refcount/struct 等关键词命中后至少抬升到 L3 |
-| 关键变更牵连升级 | 若关键结构变更同时沿调用链扩散，则抬升到 L4 |
-| L1 细粒度启发式 | 签名行增删不一致、`return` 行差阈值（可配置、可关闭） |
-| 可插拔规则框架 | 默认规则迁入 `rules/*.py`；支持 `register_rules` / `RULES` / `register_level_policies` / `LEVEL_POLICIES` |
-| Profile 预设 | `conservative` / `balanced` / `aggressive` / `default`，YAML 覆盖预设 |
-| 输出可审计化 | `validation_details.rule_version=v2`；`level_decision`（含 `base_level` / `base_method` / `review_mode` / `next_action`）、`function_impacts`、`validation_details`、DryRun `apply_attempts` |
-| 回归测试 | `tests/test_policy_engine.py` |
-| TUI 报告增强 | 新增“策略分级判定”“函数影响分析”“DryRun 尝试轨迹”面板 |
+仍然缺：
+
+- 标准化样本清单
+- 期望结论字段
+- 误报归因标签
+- 人工裁决记录格式
+
+### 2.5 文档结构仍然偏“堆积式增长”，需要收敛为可维护文档体系
+
+需要解决的问题：
+
+- `plan.md` 之前更像历史流水账，不适合作为当前路线图
+- 汇报材料、README、规则文档之间的口径需要统一
+- 冗余文档需要及时删除，避免之后继续维护“看起来很全、实际没人用”的材料
 
 ---
 
-## 三、下一步推进计划（核验增强版）
+## 3. 下一步演进方向
 
-### 本轮核验结论
+### Phase A：规则体系工程化收口
 
-- **已在仓库内核实**：规则引擎回归测试存在且可通过；`l1_api_surface`、跨文件调用链、`POLICY_PROFILE_PRESETS`、`rule_version=v2` 主路径均已落地
-- **未能在仓库内直接核实**：`20+ CVE` 小样本验证、具名仓库误报率、`rules/` 目录规范与插件交付约束
-- **结论**：P0/P1 不应继续按“整体已完成”表述，而应拆成“已落地能力 + 待补验证/待收口要求”
+目标：把 `rules/` 从“能放规则”推进到“团队可扩展、配置可引用、回归可守门”。
 
-### P0（本周）— 稳定化与可回归验证（已具备基础，实现侧需收口）
+#### 目标产出
 
-1. **把规则回归从“有测试”提升到“可守门”**
-   - 已验证：`python -m unittest tests.test_policy_engine -v` 可通过，当前覆盖 L0 无害、L0+关键结构、大改动阈值、L1 签名启发式、跨文件扇出、`l1_api_surface` 可关闭、未知/缺失 DryRun→L5、`POLICY_PROFILE_PRESETS` 存在性
-   - 增强要求：后续每新增一个 rule，必须同时补 **正例 / 反例 / 开关关闭** 三类用例；空补丁、空 DryRun、未知方法三条边界路径不得缺测
-   - 验收口径：`tests/test_policy_engine.py` 必须覆盖所有默认规则与关键边界分支，且作为后续策略改动的最小回归门禁
-2. **统一报告字段 schema，并覆盖所有降级路径**
-   - 已验证：主流程输出 `validation_details.rule_version=v2`
-   - 本轮补强：无补丁路径也统一返回 **v2**，并保留当前 `rule_profile`
-   - 增强要求：`level_decision` / `function_impacts` / `validation_details` / DryRun `apply_attempts` 的字段契约在“成功、降级、无补丁”三类路径下保持稳定；`rule_hits.evidence` 必须可 JSON 序列化
-   - 验收口径：代码、配置模板、README/中文文档中的 schema 说明一致，不允许出现文档写 `v2`、代码某些分支仍产出 `v1`
-3. **把“小样本验证”从口头目标变成可执行任务**
-   - 现状判断：仓库内只有 `benchmarks.example.yaml` 示例，尚未形成可追溯的 20+ CVE 样本清单与结果归档
-   - 增强要求：补齐样本清单模板、期望结果字段（期望 level / 是否需要 prereq / 是否允许 warning）、跑批结果汇总格式，以及误报归因标签
-   - 验收口径：样本验证必须能输出“样本来源、期望结论、实际结论、差异说明、人工裁决”五列结果，避免只给一个笼统通过率
+- `rules/` 目录形成稳定结构：
+  - Python 规则模块
+  - 规则约束文档
+  - 规则配置示例
+- 根级 `config.example.yaml` 不再承载规则详细配置
+- 新增 [rules/policy.example.yaml](/Users/junxiaoqiong/Workplace/cve_backporting/rules/policy.example.yaml) 作为规则配置样例入口
+- 规则接入要求统一为：
+  - 稳定 `rule_id`
+  - 可开关
+  - 可输出 `evidence`
+  - 影响分级时显式输出 `level_floor`
 
-### P1（2~4 周）— 策略质量提升（首版已合入，需从启发式提升到可运营）
+#### 重点需求
 
-1. **L1 风险判定从“提示可用”升级为“误报可控”**
-   - 已验证：`l1_api_surface` 已接入默认规则，能够识别签名行增删不一致与 `return` 行数差；编排上 **L1 仍不自动 `harmless`**
-   - 增强要求：补齐负样本约束，避免把 `if/for/while`、普通函数调用、宏展开误判成签名变化；对告警文案输出明确证据（签名差异、`return` 计数）
-   - 验收口径：L1 规则既要保留解释性，也要提供“为什么触发 / 为什么没触发”的可复核证据，不能只返回模糊 warning
-2. **调用链影响分析从“修改文件内跨文件”升级为“边界清晰、可扩展”**
-   - 已验证：当前已支持在修改文件集合内构建 **跨文件符号边**
-   - 增强要求：报告中必须显式声明分析边界是“修改文件集合内”，避免过度表述为全仓库影响；为后续全仓库索引预留接口，但不在当前版本虚报能力
-   - 验收口径：`function_impacts` 输出需同时给出影响函数、调用/被调用数量、边界说明；后续若升级全仓库索引，应保持字段兼容
-3. **规则配置从“可调阈值”升级为“可管理策略”**
-   - 已验证：`POLICY_PROFILE_PRESETS` 已存在，且 YAML 显式项会覆盖预设
-   - 增强要求：约束 `conservative <= balanced <= aggressive` 的阈值单调性；新增/调整 profile 时必须同步测试、配置模板、文档与示例；插件规则必须定义稳定的 `rule_id`、`severity`、`message`、`evidence`
-   - 验收口径：profile 变更不可只改一个 Python 常量；规则插件接入必须具备可开关、可审计、失败可降级三项属性
+- 规则配置说明与 `rules/README.md` 同步
+- `README` / `presentation` / `plan` 三份材料对 `rules/` 的描述保持一致
+- 插件规则接入路径固定，不再继续把默认规则堆回 `core/policy_engine.py`
 
-### P2（1~2 月）— 工程化落地
+#### 非目标
 
-1. **CI 门禁集成**
-   - L4/L5 + high severity rule 命中时自动要求人工审批
-2. **规则插件生态**
-   - 沉淀 `rules/` 目录规范，支持业务团队独立扩展
-3. **专家答辩模板自动生成**
-   - 基于 narrative 自动生成“证据链 + 结论边界 + 建议动作”文案
+- 不在本阶段引入新的复杂算法
+- 不把调用链分析升级为全仓库索引
 
-### 风险与对策
+### Phase B：判定质量与样本验证
 
-- **风险1：调用链分析受限于静态解析精度**
-  - 对策：先用于 warning，不直接阻断；逐步引入跨文件符号索引
-- **风险2：规则过多导致误报上升**
-  - 对策：按 profile 分层启用，先观测再收紧
-- **风险3：不同分支编码风格导致阈值不稳**
-  - 对策：按仓库/子系统配置独立阈值
+目标：让 `L0-L5` 从“结构完整”升级为“结论可信”。
 
-### 验收标准（下一里程碑）
+#### 目标产出
 
-- L0/L1/L2 判定与人工结论一致率 ≥ 90%
-- 关键结构改动漏报率 ≤ 5%
-- validate 报告可直接用于专家评审（无需二次补充核心证据）
+- 20+ CVE 小样本验证清单
+- 每条样本具备如下字段：
+  - CVE
+  - 目标分支
+  - 期望 level
+  - 是否允许 warning
+  - 是否需要前置补丁
+  - 实际结论
+  - 差异原因
+  - 人工裁决
+- L1 规则补齐负样本与关闭开关测试
+- 关键结构 + 调用链传播误报场景补齐样本
+
+#### 重点需求
+
+- L0 要求严格保持“100% 可落地 + 无额外语义风险”
+- L1 只进入复核通道，不宣称自动无害
+- L3/L4 需要有更明确的人工审查动作建议
+
+#### 非目标
+
+- 不以通过率单一数字替代样本结论
+- 不把有限样本包装成“全面准确率”
+
+### Phase C：流程门禁与交付化
+
+目标：把规则输出真正接进交付流程，而不是停留在报告层。
+
+#### 目标产出
+
+- 基于 `level_decision` 的审批策略建议
+- L4/L5 或 `high severity` 命中时的人工审批门禁方案
+- `validate` / `batch-validate` 的输出模板进一步收敛，支持专家评审与归档
+
+#### 重点需求
+
+- 统一 JSON schema
+- 保持成功、降级、无补丁三类路径字段稳定
+- 让 `level_decision.next_action` 真正服务于交付动作
+
+### Phase D：规则生态与团队协作
+
+目标：让业务团队能在不改核心引擎的前提下独立沉淀规则。
+
+#### 目标产出
+
+- 规则模板
+- 子系统规则命名建议
+- 规则版本化约束
+- 团队级插件交付规范
+
+#### 重点需求
+
+- 规则失败可降级
+- 规则证据可审计
+- 文档与测试必须同步
 
 ---
 
-## 四、核心技术原理：关联补丁发现逻辑
+## 4. 近期明确需求清单
 
-> 这是分析人员最关心的问题：工具怎么判断一个补丁需不需要先合入其他补丁？
-> 没有关联补丁的时候，凭什么说"不需要"？
+以下事项应作为接下来 2~4 周的明确需求，而不是“可选优化”：
 
-### 2.1 什么是关联补丁
-
-在 Linux 内核 CVE 修复的回合 (backporting) 场景中，"关联补丁"指的是：
-
-- **前置补丁 (Prerequisite Patch)**：修复补丁依赖的、必须先合入的其他补丁。缺少它们，修复补丁可能无法应用、无法编译、或产生语义错误。
-- **后置补丁 (Post Patch)**：修复补丁合入之后，上游社区对同一修复的追加修正或增强。
-
-前置补丁产生的根本原因是：**上游主线 (mainline) 和目标内核版本之间的代码已经产生了差异**。上游的修复补丁是基于最新主线写的，它默认周围的代码是最新状态。如果目标版本缺少某些中间改动，修复补丁就可能：
-
-1. **文本层面冲突** — 补丁要删除的代码行在目标版本中不存在（已被其他补丁修改过），或要添加代码的上下文不匹配
-2. **编译层面失败** — 补丁引用了新的数据结构字段、新的 API 函数、新的宏定义，这些是由前置补丁引入的
-3. **语义层面错误** — 补丁能应用也能编译，但逻辑不正确，因为它假设了前置补丁已经改变的行为
-
-### 2.2 前置补丁发现算法
-
-工具通过以下流程检测前置补丁（`agents/dependency.py`）：
-
-```
-输入:
-  - fix_patch: 社区修复补丁 (含 diff、修改的文件列表、commit message)
-  - cve_info: CVE 信息 (含引入 commit、修复 commit)
-  - target_version: 目标内核分支
-
-                    ┌─────────────────────────────────┐
-                    │ Step 1: 确定搜索范围 (时间窗口)    │
-                    └──────────┬──────────────────────┘
-                               ▼
-                    ┌─────────────────────────────────┐
-                    │ Step 2: 收集候选 commit           │
-                    │   git log --follow 修改同文件     │
-                    └──────────┬──────────────────────┘
-                               ▼
-                    ┌─────────────────────────────────┐
-                    │ Step 3: 排除已知 commit           │
-                    │   (fix commit / intro commit /   │
-                    │    Fixes: 标签引用)               │
-                    └──────────┬──────────────────────┘
-                               ▼
-                    ┌─────────────────────────────────┐
-                    │ Step 4: Hunk 级精细分析           │
-                    │   逐个候选 ←→ fix_patch 对比     │
-                    └──────────┬──────────────────────┘
-                               ▼
-                    ┌─────────────────────────────────┐
-                    │ Step 5: 评分与分级               │
-                    │   strong / medium / weak         │
-                    └─────────────────────────────────┘
-```
-
-#### Step 1: 时间窗口限定
-
-如果漏洞的引入 commit (introduced commit) 已知，则只搜索**引入 commit 之后**的 commit。
-理由：引入 commit 之前的修改不可能是修复补丁的前置依赖，因为修复补丁针对的是引入 commit 之后的代码状态。
-
-```python
-# 确定时间窗口起点
-if intro_search and intro_search.target_commit:
-    after_ts = intro_commit_timestamp  # 从引入时间开始
-```
-
-#### Step 2: 收集候选 commit
-
-在目标分支上执行 `git log`，查找**修改了同一组文件**的 commit：
-
-```python
-intervening = git_mgr.search_by_files(
-    modified_files,       # fix_patch 涉及的文件 (+ 路径映射扩展)
-    target_version,       # 目标分支
-    limit=50,             # 最多 50 个候选
-    after_ts=after_ts,    # 时间窗口
-    no_merges=True,       # 排除 merge commit
-)
-```
-
-- **路径映射** (`PathMapper`)：内核代码经常重命名路径（如 `drivers/usb/core/` → `drivers/usb/common/`），工具通过 8 组内置映射规则 + 自定义扩展，将一个文件路径展开为一组等价路径来搜索
-- **排除大重构**：修改超过 20 个文件的 commit 直接跳过，这类通常是 tree-wide 重构而非功能相关的前置补丁
-
-#### Step 3: 排除已知 commit
-
-从候选中排除：
-- 修复 commit 本身
-- 引入 commit 本身
-- Fixes: 标签引用的 commit（这些是修复补丁的修复目标，不是前置依赖）
-
-#### Step 4: Hunk 级精细分析
-
-这是核心算法。对每个候选 commit，提取其 diff 的 hunk 信息，与 fix_patch 的 hunk 进行**行范围交叉比对**：
-
-```python
-# 每个 hunk 有: file, old_start, old_end, new_start, new_end
-# 两种重叠判定:
-#   直接重叠: 两个 hunk 的行范围在同一文件中有交集
-#   相邻重叠: 行范围在 ±50 行内 (ADJACENT_MARGIN = 50)
-
-for hunk_a in fix_hunks:
-    for hunk_b in candidate_hunks:
-        if 同一文件:
-            if 行范围直接相交:
-                direct_overlaps += 1    # 强信号: 候选补丁修改了修复补丁同一段代码
-            elif 行范围在 ±50 行内:
-                adjacent_overlaps += 1  # 中信号: 修改了相邻代码区域
-```
-
-同时提取函数级重叠：
-
-```python
-func_overlap = fix_functions ∩ candidate_functions
-# 两个补丁修改了同一个函数 → 强信号
-```
-
-#### Step 5: 评分与三级分类
-
-```
-评分公式:
-  score  = min(direct_overlaps × 0.3, 0.6)     # hunk 直接重叠权重最高
-         + min(adjacent_overlaps × 0.1, 0.2)    # 相邻重叠次之
-         + min(len(func_overlap) × 0.15, 0.3)   # 函数重叠
-
-分级规则:
-  strong  ← (direct_overlaps > 0 且 有函数重叠) 或 score ≥ 0.5
-  medium  ← direct_overlaps > 0 或 adjacent_overlaps > 0 或 score ≥ 0.2
-  weak    ← 其他 (仅同文件关联)
-```
-
-**strong (强依赖)** 的含义：候选补丁修改了与修复补丁**完全相同的代码行和函数**。这意味着修复补丁假设这些代码行处于候选补丁修改后的状态。不先合入该候选补丁，修复补丁大概率无法正确应用。
-
-**medium (中依赖)** 的含义：候选补丁修改了修复补丁**附近的代码**（同文件、相邻行）。虽然不直接阻断修复补丁的应用，但可能影响上下文匹配或功能完整性。
-
-**weak (弱关联)** 的含义：仅修改了同一文件，没有行级或函数级重叠。通常不影响合入，但提供了上下文信息。
-
-### 2.3 "无前置补丁"的判定逻辑与解释
-
-当工具报告"无前置补丁"时，**不是简单地返回空结果**，而是基于以下多维度分析得出结论：
-
-#### 判定依据一：DryRun 可干净应用
-
-```
-如果修复补丁通过 DryRun (git apply) 在目标版本上干净应用:
-  → 说明补丁的删除行在目标版本中确实存在 (上下文匹配)
-  → 说明补丁的添加行可以正确插入 (行号偏移在可接受范围内)
-  → 即: 目标版本在该补丁涉及的代码区域与上游主线是一致的
-  → 结论: 不存在因"缺失前置补丁"导致的文本冲突
-```
-
-**DryRun 能干净应用是最强的"无需前置"信号**——如果中间有改动缺失，git apply 大概率会因上下文不匹配而拒绝应用。
-
-#### 判定依据二：时间窗口内无候选
-
-```
-如果 git log 搜索在时间窗口内找不到修改同文件的其他 commit:
-  → 说明从漏洞引入到当前版本，没有人动过修复补丁涉及的文件
-  → 目标版本该文件的代码与上游是相同的
-  → 结论: 无前置依赖
-```
-
-#### 判定依据三：修改范围集中
-
-```
-如果修复补丁仅修改 1-2 个文件、改动行数少:
-  → 被其他补丁交叉依赖的概率低
-  → 越是局部修改，越容易独立合入
-```
-
-#### 判定依据四：无新数据结构依赖
-
-```
-如果 PatchReview 分析发现补丁未引入新的数据结构 (struct 字段、锁变量、API):
-  → 不依赖前置补丁提供这些定义
-  → 可独立编译
-```
-
-#### 什么情况下 DryRun 能过但仍需前置补丁？
-
-这是一个重要的边界情况，工具会明确说明：
-
-> "尽管存在前置补丁，修复补丁本身可干净应用。这说明前置补丁提供的是**编译/运行时依赖** (如数据结构定义、API 声明)，而非文本层面的上下文冲突。"
-
-典型场景：前置补丁在另一个头文件中新增了一个 struct 字段定义，修复补丁引用了这个字段。`git apply` 只检查 diff 上下文匹配，不检查编译依赖，所以补丁能 apply 但编译会失败。
-
-工具通过 **Hunk 级分析 + 函数重叠检测** 来捕捉这类跨文件依赖。
-
-### 2.4 后置补丁发现逻辑
-
-后置补丁通过两种方式检测（`core/risk_benefit.py`）：
-
-#### 方式一：Fixes 标签反查
-
-```python
-git log --grep="Fixes: <fix_commit_short_id>" --all
-```
-
-内核社区规范要求，如果一个补丁修复了另一个补丁引入的问题，必须在 commit message 中添加 `Fixes:` 标签。通过反向搜索引用了修复补丁 ID 的 commit，可以找到上游对本修复的追加修正。
-
-**含义**：存在后续修复意味着社区发现原始修复不完善（如遗漏边界条件、引入回归），建议一并合入。
-
-#### 方式二：同函数后续修改
-
-```python
-git log -S<func_name> -- <file_path>  # 在 fix 之后搜索修改同函数的 commit
-```
-
-查找修复补丁涉及的函数，是否有后续 commit 也修改了这些函数。
-
-**含义**：同函数的后续修改可能是功能增强或独立修复，需评估是否影响本修复的正确性。
-
-### 2.5 "无后置补丁"的含义
-
-当报告"无后置补丁"时：
-
-> "未检测到后续关联补丁，说明该修复在上游社区是自包含的，无需额外的追加修正。"
-
-这意味着：
-1. 没有任何后续 commit 通过 `Fixes:` 标签引用本修复 → 社区没有发现本修复有问题
-2. 本修复涉及的函数在之后没有被其他安全修复修改 → 本修复是完备的
+1. 建立规则配置独立样例文件，并把入口迁到 `rules/`
+2. 统一根级 README、中文 README、presentation、rules 文档对规则框架的描述
+3. 建立样本验证模板，停止只用口头“20+ CVE”描述目标
+4. 为新规则接入补齐正例 / 反例 / 开关关闭三类测试要求
+5. 给 `L1`、`L3`、`L4` 场景写清楚默认审查动作与交付建议
+6. 清理冗余文档，避免继续维护无实际消费路径的材料
 
 ---
 
-## 三、核心技术原理：补丁回合 (Backporting) 逻辑
+## 5. 验收标准
 
-### 3.1 整体流水线
+### 5.1 规则体系验收
 
-```
-CVE ID + 目标内核版本
-  │
-  ├─ Stage 1: Crawler (情报收集)
-  │    ├─ 从 MITRE/NVD 获取 CVE 基本信息
-  │    ├─ 从 linux-cve-announce 提取 mainline fix commit
-  │    └─ 从 git.kernel.org / googlesource / 本地仓库获取补丁内容
-  │
-  ├─ Stage 2: Analysis (引入/修复检测)
-  │    ├─ 引入检测: 漏洞引入 commit 是否存在于目标版本 → 是否受影响
-  │    ├─ 修复检测: 修复 commit 是否已合入目标版本 → 是否已修复
-  │    └─ Stable backport 检测: 是否有该版本的官方 backport
-  │
-  ├─ Stage 3: Dependency (前置依赖分析)
-  │    └─ 如上 2.2 节所述
-  │
-  ├─ Stage 4: DryRun (多级自适应补丁试应用)
-  │    └─ 如下 3.2 节所述
-  │
-  └─ Stage 5 (可选 --deep): 深度分析
-       ├─ VulnAnalysis (漏洞类型/根因/触发)
-       ├─ PatchReview (代码走读/安全检视)
-       ├─ RiskBenefit (风险收益评估)
-       └─ MergeAdvisor (合入建议)
-```
+- 默认规则、级别策略、规则配置样例全部位于 `rules/`
+- 根级 `config.example.yaml` 不再承载详细规则配置块
+- `rules/README.md`、`README.md`、`README_zh.md`、`docs/presentation.md` 对插件机制的表述一致
 
-### 3.2 多级自适应 DryRun
+### 5.2 判定质量验收
 
-DryRun 是补丁回合的核心环节——验证社区补丁能否在目标版本上正确应用，并在可能时自动适配生成可用补丁。
+- `tests/test_policy_engine.py` 持续通过
+- 每条默认规则至少有：
+  - 触发正例
+  - 不触发反例
+  - 开关关闭回退
+- `L0` 不被任何风险规则误标为无害
+- L1 规则能给出明确证据，而不是泛化 warning
 
-```
-L0: strict (git apply --check)
- │  原始补丁直接应用，3 行上下文完全匹配
- │  ✔ → 最高置信度，补丁可直接 cherry-pick
- │  ✘ ↓
-L1: context-C1 (git apply -C1)
- │  降低上下文要求到 1 行，容忍少量行偏移
- │  ✔ → 高置信度，偏移通常是无关紧要的
- │  ✘ ↓
-L2: 3way (git apply --3way)
- │  三路合并，利用 git 内置冲突解决
- │  ✔ → 中置信度，建议人工确认合并结果
- │  ✘ ↓
-L5: verified-direct (Python 内存级)
- │  绕过 git apply:
- │    1. 读取目标文件内容
- │    2. 在内存中定位每个 hunk 的精确位置
- │    3. 应用修改 (删除行→添加行)
- │    4. difflib.unified_diff 生成新 patch
- │  ✔ → 中置信度，已验证每个 hunk 的语义正确性
- │  ✘ ↓
-L3: regenerated (上下文重生成)
- │  从目标文件中重新提取 hunk 上下文:
- │    1. 定位 "-" 行在目标文件中的精确位置
- │    2. 用目标文件的真实上下文替换原始上下文
- │    3. 重新计算行号偏移
- │    4. 生成适配后的 patch
- │  ✔ → 中低置信度，上下文已重写
- │  ✘ ↓
-L3.5: zero-context (零上下文)
- │  极端策略: 删除所有上下文行，仅保留 +/- 行
- │  配合 --unidiff-zero 应用
- │  ✔ → 低置信度，仅适用上下文严重损坏的场景
- │  ✘ ↓
-L4: conflict-adapted (冲突适配)
- │  逐 hunk 分析冲突原因:
- │    - 符号/宏重命名 → 自动映射替换
- │    - 缩进风格差异 → 自动适配
- │    - 行偏移 → 重新定位
- │  ✔ → 低置信度，需人工审查适配结果
- │  ✘ ↓
-失败 → 报告冲突详情，建议人工处理
-```
+### 5.3 样本验证验收
 
-### 3.3 什么时候需要看前置补丁，什么时候不需要
+- 样本集具备清单、期望、实际、差异、裁决
+- 报告能说明“为什么触发该级别”
+- 误报与漏报能归因到具体规则或边界
 
-| 场景 | 是否需要前置 | 原因 |
-|------|-------------|------|
-| DryRun strict 通过 + 无前置补丁检出 | **不需要** | 补丁可直接应用，代码上下文完全一致 |
-| DryRun 通过 (非 strict) + 无前置 | **基本不需要** | 有少量行偏移但已自动适配，不影响正确性 |
-| DryRun 通过 + 有前置补丁检出 | **需要评估** | 补丁文本能应用，但可能依赖前置补丁的编译期/运行时改动 |
-| DryRun 失败 + 有强依赖前置 | **需要** | 冲突原因可能是缺少前置补丁的代码改动 |
-| DryRun 失败 + 无前置检出 | **需人工分析** | 目标版本与上游差异太大，可能需手动适配 |
+### 5.4 文档治理验收
 
-**核心原则**：
-
-1. **DryRun 是最直接的判据** — 如果补丁能在目标版本上干净应用，99% 的情况不需要前置补丁
-2. **Hunk 重叠是最准确的依赖信号** — 两个补丁修改了同一段代码的同一行，几乎必然存在依赖
-3. **函数重叠是补充信号** — 修改同一函数不一定有依赖，但值得关注
-4. **"无前置"不等于没有分析** — 工具会解释为什么判定为无前置（DryRun 通过、无候选、范围集中等）
+- `plan.md` 表达当前路线图，而不是历史开发日志
+- `docs/presentation.md` 能直接用于当前阶段汇报
+- 删除的文档不再被 README / docs 引用
 
 ---
 
-## 四、当前遗留问题
+## 6. 文档与文件治理规则
 
-### 已解决 ✅
+当前推荐保留的主文档职责如下：
 
-| 问题 | 解决方式 |
-|------|---------|
-| DryRun L0-L2 全败时无法生成补丁 | 新增 L5 Verified-Direct + L3.5 Zero-Context |
-| 宏/常量重命名导致补丁无法应用 | 符号映射自动检测 + 替换 |
-| 缩进风格差异 (tab/space) 导致拒绝 | 缩进适配算法 |
-| validate 模式下 DryRun 被跳过 | `force_dryrun` 修正 |
-| 开发者看不懂工具输出 | Analysis Narrative 结构化叙述 |
-| 风险收益展示裸数值无法理解 | 改为等级标签 + 详细文字描述 |
-| 函数名提取到 static/int 等噪声词 | C 函数名智能提取 (跳过类型修饰符) |
-| LLM 返回 None 导致 strip() 崩溃 | `(content or "").strip()` 防护 |
-| 无前置补丁时不解释原因 | 关联补丁完整分析（无论有无都给理由） |
+- [README.md](/Users/junxiaoqiong/Workplace/cve_backporting/README.md)：英文总览、能力、配置入口、路线图
+- [README_zh.md](/Users/junxiaoqiong/Workplace/cve_backporting/README_zh.md)：中文落地说明
+- [plan.md](/Users/junxiaoqiong/Workplace/cve_backporting/plan.md)：当前阶段路线图与验收口径
+- [docs/presentation.md](/Users/junxiaoqiong/Workplace/cve_backporting/docs/presentation.md)：汇报材料
+- [docs/TECHNICAL.md](/Users/junxiaoqiong/Workplace/cve_backporting/docs/TECHNICAL.md)：技术说明
+- [docs/ADAPTIVE_DRYRUN.md](/Users/junxiaoqiong/Workplace/cve_backporting/docs/ADAPTIVE_DRYRUN.md)：DryRun 深入算法
+- [docs/MULTI_LEVEL_ALGORITHM.md](/Users/junxiaoqiong/Workplace/cve_backporting/docs/MULTI_LEVEL_ALGORITHM.md)：多级算法参考
+- [rules/README.md](/Users/junxiaoqiong/Workplace/cve_backporting/rules/README.md)：规则目录说明
+- [rules/policy.example.yaml](/Users/junxiaoqiong/Workplace/cve_backporting/rules/policy.example.yaml)：规则配置示例
 
-### 仍存在 ⚠️
+本轮已删除的冗余文档：
 
-| 编号 | 问题 | 说明 |
-|------|------|------|
-| 1 | `normalize_subject` 前缀不灵活 | 企业内核自定义前缀 `[hulk]` 等无法处理 |
-| 2 | FTS5 关键词搜索过严 | AND 连接要求全部命中，backport subject 修改后易漏 |
-| 3 | L3 搜索性能瓶颈 | 100 个候选各执行 git show ~50ms |
-| 4 | Stable backport 版本匹配硬编码 | `ver.startswith("5.10")` 仅支持 5.10 |
-| 5 | `verify=False` 未配置化 | 安全风险 |
-| 6 | 阈值硬编码 | L2/L3 相似度阈值应可配置 |
-| 7 | Fixes 标签链未递归 | 仅追踪第一层引用 |
-| 8 | L6 AI 补丁未接入主链路 | 需手动配置 |
+- `docs/arch.md`：内容与 README / TECHNICAL / presentation 高度重叠，且不再作为主维护入口
 
----
+后续原则：
 
-## 五、下一阶段优化方向
-
-### P-Near — 搜索质量增强 (1-2 周)
-
-| 编号 | 项目 | 复杂度 |
-|------|------|--------|
-| N.1 | `normalize_subject` 正则化 — 去除所有 `[...]` 前缀，支持配置 | 低 |
-| N.2 | FTS5 搜索改 OR + 权重 | 中 |
-| N.3 | L3 延迟 diff 获取 — `git show --stat` 预过滤 | 中 |
-| N.4 | diff LRU 内存缓存 | 低 |
-
-### P-Mid — Pipeline 通用化 (2-4 周)
-
-| 编号 | 项目 | 复杂度 |
-|------|------|--------|
-| M.1 | Stable backport 版本自动匹配 | 低 |
-| M.2 | 引入 commit 缺失的降级策略 | 中 |
-| M.3 | L6 AI 补丁生成接入主链路 | 中 |
-| M.4 | `verify=False` 可配置 | 低 |
-| M.5 | 阈值配置化 | 低 |
-| M.6 | Fixes 标签链递归 (限深 3 层) | 中 |
-
-### P-Far — 扩展能力 (1-3 月)
-
-| 编号 | 项目 | 复杂度 |
-|------|------|--------|
-| F.1 | CI/CD 集成模式 (`--json` + 非零退出码) | 中 |
-| F.2 | 多仓库并行分析 | 高 |
-| F.3 | CVE 订阅与增量扫描 | 高 |
-| F.4 | Web Dashboard | 高 |
-| F.5 | 扩大基准测试集 50+ CVE | 中 |
-
----
-
-## 六、建议执行路径
-
-```
-已完成 ✅:
-  Phase 0-2: 基础架构 + 搜索引擎 + 路径映射 + Diff 包含度
-  Phase 3:   多级 DryRun (L0-L5 + L3.5 + L4) + 符号映射 + 缩进适配
-  Phase 4:   batch-validate + CVE 级聚合 + 前置补丁交叉验证
-  Phase 5:   Analysis Narrative
-  Phase 6:   Validate 修复 (force_dryrun / worktree)
-  Phase 7:   v2.0 深度分析 (漏洞/社区/检视/风险/建议/关联补丁完整分析)
-
-近期 (1-2 周):
-  ├─ N.1 normalize_subject 正则化
-  ├─ N.4 diff LRU 缓存
-  ├─ M.1 Stable backport 版本自动匹配
-  └─ M.4 + M.5 配置化 (verify / 阈值)
-
-中期 (2-4 周):
-  ├─ N.2 FTS5 搜索改 OR
-  ├─ N.3 L3 延迟 diff
-  ├─ M.3 L6 AI 接入主链路
-  └─ M.6 Fixes 标签链递归
-
-远期 (1-3 月):
-  ├─ F.1 CI/CD 集成
-  ├─ F.5 基准测试集 50+ CVE
-  └─ F.2 + F.3 多仓库 / CVE 订阅
-```
+- 新增文档前先判断是否能并入现有主文档
+- 若一个文档不再被主入口引用，也不再作为交付材料使用，应优先删除
+- `plan.md` 不再记录所有历史 phase 细节，只保留当前可执行路线图

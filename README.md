@@ -24,6 +24,7 @@
   <a href="docs/TECHNICAL.md">Technical Docs</a> ·
   <a href="docs/ADAPTIVE_DRYRUN.md">Algorithm Deep-Dive</a> ·
   <a href="docs/MULTI_LEVEL_ALGORITHM.md">Multi-Level Algorithm</a> ·
+  <a href="plan.md">Roadmap</a> ·
   <a href="#architecture">Architecture</a> ·
   <a href="#benchmarks">Benchmarks</a>
 </p>
@@ -144,6 +145,7 @@ Default scenario meanings:
 Rule engine highlights:
 - Built-in Python rules now live in [rules/default_rules.py](/Users/junxiaoqiong/Workplace/cve_backporting/rules/default_rules.py)
 - Built-in level policies now live in [rules/level_policies.py](/Users/junxiaoqiong/Workplace/cve_backporting/rules/level_policies.py)
+- Rule config example now lives in [rules/policy.example.yaml](/Users/junxiaoqiong/Workplace/cve_backporting/rules/policy.example.yaml)
 - **Large change warning**: changed lines / hunk count thresholds, promotes to at least `L2`
 - **Call-chain propagation + fanout**: caller/callee impact inside the modified-file set, including cross-file edges
 - **Critical structure warning**: lock/RCU/refcount/struct-sensitive changes, promotes to at least `L3`
@@ -309,6 +311,9 @@ pip install -r requirements.txt
 #     "5.10-hulk":
 #       path: "/path/to/linux"
 #       branch: "linux-5.10.y"
+#
+# If you want L0-L5 rule orchestration config,
+# copy the `policy:` block from `rules/policy.example.yaml`
 
 # Build commit cache (one-time, incremental updates afterward)
 python cli.py build-cache --target 5.10-hulk
@@ -338,6 +343,7 @@ python cli.py analyze --cve CVE-2024-26633 --target 5.10-hulk
 
 ```
 cve_backporting/
+├── plan.md                       # Current roadmap and acceptance criteria
 ├── core/                          # Infrastructure Layer
 │   ├── models.py                  #   Data models (CveInfo, PatchInfo, DryRunResult, ...)
 │   ├── config.py                  #   YAML configuration loader
@@ -359,9 +365,16 @@ cve_backporting/
 ├── config.yaml                    # Configuration
 ├── benchmarks.example.yaml        # Benchmark suite example
 ├── requirements.txt
+├── rules/
+│   ├── default_rules.py           # Built-in risk rules
+│   ├── level_policies.py          # L0-L5 orchestration policies
+│   ├── policy.example.yaml        # Rule config example
+│   └── README.md                  # Rule extension guide
 ├── tests/
-│   └── test_agents.py
+│   ├── test_agents.py             # Agent / pipeline tests
+│   └── test_policy_engine.py      # Rule engine regression tests
 └── docs/
+    ├── presentation.md            # Presentation deck / review material
     ├── TECHNICAL.md               # Complete technical documentation
     ├── ADAPTIVE_DRYRUN.md         # 5-level adaptive algorithm deep-dive
     └── MULTI_LEVEL_ALGORITHM.md   # Multi-level algorithm detailed reference
@@ -440,6 +453,20 @@ ai_patch_generation:
 | **[TECHNICAL.md](docs/TECHNICAL.md)** | Complete architecture, algorithms, data models, agent specifications |
 | **[ADAPTIVE_DRYRUN.md](docs/ADAPTIVE_DRYRUN.md)** | Multi-level adaptive DryRun engine — algorithm principles and formal specification |
 | **[MULTI_LEVEL_ALGORITHM.md](docs/MULTI_LEVEL_ALGORITHM.md)** | Multi-level algorithm reference with mathematical foundations |
+| **[presentation.md](docs/presentation.md)** | Current presentation deck for expert review / internal reporting |
+| **[plan.md](plan.md)** | Current roadmap, gaps, milestones, and acceptance criteria |
+| **[rules/policy.example.yaml](rules/policy.example.yaml)** | Example `policy:` block for L0-L5 orchestration and rule plugins |
+
+---
+
+## Roadmap
+
+The current roadmap is tracked in [plan.md](/Users/junxiaoqiong/Workplace/cve_backporting/plan.md). Near-term priorities are:
+
+1. Turn `rules/` into the stable home for rule code, rule docs, and rule config examples.
+2. Upgrade L0-L5 from “framework complete” to “sample-validated and auditable”.
+3. Build a reproducible 20+ CVE validation set with expected level / warning / prerequisite fields.
+4. Connect `level_decision` outputs to delivery-time review and approval gates.
 
 ---
 

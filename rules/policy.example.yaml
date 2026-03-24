@@ -1,0 +1,34 @@
+# Rule-Orchestration Example
+#
+# 将本文件中的 `policy:` 段按需复制到根级 `config.yaml`。
+# 这样做的目的是把规则配置样例与 rules/ 目录下的规则代码、规则文档放在一起维护。
+
+policy:
+  enabled: true
+  profile: "balanced"
+
+  # 规则开关
+  large_change_rules_enabled: true
+  call_chain_rules_enabled: true
+  critical_structure_rules_enabled: true
+  l1_api_surface_rules_enabled: true
+
+  # 阈值
+  large_change_line_threshold: 80
+  large_hunk_threshold: 8
+  call_chain_fanout_threshold: 6
+  l1_return_line_delta_threshold: 2
+
+  # 关键结构关键词
+  critical_structure_keywords:
+    - "spin_lock"
+    - "mutex"
+    - "rcu"
+    - "refcount"
+    - "kref"
+    - "atomic"
+    - "struct"
+
+  # 插件规则示例
+  extra_rule_modules:
+    # - "rules.my_kernel_rules"

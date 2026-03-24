@@ -2240,101 +2240,106 @@ Step 5: 产出可答辩结论（工具自动生成 narrative）
 
 ---
 
-# 为什么要做 L0-L5 分级
+# 为什么还要继续推进这一层
 
-### 专家反馈的核心诉求
+### 当前已经做对的事
 
-1. **不同场景需要不同策略强度**：
-   - L0 必须是“100%可落地 + 无害变更”
-   - L1 允许上下文差异，但要有规则与证据约束
-2. **不能只看补丁能不能 apply**：
-   - 还要看是否涉及关键结构、调用链牵连、改动规模
-3. **规则要可扩展**：
-   - 支持后续人工持续加规则，而不是写死在流程里
+1. **DryRun 与最终级别已经解耦**
+   - `base_level/base_method` = DryRun 基线
+   - `level` = 规则抬升后的最终场景
+2. **L0 被收紧**
+   - 只有“严格命中 + 无风险规则”才允许 `harmless=true`
+3. **rules/ 已经成为真实插件入口**
+   - 默认规则、默认级别策略已经迁入 `rules/*.py`
+
+### 当前仍然缺的事
+
+- 规则配置样例此前还在根级配置文件里，资产没有完全收口
+- L1 规则已有启发式，但样本验证体系还不够
+- 调用链影响分析仍需明确边界与后续升级路径
 
 ---
 
-# 新编排框架：DryRun级别 × 规则引擎
+# 当前编排框架：DryRun 基线 × 规则 level_floor 抬升
 
 ```
-DryRun 方法 → 初始级别:
-  strict            → L0
-  ignore-ws/C1      → L1
-  3way              → L2
-  regenerated       → L3
-  conflict-adapted  → L4
-  verified-direct   → L5
+DryRun 成功方法
+  └─ 生成 base_level/base_method
 
-规则引擎二次裁决:
-  - large_change
-  - critical_structures
-  - call_chain_fanout
+规则引擎
+  └─ 每条规则输出 risk evidence
+  └─ 如有需要显式给出 level_floor
 
 最终输出:
-  level_decision + warnings + confidence + evidence
+  level_decision
+    ├─ level
+    ├─ base_level / base_method
+    ├─ review_mode / next_action
+    └─ rule_hits / warnings / evidence
 ```
 
 ### 关键收敛原则
 
-- **只有 L0 且无高/中风险规则命中，才可判定 harmless**
-- L1~L5 默认进入“需审查”路径（强弱不同）
+- **L0**：100% 可落地且无额外风险
+- **L1**：进入 LLM/人工复核，不自动无害
+- **L3/L4**：关键结构与传播风险必须显式升级
+- **规则决定风险抬升，不再回退为硬编码判断**
 
 ---
 
-# 三类新增规则（可插拔）
+# 当前默认规则与迁移结果
 
-| 规则 | 触发条件 | 输出 |
-|------|----------|------|
-| `large_change` | 改动行数或 hunk 数超阈值 | warning |
-| `critical_structures` | 命中锁/RCU/refcount/struct 等关键关键词 | high risk |
-| `call_chain_fanout` | callers+callees 扇出过大 | warning |
+| 规则 | 触发条件 | 当前输出 |
+|------|----------|----------|
+| `large_change` | 改动行数 / hunk 数超阈值 | warning，至少抬升到 `L2` |
+| `critical_structures` | 锁/RCU/refcount/struct 等关键结构命中 | high risk，至少抬升到 `L3` |
+| `call_chain_propagation` | 修改函数存在调用/被调用牵连 | warning / high，关键变更时可抬升到 `L4` |
+| `call_chain_fanout` | callers + callees 扇出超阈值 | warning，至少抬升到 `L2` |
+| `l1_api_surface` | 签名变化 / return 路径变化 | L1 复核证据 |
 
-### 插拔式扩展
+### 目录收口
 
-- 通过 `policy.extra_rule_modules` 动态加载
-- 外部模块可通过 `register_rules(registry)` 注册新规则
-- 支持不同团队按子系统沉淀私有规则
+- 默认规则：`rules/default_rules.py`
+- 默认策略：`rules/level_policies.py`
+- 配置样例：`rules/policy.example.yaml`
+- 目录说明：`rules/README.md`
 
 ---
 
-# 可审计输出增强（analysis / validate）
+# 下一步推进重点（与 plan.md 对齐）
 
-新增结构化字段：
+### Phase A：规则体系工程化收口
 
-- `level_decision`
-  - `level`, `harmless`, `confidence`, `reason`, `rule_hits`
-- `function_impacts`
-  - 修改函数的 `callers/callees/impact_score`
-- `validation_details`
-  - 工作流步骤、warning 汇总、规则 profile/version
-- `dryrun_detail.apply_attempts`
-  - strict→C1→3way→... 全尝试轨迹
+- 把规则代码、规则文档、规则配置样例统一收口到 `rules/`
+- 停止在根级 `config.example.yaml` 维护大段规则配置
+- 统一插件接入约定与回归要求
+
+### Phase B：样本验证与判定质量
+
+- 建立 20+ CVE 小样本清单
+- 为每条样本记录期望级别、warning、前置补丁需求、人工裁决
+- 收敛 L1 误报与关键结构传播误报
+
+### Phase C：流程门禁与交付化
+
+- 将 `level_decision` 接进人工审查与审批门禁
+- L4/L5 或 high risk 命中时要求人工审批
+- 让 `next_action` 真正服务于交付动作
+
+---
+
+# 文档治理与清理结果
+
+### 本轮调整
+
+- `plan.md` 已重写为当前路线图，不再保留阶段流水账式表述
+- `README` / `README_zh` / `presentation` 已统一规则框架口径
+- 规则配置样例迁移到 `rules/policy.example.yaml`
+- 删除 `docs/arch.md`，避免继续维护重复材料
 
 ### 价值
 
-> 从“给结论”升级为“给结论 + 给证据 + 给边界 + 给复盘轨迹”
-
----
-
-# 下一步计划（对齐专家评审）
-
-### P0（本周）
-
-- 完成 L0~L5 回归样例集（20+ CVE）
-- 校准阈值（行数/hunk/fanout）
-- 固化输出 schema，保障评审材料一致
-
-### P1（2~4周）
-
-- 强化 L1“无害”判定规则（参数变化/签名变化/返回语义）
-- 调用链分析从单文件扩展到跨文件热点子系统
-- 提供“保守/平衡/激进”三套规则 profile
-
-### P2（1~2月）
-
-- 接入 CI 审批门禁（L4/L5 或 high risk 自动人工审批）
-- 建立规则插件目录规范，支持团队独立扩展
-- 自动生成专家答辩模板（证据链 + 结论边界 + 建议动作）
+> 从“功能继续堆积”切换为“能力收口、规则资产化、样本验证化”
 
 ---
 
