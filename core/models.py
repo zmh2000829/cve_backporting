@@ -156,7 +156,11 @@ class PrerequisitePatch:
 class LevelDecision:
     """L0-L5 级别判定结果"""
     level: str = "L5"                    # L0/L1/L2/L3/L4/L5
+    base_level: str = "L5"               # DryRun 基线级别（规则抬升前）
+    base_method: str = ""                # DryRun 成功方法
     strategy: str = ""                    # 使用的策略说明
+    review_mode: str = ""                 # auto-pass / llm-review / manual-approval ...
+    next_action: str = ""                 # 下一步建议动作
     harmless: bool = False                 # 是否可判定为无害变更
     confidence: str = "medium"            # high/medium/low
     reason: str = ""                      # 判定理由
@@ -182,7 +186,7 @@ class ValidationDetails:
     function_impacts: List[FunctionImpact] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
     rule_profile: str = "default"
-    rule_version: str = "v1"
+    rule_version: str = "v2"
 
 
 @dataclass

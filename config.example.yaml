@@ -93,9 +93,12 @@ path_mappings:
 policy:
   enabled: true
   profile: "balanced"
+  large_change_rules_enabled: true
   large_change_line_threshold: 80
   large_hunk_threshold: 8
+  call_chain_rules_enabled: true
   call_chain_fanout_threshold: 6
+  critical_structure_rules_enabled: true
   l1_api_surface_rules_enabled: true
   l1_return_line_delta_threshold: 2
   critical_structure_keywords:
@@ -106,4 +109,6 @@ policy:
     - "kref"
     - "atomic"
     - "struct"
-  extra_rule_modules: []
+  extra_rule_modules:
+    # 自定义插件示例：放在 rules/ 目录下的 Python 模块
+    # - "rules.my_kernel_rules"

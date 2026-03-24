@@ -1237,9 +1237,13 @@ def _build_analysis_narrative(result, dryrun_detail: dict,
         ld = result.level_decision
         level_desc = {
             "conclusion": (
-                f"判定级别 {ld.level}，策略={ld.strategy}，"
+                f"判定级别 {ld.level}（基线 {ld.base_level}/{ld.base_method or 'none'}），策略={ld.strategy}，"
                 f"置信度={ld.confidence}，无害判定={ld.harmless}"
             ),
+            "base_level": ld.base_level,
+            "base_method": ld.base_method,
+            "review_mode": ld.review_mode,
+            "next_action": ld.next_action,
             "reason": ld.reason,
             "warnings": ld.warnings,
             "rule_hits": ld.rule_hits,

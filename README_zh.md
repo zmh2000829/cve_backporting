@@ -185,6 +185,29 @@ Patch Input
 - 再进入算法修复路径（L3-L4）处理企业分支差异
 - 保持“自动化优先 + 人工可审查兜底”
 
+### L0-L5 策略分级与可扩展规则
+
+当前实现把“DryRun 成功方法”和“最终策略级别”拆开了：
+
+- `level_decision.base_level` / `base_method`：DryRun 基线
+- `level_decision.level`：经过规则抬升后的最终 L0-L5 场景
+
+也就是说，`strict` 不再天然等于最终 `L0`。如果命中关键结构、调用链牵连或大改动规则，场景会被抬升：
+
+- `L0`：严格命中且无风险规则，才允许 `harmless=true`
+- `L1`：轻微上下文漂移，进入 LLM/人工“是否无害”复核路径
+- `L2`：中等风险，需人工对照 hunk / 调用面
+- `L3`：关键结构或语义敏感变更，需聚焦 review + 回归测试
+- `L4`：关键变更已沿调用/被调用链扩散，或冲突适配，需人工审批
+- `L5`：verified-direct / 未知路径，按最高谨慎度处理
+
+默认规则已经迁移到 `rules/` 目录下的 Python 模块：
+
+- `rules/default_rules.py`：大改动、关键结构、调用链牵连、L1 API surface
+- `rules/level_policies.py`：L0-L5 默认策略与 `level_floor` 抬升逻辑
+
+后续业务规则可直接放到 `rules/*.py`，并通过 `policy.extra_rule_modules` 以插件方式加载。
+
 ---
 
 ## 七层算法能力（工程实现视角）

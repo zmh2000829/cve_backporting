@@ -118,26 +118,41 @@ Every `validate`, `batch-validate`, and `analyze` JSON output now includes an `a
 
 ### L0-L5 Strategy Orchestration + Pluggable Rules (NEW)
 
-The engine classifies each run into **L0-L5 merge-risk scenarios** with **different default strategies** (documented in `level_decision.strategy` / `reason`):
+The engine now separates:
 
-- **L0 (strict)**: exact context match; **only** L0 with **no** high/warn rules may be marked `harmless=true`
-- **L1 (ignore-ws / context-C1)**: light drift; **not** auto-harmless — use **L1 API-surface heuristics** (signature churn, return-path delta) plus optional LLM review
-- **L2 (3-way)**: medium merge complexity
-- **L3 (regenerated)**: context rebuilt, requires focused review
-- **L4 (conflict-adapted)**: conflict adaptation, manual semantic review required
-- **L5 (verified-direct / unknown path)**: robust fallback, low confidence by default
+- **DryRun baseline** (`level_decision.base_level` / `base_method`)
+- **Final L0-L5 scenario** (`level_decision.level`)
+
+The final scenario is no longer a raw `apply_method -> level` mapping. It is derived as:
+
+- `DryRun baseline level`
+- plus rule-driven **`level_floor` promotion**
+
+This keeps the core DryRun algorithm unchanged while allowing a clean `strict-but-risky != L0` orchestration.
+
+Default scenario meanings:
+
+- **L0**: deterministic safe path; only exact-match baseline with **no** warning/high-risk rule promotions may be `harmless=true`
+- **L1**: light context drift; enters **LLM/manual harmless review lane**, but is **not auto-harmless**
+- **L2**: medium-risk merge/adaptation or large-change/call-chain warnings
+- **L3**: semantic-sensitive changes, such as critical structures or regenerated context; focused review required
+- **L4**: high-risk propagation, conflict adaptation, or critical changes spread along caller/callee chains; manual approval required
+- **L5**: verified-direct / unknown fallback path; lowest confidence
 
 **Profiles** (`policy.profile`): `conservative` / `balanced` / `aggressive` / `default` — preset thresholds for large-change and call-chain fanout; explicit YAML values override presets.
 
 Rule engine highlights:
-- **Large change warning** (changed lines / hunk count thresholds)
-- **Call-chain impact warning** (caller/callee fanout, **cross-file** edges among modified files)
-- **Critical structure warning** (lock/RCU/refcount/struct-sensitive changes)
+- Built-in Python rules now live in [rules/default_rules.py](/Users/junxiaoqiong/Workplace/cve_backporting/rules/default_rules.py)
+- Built-in level policies now live in [rules/level_policies.py](/Users/junxiaoqiong/Workplace/cve_backporting/rules/level_policies.py)
+- **Large change warning**: changed lines / hunk count thresholds, promotes to at least `L2`
+- **Call-chain propagation + fanout**: caller/callee impact inside the modified-file set, including cross-file edges
+- **Critical structure warning**: lock/RCU/refcount/struct-sensitive changes, promotes to at least `L3`
+- **Critical propagation**: critical changes that also spread along call chains promote to `L4`
 - **L1 API surface** (`l1_api_surface`): signature-line add/remove mismatch, return-statement delta
-- **Pluggable extension** via `policy.extra_rule_modules` (`register_rules` or `RULES`)
+- **Pluggable extension** via `policy.extra_rule_modules` with `register_rules(registry, config=None)`, `RULES`, `register_level_policies(...)`, or `LEVEL_POLICIES`
 
 Validate output (`validation_details.rule_version` **v2**) includes:
-- `level_decision` (level, harmless, confidence, reason, rule hits)
+- `level_decision` (`level`, `base_level`, `base_method`, `review_mode`, `next_action`, `harmless`, `confidence`, `reason`, `rule_hits`)
 - `function_impacts` (callers/callees/impact score)
 - `dryrun_detail.apply_attempts` (full strategy attempt trace)
 - `validation_details` (workflow steps + warning summary)

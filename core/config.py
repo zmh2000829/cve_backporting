@@ -71,9 +71,12 @@ class PolicyConfig:
     """L0-L5 分级与规则引擎配置"""
     enabled: bool = True
     profile: str = "balanced"
+    large_change_rules_enabled: bool = True
     large_change_line_threshold: int = 80
     large_hunk_threshold: int = 8
+    call_chain_rules_enabled: bool = True
     call_chain_fanout_threshold: int = 6
+    critical_structure_rules_enabled: bool = True
     critical_structure_keywords: list = field(default_factory=lambda: [
         "spin_lock", "mutex", "rcu", "refcount", "kref", "atomic", "struct"
     ])
@@ -130,9 +133,12 @@ class ConfigLoader:
                 merged_policy["profile"] = prof
                 allowed_policy_keys = (
                     "enabled", "profile",
+                    "large_change_rules_enabled",
                     "large_change_line_threshold",
                     "large_hunk_threshold",
+                    "call_chain_rules_enabled",
                     "call_chain_fanout_threshold",
+                    "critical_structure_rules_enabled",
                     "critical_structure_keywords",
                     "extra_rule_modules",
                     "l1_api_surface_rules_enabled",

@@ -139,6 +139,10 @@ def render_report(result) -> Panel:
         }.get(ld.level, "white")
         harmless_str = "是" if ld.harmless else "否"
         grid.add_row("策略级别", f"[{lv_style}]{ld.level}[/] ({ld.strategy})")
+        if getattr(ld, "base_level", ""):
+            grid.add_row("DryRun 基线", f"{ld.base_level} / {ld.base_method or 'none'}")
+        if getattr(ld, "review_mode", ""):
+            grid.add_row("审查模式", ld.review_mode)
         grid.add_row("无害判定", harmless_str)
         if ld.warnings:
             grid.add_row("级别告警", ld.warnings[0][:90])
@@ -705,6 +709,10 @@ def render_validate_report(result: dict):
         harmless = level_decision.get("harmless", False)
         conf = level_decision.get("confidence", "")
         strategy = level_decision.get("strategy", "")
+        base_level = level_decision.get("base_level", "")
+        base_method = level_decision.get("base_method", "")
+        review_mode = level_decision.get("review_mode", "")
+        next_action = level_decision.get("next_action", "")
         reason = level_decision.get("reason", "")
 
         level_style = {
@@ -713,7 +721,13 @@ def render_validate_report(result: dict):
         }.get(level, "white")
 
         ld_tbl.add_row("级别", f"[{level_style}]{level}[/]")
+        if base_level:
+            ld_tbl.add_row("DryRun 基线", f"{base_level} / {base_method or 'none'}")
         ld_tbl.add_row("策略", strategy)
+        if review_mode:
+            ld_tbl.add_row("审查模式", review_mode)
+        if next_action:
+            ld_tbl.add_row("下一步", next_action)
         ld_tbl.add_row("无害判定", "[green]是[/]" if harmless else "[yellow]否[/]")
         ld_tbl.add_row("置信度", conf)
         if reason:

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""策略引擎回归：L0–L5 映射、关键结构、大改动、扇出、L1 API 启发式、profile 预设。"""
+"""策略引擎回归：基线 DryRun + rules/ 抬升、关键结构、调用链牵连、L1 API 启发式、profile 预设。"""
 
 import os
 import sys
@@ -50,10 +50,11 @@ class PolicyEngineRegressionTests(unittest.TestCase):
         vd = eng.evaluate(p, dr, _MockGit({}), "any")
         self.assertIsNotNone(vd.level_decision)
         self.assertEqual(vd.level_decision.level, "L0")
+        self.assertEqual(vd.level_decision.base_level, "L0")
         self.assertTrue(vd.level_decision.harmless)
         self.assertIn("L0", vd.level_decision.strategy)
 
-    def test_l0_not_harmless_on_critical_structure(self):
+    def test_strict_critical_structure_promotes_out_of_l0(self):
         diff = """diff --git a/lock.c b/lock.c
 @@ -1,2 +1,2 @@
  void f(void) {
@@ -65,7 +66,8 @@ class PolicyEngineRegressionTests(unittest.TestCase):
         dr = DryRunResult(applies_cleanly=True, apply_method="strict")
         eng = PolicyEngine(PolicyConfig(profile="default"), llm_enabled=False)
         vd = eng.evaluate(p, dr, _MockGit({}), "any")
-        self.assertEqual(vd.level_decision.level, "L0")
+        self.assertEqual(vd.level_decision.base_level, "L0")
+        self.assertEqual(vd.level_decision.level, "L3")
         self.assertFalse(vd.level_decision.harmless)
         self.assertTrue(any("mutex" in m.lower() or "关键" in m for m in vd.warnings))
 
@@ -79,6 +81,7 @@ class PolicyEngineRegressionTests(unittest.TestCase):
             llm_enabled=False,
         )
         vd = eng.evaluate(p, dr, _MockGit({}), "any")
+        self.assertEqual(vd.level_decision.level, "L2")
         self.assertFalse(vd.level_decision.harmless)
         self.assertTrue(any("改动较大" in w for w in vd.warnings))
 
@@ -113,6 +116,8 @@ void baz(void) {
             llm_enabled=False,
         )
         vd = eng.evaluate(p, dr, git, "5.10")
+        self.assertEqual(vd.level_decision.base_level, "L1")
+        self.assertEqual(vd.level_decision.level, "L2")
         impacts = {fi.function: fi for fi in vd.function_impacts}
         self.assertIn("foo", impacts)
         self.assertGreaterEqual(len(impacts["foo"].callers) + len(impacts["foo"].callees), 2)
@@ -131,6 +136,7 @@ void baz(void) {
         eng = PolicyEngine(PolicyConfig(profile="default"), llm_enabled=False)
         vd = eng.evaluate(p, dr, _MockGit({}), "any")
         self.assertEqual(vd.level_decision.level, "L1")
+        self.assertEqual(vd.level_decision.review_mode, "llm-review")
         self.assertTrue(any("签名" in w or "L1" in w or "调用点" in w for w in vd.warnings))
 
     def test_l1_api_surface_disabled(self):
@@ -150,6 +156,34 @@ void baz(void) {
         vd = eng.evaluate(p, dr, _MockGit({}), "any")
         self.assertFalse(any(h.get("rule_id") == "l1_api_surface" for h in (vd.level_decision.rule_hits or [])))
 
+    def test_critical_call_chain_propagation_promotes_to_l4(self):
+        a_c = """int helper(void) {
+    return 1;
+}
+int foo(void) {
+    helper();
+    return 0;
+}
+"""
+        b_c = """void bar(void) {
+    foo();
+}
+"""
+        diff = """diff --git a/a.c b/a.c
+@@ -1,5 +1,5 @@ int foo(void) {
+-    mutex_lock(&old_lock);
++    mutex_lock(&new_lock);
+ }
+"""
+        p = _patch(diff, ["a.c", "b.c"])
+        dr = DryRunResult(applies_cleanly=True, apply_method="strict")
+        git = _MockGit({"a.c": a_c, "b.c": b_c})
+        eng = PolicyEngine(PolicyConfig(profile="default"), llm_enabled=False)
+        vd = eng.evaluate(p, dr, git, "5.10")
+        self.assertEqual(vd.level_decision.base_level, "L0")
+        self.assertEqual(vd.level_decision.level, "L4")
+        self.assertTrue(any(h.get("rule_id") == "call_chain_propagation" for h in vd.level_decision.rule_hits))
+
     def test_profile_conservative_presets_exist(self):
         self.assertIn("conservative", POLICY_PROFILE_PRESETS)
         self.assertLess(
@@ -164,6 +198,22 @@ void baz(void) {
         vd = eng.evaluate(p, dr, _MockGit({}), "any")
         self.assertEqual(vd.level_decision.level, "L5")
         self.assertEqual(vd.level_decision.confidence, "low")
+
+    def test_l5_when_dryrun_missing(self):
+        p = _patch("- x\n+ y\n", ["z.c"])
+        eng = PolicyEngine(PolicyConfig(profile="balanced"), llm_enabled=False)
+        vd = eng.evaluate(p, None, _MockGit({}), "any")
+        self.assertEqual(vd.level_decision.level, "L5")
+        self.assertEqual(vd.level_decision.confidence, "low")
+        self.assertEqual(vd.rule_version, "v2")
+
+    def test_empty_patch_keeps_v2_schema_and_profile(self):
+        eng = PolicyEngine(PolicyConfig(profile="conservative"), llm_enabled=False)
+        vd = eng.evaluate(None, None, _MockGit({}), "any")
+        self.assertIsNone(vd.level_decision)
+        self.assertEqual(vd.rule_version, "v2")
+        self.assertEqual(vd.rule_profile, "conservative")
+        self.assertIn("fix_patch 为空", vd.warnings)
 
 
 if __name__ == "__main__":

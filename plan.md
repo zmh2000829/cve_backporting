@@ -86,43 +86,61 @@
 
 | 完成项 | 说明 |
 |--------|------|
-| L0-L5 统一分级判定 | 基于 DryRun 方法映射 `strict→L0`、`context-C1→L1`、`3way→L2`、`regenerated→L3`、`conflict-adapted→L4`、`verified-direct→L5` |
-| 分级策略文案 | `level_decision.strategy` / `reason` 区分 L0~L5 含义；**仅 L0 且无 high/warn 规则** 才 `harmless=true` |
-| 无害判定收敛 | L1 不自动无害；与 `l1_api_surface`、大改动、扇出、关键结构规则联动 |
-| 调用链影响分析 | 修改文件范围内 **跨文件** 符号边合并；callers/callees、扇出告警 |
+| L0-L5 最终分级改造 | 改为 `DryRun 基线级别 + 规则 level_floor 抬升`，不再把最终级别硬编码成 `apply_method→level` |
+| 基线与最终级别分离 | `level_decision.base_level` / `base_method` 表示 DryRun 基线，`level_decision.level` 表示最终场景 |
+| 分级策略文案 | `level_decision.strategy` / `reason` / `review_mode` / `next_action` 区分 L0~L5 含义；**仅最终 L0 且无 high/warn 规则** 才 `harmless=true` |
+| 无害判定收敛 | L1 进入 LLM/人工复核路径，不自动无害；与 `l1_api_surface`、大改动、扇出、关键结构规则联动 |
+| 调用链影响分析 | 修改文件范围内 **跨文件** 符号边合并；同时输出 callers/callees、扇出与调用/被调用牵连告警 |
 | 大改动告警 | 按改动行数 / hunk 数阈值触发 warning |
-| 关键结构变更告警 | 锁/RCU/refcount/struct 等关键词命中后提升风险 |
+| 关键结构变更告警 | 锁/RCU/refcount/struct 等关键词命中后至少抬升到 L3 |
+| 关键变更牵连升级 | 若关键结构变更同时沿调用链扩散，则抬升到 L4 |
 | L1 细粒度启发式 | 签名行增删不一致、`return` 行差阈值（可配置、可关闭） |
-| 可插拔规则框架 | `RuleRegistry` + `policy.extra_rule_modules` 动态扩展 |
+| 可插拔规则框架 | 默认规则迁入 `rules/*.py`；支持 `register_rules` / `RULES` / `register_level_policies` / `LEVEL_POLICIES` |
 | Profile 预设 | `conservative` / `balanced` / `aggressive` / `default`，YAML 覆盖预设 |
-| 输出可审计化 | `validation_details.rule_version=v2`；`level_decision`、`function_impacts`、`validation_details`、DryRun `apply_attempts` |
+| 输出可审计化 | `validation_details.rule_version=v2`；`level_decision`（含 `base_level` / `base_method` / `review_mode` / `next_action`）、`function_impacts`、`validation_details`、DryRun `apply_attempts` |
 | 回归测试 | `tests/test_policy_engine.py` |
 | TUI 报告增强 | 新增“策略分级判定”“函数影响分析”“DryRun 尝试轨迹”面板 |
 
 ---
 
-## 三、下一步推进计划（更新版）
+## 三、下一步推进计划（核验增强版）
 
-### P0（本周）— 稳定化与可回归验证 ✅（代码侧已落地）
+### 本轮核验结论
 
-1. **补齐规则引擎回归用例** ✅
-   - `tests/test_policy_engine.py`：`unittest` 覆盖 L0 无害、L0+关键结构、大改动阈值、L1 签名启发式、跨文件扇出、`l1_api_surface` 可关闭、空 DryRun→L5、`POLICY_PROFILE_PRESETS` 存在性
-   - 运行：`python -m unittest tests.test_policy_engine -v`
-2. **完成 20+ CVE 小样本验证**
-   - 指标：level 判定稳定性、warning 误报率（需在具名仓库与 CVE 清单上人工/批跑，本仓库不绑数据）
-3. **统一报告字段 schema** ✅
-   - `validation_details.rule_version` 递增至 **v2**（与 L1 规则、跨文件图、profile 合并行为对齐）；字段仍为 `level_decision` / `function_impacts` / `validation_details` / DryRun `apply_attempts`
+- **已在仓库内核实**：规则引擎回归测试存在且可通过；`l1_api_surface`、跨文件调用链、`POLICY_PROFILE_PRESETS`、`rule_version=v2` 主路径均已落地
+- **未能在仓库内直接核实**：`20+ CVE` 小样本验证、具名仓库误报率、`rules/` 目录规范与插件交付约束
+- **结论**：P0/P1 不应继续按“整体已完成”表述，而应拆成“已落地能力 + 待补验证/待收口要求”
 
-### P1（2~4 周）— 策略质量提升 ✅（首版已合入，后续观测调参）
+### P0（本周）— 稳定化与可回归验证（已具备基础，实现侧需收口）
 
-1. **L1 无害判定质量提升** ✅（首版）
-   - 新增可插拔默认规则 `l1_api_surface`：签名行增删不一致、`return` 行数差阈值（`l1_return_line_delta_threshold`）
-   - 编排上 **L1 仍不自动 `harmless`**，与专家「L0 才机械无害」一致
-2. **调用链影响精度增强** ✅（首版）
-   - 修改文件集合内 **跨文件符号边**：`FunctionAnalyzer.build_call_topology_extended` + `build_cross_file_call_graph`
-   - 后续：全仓库符号索引 / 子系统白名单（见 P2）
-3. **规则配置模板化** ✅
-   - `core/config.py`：`POLICY_PROFILE_PRESETS`（`conservative` / `balanced` / `aggressive` / `default`），YAML 显式项覆盖预设；默认 `profile: balanced`（无 policy 节时与 dataclass 一致）
+1. **把规则回归从“有测试”提升到“可守门”**
+   - 已验证：`python -m unittest tests.test_policy_engine -v` 可通过，当前覆盖 L0 无害、L0+关键结构、大改动阈值、L1 签名启发式、跨文件扇出、`l1_api_surface` 可关闭、未知/缺失 DryRun→L5、`POLICY_PROFILE_PRESETS` 存在性
+   - 增强要求：后续每新增一个 rule，必须同时补 **正例 / 反例 / 开关关闭** 三类用例；空补丁、空 DryRun、未知方法三条边界路径不得缺测
+   - 验收口径：`tests/test_policy_engine.py` 必须覆盖所有默认规则与关键边界分支，且作为后续策略改动的最小回归门禁
+2. **统一报告字段 schema，并覆盖所有降级路径**
+   - 已验证：主流程输出 `validation_details.rule_version=v2`
+   - 本轮补强：无补丁路径也统一返回 **v2**，并保留当前 `rule_profile`
+   - 增强要求：`level_decision` / `function_impacts` / `validation_details` / DryRun `apply_attempts` 的字段契约在“成功、降级、无补丁”三类路径下保持稳定；`rule_hits.evidence` 必须可 JSON 序列化
+   - 验收口径：代码、配置模板、README/中文文档中的 schema 说明一致，不允许出现文档写 `v2`、代码某些分支仍产出 `v1`
+3. **把“小样本验证”从口头目标变成可执行任务**
+   - 现状判断：仓库内只有 `benchmarks.example.yaml` 示例，尚未形成可追溯的 20+ CVE 样本清单与结果归档
+   - 增强要求：补齐样本清单模板、期望结果字段（期望 level / 是否需要 prereq / 是否允许 warning）、跑批结果汇总格式，以及误报归因标签
+   - 验收口径：样本验证必须能输出“样本来源、期望结论、实际结论、差异说明、人工裁决”五列结果，避免只给一个笼统通过率
+
+### P1（2~4 周）— 策略质量提升（首版已合入，需从启发式提升到可运营）
+
+1. **L1 风险判定从“提示可用”升级为“误报可控”**
+   - 已验证：`l1_api_surface` 已接入默认规则，能够识别签名行增删不一致与 `return` 行数差；编排上 **L1 仍不自动 `harmless`**
+   - 增强要求：补齐负样本约束，避免把 `if/for/while`、普通函数调用、宏展开误判成签名变化；对告警文案输出明确证据（签名差异、`return` 计数）
+   - 验收口径：L1 规则既要保留解释性，也要提供“为什么触发 / 为什么没触发”的可复核证据，不能只返回模糊 warning
+2. **调用链影响分析从“修改文件内跨文件”升级为“边界清晰、可扩展”**
+   - 已验证：当前已支持在修改文件集合内构建 **跨文件符号边**
+   - 增强要求：报告中必须显式声明分析边界是“修改文件集合内”，避免过度表述为全仓库影响；为后续全仓库索引预留接口，但不在当前版本虚报能力
+   - 验收口径：`function_impacts` 输出需同时给出影响函数、调用/被调用数量、边界说明；后续若升级全仓库索引，应保持字段兼容
+3. **规则配置从“可调阈值”升级为“可管理策略”**
+   - 已验证：`POLICY_PROFILE_PRESETS` 已存在，且 YAML 显式项会覆盖预设
+   - 增强要求：约束 `conservative <= balanced <= aggressive` 的阈值单调性；新增/调整 profile 时必须同步测试、配置模板、文档与示例；插件规则必须定义稳定的 `rule_id`、`severity`、`message`、`evidence`
+   - 验收口径：profile 变更不可只改一个 Python 常量；规则插件接入必须具备可开关、可审计、失败可降级三项属性
 
 ### P2（1~2 月）— 工程化落地
 
