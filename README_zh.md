@@ -92,6 +92,15 @@
 
 ## 快速入门
 
+### 三分钟上手路径
+
+1. 安装依赖。
+2. 在 `config.yaml` 里配置目标内核仓库路径。
+3. 对目标分支执行一次 `build-cache`。
+4. 先用 `analyze` 看单条 CVE 的回移结论和规则分级。
+5. 已知真实修复时，再用 `validate` 对照评估工具效果。
+6. 需要平台化接入时，再启动 `server` 走 HTTP API。
+
 ### 1. 环境要求
 - Python 3.8+
 - 本地可访问目标 Linux 内核仓库
@@ -125,6 +134,18 @@ python cli.py build-cache --target 5.10-hulk
 ```bash
 python cli.py analyze --cve CVE-2024-26633 --target 5.10-hulk
 ```
+
+### 6. 命令如何选择
+
+| 目标 | 命令 | 适用场景 |
+|------|------|----------|
+| 判断补丁能否直接回移，是否需要关联补丁，风险在哪 | `analyze` | 日常单条或批量 CVE 研判 |
+| 判断漏洞引入提交是否已进入目标分支 | `check-intro` | 确认下游是否真正受影响 |
+| 判断修复是否已经被合入 | `check-fix` | 避免重复回移 |
+| 用已知真实修复验证工具输出 | `validate` | 单条样本精度验证 |
+| 统计规则分桶、依赖分桶与 L0-L5 分布 | `batch-validate` | 批量策略效果评估 |
+| 首次建立或刷新提交缓存 | `build-cache` | 初始化环境或仓库更新后 |
+| 通过 URL 调用分析能力 | `server` | 平台对接、服务化调用 |
 
 ---
 
@@ -257,6 +278,19 @@ python cli.py benchmark --file benchmarks.yaml --target 5.10-hulk
 ```
 
 说明：`/api/analyze` 与 `/api/analyzer` 可互通，均支持 `target_version` 或 `target` 字段；所有返回均以 JSON 形式给出完整过程与规则详情。
+
+## CLI 代码结构
+
+当前 CLI 已按命令拆分，用户命令保持不变，内部职责更清晰：
+
+- `cli.py`：保留统一入口、公共参数和共享 runtime helper
+- `commands/analyze.py`：`analyze`
+- `commands/checks.py`：`check-intro` / `check-fix`
+- `commands/validate.py`：`validate` / `benchmark` / `batch-validate`
+- `commands/maintenance.py`：`build-cache` / `search`
+- `commands/server.py`：`server`
+
+这意味着后续新增命令或调整某个命令时，不需要继续把所有逻辑堆进一个超大 `cli.py`。
 
 ## HTTP API（server 模式）
 

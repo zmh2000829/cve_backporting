@@ -445,6 +445,15 @@ Available routes:
 
 **Runtime**: Python 3.8+
 
+### Fastest path
+
+1. Install dependencies.
+2. Point `config.yaml` to your downstream kernel repository.
+3. Run `build-cache` once for the target branch.
+4. Start with `analyze` for a single CVE.
+5. Use `validate` only when you already know the real downstream fix and want to measure tool accuracy.
+6. Use `server` when you want to call the pipeline by HTTP instead of CLI.
+
 ```bash
 # Install dependencies
 pip install -r requirements.txt
@@ -465,6 +474,18 @@ python cli.py build-cache --target 5.10-hulk
 # Analyze a CVE
 python cli.py analyze --cve CVE-2024-26633 --target 5.10-hulk
 ```
+
+### Which command should I use?
+
+| Goal | Command | Typical usage |
+|------|---------|---------------|
+| Decide whether a CVE fix can be backported directly | `analyze` | Daily triage for one CVE or a CVE list |
+| Check whether the introducing commit already exists in target branch | `check-intro` | Confirm vulnerability exposure on downstream |
+| Check whether the fix is already merged | `check-fix` | Avoid duplicated backport work |
+| Compare tool output with a known real fix | `validate` | Single-case accuracy verification |
+| Measure rule buckets / dependency buckets across many CVEs | `batch-validate` | Batch strategy evaluation and report generation |
+| Build or refresh commit search cache | `build-cache` | First-time setup or repo refresh |
+| Expose the engine as HTTP API | `server` | Platform integration, UI integration, remote calling |
 
 ---
 
@@ -488,6 +509,13 @@ python cli.py analyze --cve CVE-2024-26633 --target 5.10-hulk
 ```
 cve_backporting/
 ├── plan.md                       # Current roadmap and acceptance criteria
+├── commands/                      # CLI command modules
+│   ├── analyze.py                 #   analyze command registration + execution
+│   ├── checks.py                  #   check-intro / check-fix commands
+│   ├── validate.py                #   validate / benchmark / batch-validate commands
+│   ├── maintenance.py             #   build-cache / search commands
+│   ├── server.py                  #   HTTP API server command
+│   └── __init__.py                #   Central command registry
 ├── core/                          # Infrastructure Layer
 │   ├── models.py                  #   Data models (CveInfo, PatchInfo, DryRunResult, ...)
 │   ├── config.py                  #   YAML configuration loader
@@ -505,7 +533,7 @@ cve_backporting/
 │   ├── dependency.py              #   Dependency Agent — prerequisite analysis
 │   └── dryrun.py                  #   DryRun Agent — multi-level adaptive engine
 ├── pipeline.py                    # Pipeline Orchestrator
-├── cli.py                         # CLI entry point
+├── cli.py                         # Thin CLI entry point + shared runtime helpers
 ├── config.yaml                    # Configuration
 ├── benchmarks.example.yaml        # Benchmark suite example
 ├── requirements.txt

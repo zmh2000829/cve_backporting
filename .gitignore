@@ -51,3 +51,4 @@ config.yaml
 
 # Test outputs
 *.log
+tests/

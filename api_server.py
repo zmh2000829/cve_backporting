@@ -9,6 +9,7 @@ from typing import Any, Callable, Dict
 
 from core.config import ConfigLoader
 from core.models import CveInfo
+from core.output_serializers import aggregate_l0_l5_levels, build_l0_l5_view
 
 import cli
 
@@ -118,9 +119,11 @@ def _default_validate_handler(payload: Dict[str, Any], config):
 
     cve_info = _build_mainline_cve_info(payload, cve_id)
 
-    return cli._run_single_validate(
+    result = cli._run_single_validate(
         config, cve_id, target, known_fix, known_prereqs,
         show_stages=False, cve_info=cve_info, deep=deep)
+    result["l0_l5"] = build_l0_l5_view(result)
+    return result
 
 
 def _default_batch_validate_handler(payload: Dict[str, Any], config):
@@ -159,17 +162,18 @@ def _default_batch_validate_handler(payload: Dict[str, Any], config):
             )
 
         try:
-            results.append(
-                cli._run_single_validate(
-                    config, cve_id, target, known_fix, known_prereqs,
-                    git_mgr=git_mgr, show_stages=False, cve_info=cve_info,
-                    deep=deep,
-                )
+            result = cli._run_single_validate(
+                config, cve_id, target, known_fix, known_prereqs,
+                git_mgr=git_mgr, show_stages=False, cve_info=cve_info,
+                deep=deep,
             )
+            result["l0_l5"] = build_l0_l5_view(result)
+            results.append(result)
         except Exception as exc:
             logger.exception("batch validate item failed: %s %s", cve_id, exc)
             errors.append({"index": idx, "cve_id": cve_id, "reason": str(exc)})
 
+    l0_l5_summary = aggregate_l0_l5_levels(results)
     return {
         "ok": True,
         "operation": "batch-validate",
@@ -180,6 +184,7 @@ def _default_batch_validate_handler(payload: Dict[str, Any], config):
             "success": len(results),
             "error": len(errors),
         },
+        "l0_l5_summary": l0_l5_summary,
     }
 
 

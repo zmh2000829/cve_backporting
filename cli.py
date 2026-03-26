@@ -24,9 +24,7 @@ import tempfile
 import time
 from datetime import datetime
 from dataclasses import asdict
-from collections import Counter
 import re
-from urllib.parse import urlparse
 
 from rich.console import Console, Group
 from rich.panel import Panel
@@ -36,6 +34,15 @@ from rich import box
 
 from core.config import ConfigLoader
 from core.git_manager import GitRepoManager
+from core.output_serializers import (
+    aggregate_strategy_buckets,
+    collect_prereq_patches,
+    collect_rules_metadata,
+    serialize_commit_reference,
+    serialize_function_impacts,
+    serialize_level_decision,
+    serialize_validation_details,
+)
 from core.ui import (
     console, StageTracker, make_header, render_report,
     render_recommendations, render_multi_strategy, make_cache_progress,
@@ -80,218 +87,6 @@ def _coerce_commit_list(values):
     return [str(values).strip()] if str(values).strip() else []
 
 
-def _coerce_commit_url_base(value: str) -> str:
-    if not value:
-        return ""
-    v = value.strip().rstrip("/")
-    if v.endswith(".git"):
-        v = v[:-4]
-    return v
-
-
-def _build_commit_url_from_remote(remote_url: str, commit_id: str) -> str:
-    if not remote_url or not commit_id:
-        return ""
-    candidate = _coerce_commit_url_base(remote_url.strip())
-    if not candidate:
-        return ""
-
-    # git@host:group/repo 或 ssh://git@host/group/repo
-    if candidate.startswith("git@") or candidate.startswith("ssh://git@"):
-        m = re.match(r"^(?:ssh://)?git@(?P<host>[^:]+):(?P<path>.+)$", candidate)
-        if m:
-            host = m.group("host")
-            path = _coerce_commit_url_base(m.group("path"))
-            path = path.lstrip("/")
-            base = f"https://{host}/{path}"
-        else:
-            base = candidate
-    elif "://" in candidate:
-        parsed = urlparse(candidate)
-        base = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
-    else:
-        base = candidate
-
-    base = _coerce_commit_url_base(base)
-    host = ""
-    if "://" in base:
-        parsed = urlparse(base)
-        host = parsed.netloc.lower()
-    elif "@" in base and ":" in base.split("@", 1)[1]:
-        host = base.split("@", 1)[1].split(":", 1)[0].lower()
-    else:
-        host = ""
-
-    if "github.com" in host:
-        return f"{base}/commit/{commit_id}"
-    if "gitlab.com" in host:
-        return f"{base}/-/commit/{commit_id}"
-    if "bitbucket.org" in host:
-        return f"{base}/commits/{commit_id}"
-    return f"{base}/commit/{commit_id}"
-
-
-def _resolve_repo_config(config, target: str) -> dict:
-    rc = config.repositories.get(target, {})
-    if isinstance(rc, dict):
-        return rc
-    return {"path": rc} if rc else {}
-
-
-def _resolve_commit_url(config, git_mgr, target: str, commit_id: str) -> str:
-    if not commit_id:
-        return ""
-
-    rc = _resolve_repo_config(config, target)
-    tmpl = (rc.get("commit_url_template")
-            or rc.get("commit_url")
-            or rc.get("web_url")
-            or rc.get("url")
-            or rc.get("remote_url"))
-
-    if tmpl:
-        try:
-            return tmpl.format(
-                commit=commit_id,
-                commit_id=commit_id,
-                short_commit=commit_id[:12],
-                cve_repo=target,
-                target=target,
-            )
-        except Exception:
-            url = _coerce_commit_url_base(tmpl)
-            if any(s in url.lower() for s in ("http://", "https://", "git@")):
-                return _build_commit_url_from_remote(url, commit_id)
-
-    try:
-        remote = git_mgr.run_git(["git", "remote", "get-url", "origin"], target, timeout=10)
-    except Exception:
-        remote = None
-    if remote:
-        return _build_commit_url_from_remote(remote, commit_id)
-    return ""
-
-
-def _serialize_commit_reference(config, git_mgr, target: str, commit_id: str, *,
-                               extra: dict = None) -> dict:
-    cid = (commit_id or "").strip()
-    if not cid:
-        return {"commit_id": "", "commit_id_short": ""}
-    data = {"commit_id": cid, "commit_id_short": cid[:12]}
-    if extra:
-        data.update(extra)
-    url = _resolve_commit_url(config, git_mgr, target, cid)
-    if url:
-        data["commit_url"] = url
-    return data
-
-
-def _collect_prereq_patches(patches, config, git_mgr, target: str):
-    out = []
-    for p in patches or []:
-        d = asdict(p) if hasattr(p, "__dict__") else dict(p)
-        cid = d.get("commit_id", "")
-        ref = _serialize_commit_reference(config, git_mgr, target, cid)
-        d.update(ref)
-        out.append(d)
-    return out
-
-
-def _collect_level_policies():
-    try:
-        from rules.level_policies import LEVEL_POLICIES
-    except Exception:
-        return []
-    out = []
-    for p in LEVEL_POLICIES:
-        out.append({
-            "level": p.level,
-            "methods": list(getattr(p, "methods", [])),
-            "strategy": getattr(p, "strategy", ""),
-            "review_mode": getattr(p, "review_mode", ""),
-            "next_action": getattr(p, "next_action", ""),
-            "confidence_with_llm": getattr(p, "confidence_with_llm", ""),
-            "confidence_without_llm": getattr(p, "confidence_without_llm", ""),
-        })
-    return out
-
-
-def _collect_rules_metadata(policy_config, level_decision=None, validation_details=None):
-    payload = {
-        "profile": getattr(policy_config, "profile", "default") if policy_config else "default",
-        "enabled": bool(getattr(policy_config, "enabled", True)),
-        "policy_overrides": {
-            "large_change_rules_enabled": bool(getattr(policy_config, "large_change_rules_enabled", True)),
-            "call_chain_rules_enabled": bool(getattr(policy_config, "call_chain_rules_enabled", True)),
-            "critical_structure_rules_enabled": bool(getattr(policy_config, "critical_structure_rules_enabled", True)),
-            "l1_api_surface_rules_enabled": bool(getattr(policy_config, "l1_api_surface_rules_enabled", True)),
-            "large_change_line_threshold": getattr(policy_config, "large_change_line_threshold", 80),
-            "large_hunk_threshold": getattr(policy_config, "large_hunk_threshold", 8),
-            "call_chain_fanout_threshold": getattr(policy_config, "call_chain_fanout_threshold", 6),
-            "l1_return_line_delta_threshold": getattr(policy_config, "l1_return_line_delta_threshold", 2),
-        },
-        "level_policies": _collect_level_policies(),
-    }
-
-    if validation_details:
-        payload["validation_context"] = {
-            "rule_profile": validation_details.get("rule_profile", ""),
-            "rule_version": validation_details.get("rule_version", ""),
-            "workflow_steps": validation_details.get("workflow_steps", []),
-            "warnings": validation_details.get("warnings", []),
-            "strategy_buckets": validation_details.get("strategy_buckets", {}),
-        }
-
-    if level_decision:
-        if hasattr(level_decision, "__dict__"):
-            payload["level_decision"] = asdict(level_decision)
-        elif isinstance(level_decision, dict):
-            payload["level_decision"] = level_decision
-        if hasattr(level_decision, "rule_hits"):
-            payload["rule_hits"] = list(getattr(level_decision, "rule_hits", []) or [])
-        elif isinstance(level_decision, dict):
-            payload["rule_hits"] = list(level_decision.get("rule_hits", []) or [])
-
-    return payload
-
-
-def _aggregate_strategy_buckets(results: list) -> dict:
-    level_counter = Counter()
-    dependency_counter = Counter()
-    rule_type_counter = Counter()
-    level_by_dependency = Counter()
-    level_by_rule_type = Counter()
-
-    for r in results or []:
-        vd = (r.get("validation_details") or {}) if isinstance(r, dict) else {}
-        sb = vd.get("strategy_buckets") or {}
-        level = sb.get("level") or ((r.get("level_decision") or {}).get("level") if isinstance(r, dict) else "")
-        dependency_bucket = sb.get("dependency_bucket", "")
-        rule_type_bucket = sb.get("rule_type_bucket", []) or []
-
-        if level:
-            level_counter[level] += 1
-        if dependency_bucket:
-            dependency_counter[dependency_bucket] += 1
-            if level:
-                level_by_dependency[f"{dependency_bucket}:{level}"] += 1
-        for item in rule_type_bucket:
-            if not isinstance(item, (list, tuple)) or len(item) != 2:
-                continue
-            rule_type, count = item[0], item[1]
-            rule_type_counter[rule_type] += int(count or 0)
-            if level:
-                level_by_rule_type[f"{rule_type}:{level}"] += int(count or 0)
-
-    return {
-        "level_distribution": dict(sorted(level_counter.items())),
-        "dependency_distribution": dict(sorted(dependency_counter.items())),
-        "rule_type_distribution": dict(sorted(rule_type_counter.items())),
-        "level_by_dependency": dict(sorted(level_by_dependency.items())),
-        "level_by_rule_type": dict(sorted(level_by_rule_type.items())),
-    }
-
-
 def _make_stage_trace_tracker(stage_callback=None):
     events = []
     starts = {}
@@ -324,13 +119,13 @@ def _make_stage_trace_tracker(stage_callback=None):
 def _build_analyze_payload(result, pipe: Pipeline, config, target: str,
                           stage_events: list = None,
                           policy_config=None, deep_analysis=None):
-    prereqs = _collect_prereq_patches(
+    prereqs = collect_prereq_patches(
         result.prerequisite_patches, config, pipe.git_mgr, target)
 
     cve_commit_urls = {}
     if result.cve_info and result.cve_info.version_commit_mapping:
         for ver, cid in result.cve_info.version_commit_mapping.items():
-            cve_commit_urls[ver] = _serialize_commit_reference(
+            cve_commit_urls[ver] = serialize_commit_reference(
                 config, pipe.git_mgr, target, cid, extra={"version": ver}
             )
 
@@ -349,7 +144,7 @@ def _build_analyze_payload(result, pipe: Pipeline, config, target: str,
     fix_patch_detail = {}
     if result.fix_patch:
         fp = result.fix_patch
-        fix_patch_detail = _serialize_commit_reference(
+        fix_patch_detail = serialize_commit_reference(
             config, pipe.git_mgr, target, fp.commit_id,
             extra={
                 "subject": fp.subject,
@@ -365,15 +160,7 @@ def _build_analyze_payload(result, pipe: Pipeline, config, target: str,
     except Exception:
         narrative = {}
 
-    valid_details = {}
-    if result.validation_details:
-        valid_details = {
-            "rule_profile": getattr(result.validation_details, "rule_profile", ""),
-            "rule_version": getattr(result.validation_details, "rule_version", ""),
-            "workflow_steps": getattr(result.validation_details, "workflow_steps", []),
-            "warnings": getattr(result.validation_details, "warnings", []),
-            "strategy_buckets": getattr(result.validation_details, "strategy_buckets", {}),
-        }
+    valid_details = serialize_validation_details(result.validation_details)
 
     payload = {
         "cve_id": result.cve_id,
@@ -384,7 +171,7 @@ def _build_analyze_payload(result, pipe: Pipeline, config, target: str,
         "dryrun_detail": dr_detail,
         "prerequisite_patches": prereqs,
         "version_commit_mapping_urls": cve_commit_urls,
-        "rules": _collect_rules_metadata(
+        "rules": collect_rules_metadata(
             policy_config,
             level_decision=result.level_decision,
             validation_details=valid_details,
@@ -393,9 +180,9 @@ def _build_analyze_payload(result, pipe: Pipeline, config, target: str,
         "recommendations": result.recommendations,
         "analysis_stages": stage_events or [],
         "fix_patch_detail": fix_patch_detail,
-        "level_decision": result.level_decision.__dict__ if result.level_decision else {},
+        "level_decision": serialize_level_decision(result.level_decision),
         "validation_details": valid_details,
-        "function_impacts": [fi.__dict__ for fi in (result.function_impacts or [])],
+        "function_impacts": serialize_function_impacts(result.function_impacts),
     }
     if deep_analysis is not None:
         payload["deep_analysis"] = _v2_to_json(deep_analysis)
@@ -429,37 +216,6 @@ def run_analyze_payload(cve_id: str, target_version: str, config, *,
         policy_config=getattr(config, "policy", None),
         deep_analysis=deep_analysis,
     )
-
-
-# ─── analyze ─────────────────────────────────────────────────────────
-
-def cmd_analyze(args, config):
-    git_mgr = _make_git_mgr(config, args.target_version)
-    pipe = Pipeline(git_mgr, path_mappings=config.path_mappings,
-                    llm_config=config.llm,
-                    policy_config=getattr(config, "policy", None))
-
-    cves = [args.cve_id] if args.cve_id else []
-    if args.batch_file:
-        with open(args.batch_file) as f:
-            cves = [l.strip() for l in f if l.strip() and not l.startswith("#")]
-    if not cves:
-        console.print("[red]请指定 --cve 或 --batch[/]")
-        sys.exit(1)
-
-    out_dir = config.output.output_dir
-    os.makedirs(out_dir, exist_ok=True)
-
-    deep = getattr(args, "deep", False)
-    for cve_id in cves:
-        if deep:
-            _analyze_deep(pipe, cve_id, args.target_version, out_dir=out_dir,
-                         policy_config=getattr(config, "policy", None))
-        else:
-            _analyze_one(pipe, cve_id, args.target_version,
-                         config,
-                         enable_dryrun=not args.no_dryrun, out_dir=out_dir,
-                         policy_config=getattr(config, "policy", None))
 
 
 def _analyze_one(pipe: Pipeline, cve_id: str, target: str,
@@ -926,311 +682,6 @@ def _prepare_validate_json(result: dict) -> dict:
     return out
 
 
-# ─── check-intro ─────────────────────────────────────────────────────
-
-def cmd_check_intro(args, config):
-    """
-    检测漏洞引入commit是否存在于目标仓库。
-    支持两种输入：
-      --commit <id>   直接指定 mainline 引入 commit ID
-      --cve <id>      从 CVE 信息自动提取引入 commit ID
-    """
-    from agents.crawler import CrawlerAgent
-    from agents.analysis import AnalysisAgent
-
-    git_mgr = _make_git_mgr(config, args.target_version)
-    crawler = CrawlerAgent(git_mgr=git_mgr)
-    from core.matcher import PathMapper
-    analysis = AnalysisAgent(git_mgr, path_mapper=PathMapper(config.path_mappings))
-    tv = args.target_version
-
-    commit_ids = []
-
-    # 如果指定了 CVE，自动提取引入 commit
-    if args.cve_id:
-        console.print(Panel(
-            f"[bold]CVE:[/] {args.cve_id}  [bold]目标:[/] {tv}",
-            title="[bold blue]漏洞引入检测 (CVE模式)[/]",
-            border_style="blue", padding=(0, 2),
-        ))
-        with console.status("[cyan]获取CVE信息..."):
-            cve = crawler.fetch_cve(args.cve_id)
-        if not cve:
-            console.print("[red]无法获取CVE信息[/]")
-            return
-
-        # 显示CVE信息
-        from rich.table import Table
-        t = Table(box=box.SIMPLE, show_header=False, padding=(0, 1), expand=True, show_edge=False)
-        t.add_column("k", style="bold", width=16)
-        t.add_column("v")
-        t.add_row("CVE", cve.cve_id)
-        t.add_row("描述", (cve.description[:120] + "...") if len(cve.description) > 120 else cve.description)
-        ml = cve.mainline_fix_commit[:12] if cve.mainline_fix_commit else "N/A"
-        t.add_row("Mainline Fix", f"[cyan]{ml}[/] ({cve.mainline_version or 'N/A'})")
-        intro_id = cve.introduced_commit_id
-        if intro_id:
-            t.add_row("引入 Commit", f"[yellow]{intro_id[:12]}[/] [dim]({intro_id})[/]")
-            commit_ids.append(intro_id)
-        else:
-            t.add_row("引入 Commit", "[red]CVE数据中无引入commit信息[/]")
-        console.print(t)
-        console.print()
-
-        if not commit_ids:
-            console.print("[yellow]该CVE没有引入commit信息，无法检测[/]")
-            return
-
-    elif args.commit_id:
-        commit_ids = [args.commit_id]
-        console.print(Panel(
-            f"[bold]Commit:[/] {args.commit_id}  [bold]目标:[/] {tv}",
-            title="[bold blue]漏洞引入检测 (Commit模式)[/]",
-            border_style="blue", padding=(0, 2),
-        ))
-    else:
-        console.print("[red]请指定 --commit 或 --cve[/]")
-        return
-
-    # 对每个引入commit运行多策略检测
-    for cid in commit_ids:
-        console.print(f"\n[bold]检测引入commit:[/] [cyan]{cid[:12]}[/]")
-
-        # 获取commit补丁信息
-        with console.status("[cyan]获取commit补丁信息..."):
-            patch = crawler.fetch_patch(cid, tv)
-
-        subject = patch.subject if patch else ""
-        diff_code = patch.diff_code if patch else ""
-        files = patch.modified_files if patch else []
-        author = patch.author if patch else ""
-
-        if patch:
-            console.print(f"[dim]  Subject: {subject[:80]}[/]")
-            console.print(f"[dim]  Files: {', '.join(files[:5])}[/]")
-            console.print()
-
-        # 三级策略搜索
-        stages = [
-            ("l1", "L1 │ ID 精确匹配"),
-            ("l2", "L2 │ Subject 语义匹配"),
-            ("l3", "L3 │ Diff 代码匹配"),
-        ]
-        tracker = StageTracker(stages)
-
-        def _layout():
-            return tracker.render()
-
-        with Live(_layout(), console=console, refresh_per_second=8) as live:
-            def _refresh():
-                live.update(_layout())
-
-            # 运行详细搜索，同时更新阶段状态
-            tracker.start("l1")
-            _refresh()
-
-            msr = analysis.search_detailed(
-                cid, subject, diff_code, files, author, tv)
-
-            # 根据结果更新tracker
-            for s in msr.strategies:
-                key = {"L1": "l1", "L2": "l2", "L3": "l3"}[s.level]
-                if s.found:
-                    tracker.done(key, "success", f"{s.target_commit[:12]} ({s.confidence:.0%})")
-                else:
-                    tracker.done(key, "fail", s.detail[:60])
-                _refresh()
-
-        # 渲染多策略面板
-        console.print()
-        console.print(render_multi_strategy(msr))
-
-        # 保存结果
-        out_dir = config.output.output_dir
-        os.makedirs(out_dir, exist_ok=True)
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        fp = os.path.join(out_dir, f"check_intro_{cid[:12]}_{tv}_{ts}.json")
-        with open(fp, "w", encoding="utf-8") as f:
-            json.dump({
-                "commit_id": cid,
-                "subject": subject,
-                "target_version": tv,
-                "is_present": msr.is_present,
-                "verdict": msr.verdict,
-                "strategies": [
-                    {
-                        "level": s.level,
-                        "name": s.name,
-                        "found": s.found,
-                        "confidence": s.confidence,
-                        "target_commit": s.target_commit,
-                        "detail": s.detail,
-                        "elapsed": round(s.elapsed, 2),
-                        "candidates": s.candidates[:3],
-                    }
-                    for s in msr.strategies
-                ],
-            }, f, indent=2, ensure_ascii=False, default=str)
-        console.print(f"[dim]结果已保存: {fp}[/]")
-
-
-# ─── check-fix ───────────────────────────────────────────────────────
-
-def cmd_check_fix(args, config):
-    """
-    检测漏洞修复commit是否已合入目标仓库。
-    支持两种输入：
-      --commit <id>   直接指定修复 commit ID
-      --cve <id>      从 CVE 信息自动提取 mainline fix + stable backport
-    """
-    from agents.crawler import CrawlerAgent
-    from agents.analysis import AnalysisAgent
-    from core.matcher import PathMapper
-    from rich.table import Table
-
-    git_mgr = _make_git_mgr(config, args.target_version)
-    crawler = CrawlerAgent(git_mgr=git_mgr)
-    analysis = AnalysisAgent(git_mgr, path_mapper=PathMapper(config.path_mappings))
-    tv = args.target_version
-
-    check_list = []  # [(commit_id, label)]
-
-    if args.cve_id:
-        console.print(Panel(
-            f"[bold]CVE:[/] {args.cve_id}  [bold]目标:[/] {tv}",
-            title="[bold green]漏洞修复检测 (CVE模式)[/]",
-            border_style="green", padding=(0, 2),
-        ))
-        with console.status("[cyan]获取CVE信息..."):
-            cve = crawler.fetch_cve(args.cve_id)
-        if not cve:
-            console.print("[red]无法获取CVE信息[/]")
-            return
-
-        t = Table(box=box.SIMPLE, show_header=False, padding=(0, 1), expand=True, show_edge=False)
-        t.add_column("k", style="bold", width=16)
-        t.add_column("v")
-        t.add_row("CVE", cve.cve_id)
-        t.add_row("描述", (cve.description[:120] + "...") if len(cve.description) > 120 else cve.description)
-        t.add_row("严重程度", cve.severity)
-
-        if cve.mainline_fix_commit:
-            ml = cve.mainline_fix_commit[:12]
-            t.add_row("Mainline Fix", f"[cyan]{ml}[/] ({cve.mainline_version or 'N/A'})")
-            check_list.append((cve.mainline_fix_commit, f"Mainline ({cve.mainline_version or 'N/A'})"))
-
-        if cve.version_commit_mapping:
-            ver_lines = []
-            for ver, cid in cve.version_commit_mapping.items():
-                ver_lines.append(f"{ver}: {cid[:12]}")
-                if cid != cve.mainline_fix_commit and ver.startswith("5.10"):
-                    check_list.append((cid, f"Stable backport ({ver})"))
-            t.add_row("版本映射", "\n".join(ver_lines))
-
-        if cve.introduced_commit_id:
-            t.add_row("引入 Commit", f"[yellow]{cve.introduced_commit_id[:12]}[/]")
-
-        console.print(t)
-        console.print()
-
-        if not check_list:
-            console.print("[yellow]该CVE没有修复commit信息[/]")
-            return
-
-    elif args.commit_id:
-        check_list = [(args.commit_id, "指定commit")]
-        console.print(Panel(
-            f"[bold]Commit:[/] {args.commit_id}  [bold]目标:[/] {tv}",
-            title="[bold green]漏洞修复检测 (Commit模式)[/]",
-            border_style="green", padding=(0, 2),
-        ))
-    else:
-        console.print("[red]请指定 --commit 或 --cve[/]")
-        return
-
-    any_fixed = False
-
-    for cid, label in check_list:
-        console.print(f"\n[bold]检测修复commit:[/] [cyan]{cid[:12]}[/] [dim]({label})[/]")
-
-        with console.status("[cyan]获取commit补丁信息..."):
-            patch = crawler.fetch_patch(cid, tv)
-
-        subject = patch.subject if patch else ""
-        diff_code = patch.diff_code if patch else ""
-        files = patch.modified_files if patch else []
-        author = patch.author if patch else ""
-
-        if patch and subject:
-            console.print(f"[dim]  Subject: {subject[:80]}[/]")
-            console.print(f"[dim]  Files: {', '.join(files[:5])}[/]")
-            console.print()
-
-        stages = [
-            ("l1", "L1 │ ID 精确匹配"),
-            ("l2", "L2 │ Subject 语义匹配"),
-            ("l3", "L3 │ Diff 代码匹配"),
-        ]
-        tracker = StageTracker(stages)
-
-        def _layout():
-            return tracker.render()
-
-        with Live(_layout(), console=console, refresh_per_second=8) as live:
-            def _refresh():
-                live.update(_layout())
-
-            tracker.start("l1")
-            _refresh()
-
-            msr = analysis.search_detailed(
-                cid, subject, diff_code, files, author, tv,
-                use_containment=False)
-
-            for s in msr.strategies:
-                key = {"L1": "l1", "L2": "l2", "L3": "l3"}[s.level]
-                if s.found:
-                    tracker.done(key, "success", f"{s.target_commit[:12]} ({s.confidence:.0%})")
-                else:
-                    tracker.done(key, "fail", s.detail[:60])
-                _refresh()
-
-        console.print()
-        console.print(render_multi_strategy(msr, mode="fix"))
-
-        if msr.is_present:
-            any_fixed = True
-
-    # 汇总
-    console.print()
-    if any_fixed:
-        console.print(Panel(
-            "[green bold]结论: 修复补丁已合入目标仓库[/]",
-            border_style="green", padding=(0, 2),
-        ))
-    else:
-        console.print(Panel(
-            "[red bold]结论: 修复补丁未合入目标仓库，需要 backport[/]",
-            border_style="red", padding=(0, 2),
-        ))
-
-    out_dir = config.output.output_dir
-    os.makedirs(out_dir, exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    fp = os.path.join(out_dir, f"check_fix_{args.cve_id or check_list[0][0][:12]}_{tv}_{ts}.json")
-    with open(fp, "w", encoding="utf-8") as f:
-        json.dump({
-            "cve_id": args.cve_id or "",
-            "target_version": tv,
-            "is_fixed": any_fixed,
-            "checked_commits": [
-                {"commit_id": cid, "label": label}
-                for cid, label in check_list
-            ],
-        }, f, indent=2, ensure_ascii=False, default=str)
-    console.print(f"[dim]结果已保存: {fp}[/]")
-
-
 # ─── validate / benchmark ────────────────────────────────────────────
 
 def _find_rollback_commit(git_mgr, rv, known_fix, known_prereqs):
@@ -1596,23 +1047,11 @@ def _build_analysis_narrative(result, dryrun_detail: dict,
 
     validate_detail_desc = {}
     if getattr(result, "validation_details", None):
-        vd = result.validation_details
-        validate_detail_desc = {
-            "workflow_steps": vd.workflow_steps,
-            "warnings": vd.warnings,
-            "rule_profile": vd.rule_profile,
-            "rule_version": vd.rule_version,
-        }
+        validate_detail_desc = serialize_validation_details(result.validation_details)
 
-    function_impact_desc = []
-    for fi in getattr(result, "function_impacts", [])[:8]:
-        function_impact_desc.append({
-            "function": fi.function,
-            "callers": fi.callers,
-            "callees": fi.callees,
-            "impact_score": fi.impact_score,
-            "warnings": fi.warnings,
-        })
+    function_impact_desc = serialize_function_impacts(
+        getattr(result, "function_impacts", [])[:8]
+    )
 
     narrative = {
         "workflow": workflow,
@@ -2266,7 +1705,7 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
         if kf_meta:
             lines = kf_meta.strip().split("\n")
             if len(lines) >= 3:
-                known_fix_detail = _serialize_commit_reference(
+                known_fix_detail = serialize_commit_reference(
                     config, git_mgr, tv, lines[0].strip(),
                     extra={
                         "subject": lines[1],
@@ -2287,7 +1726,7 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
                                           known_prereqs, result.dry_run)
 
         tool_prereqs_detail = [
-            _serialize_commit_reference(
+            serialize_commit_reference(
                 config, git_mgr, tv, p.commit_id,
                 extra={
                     "subject": p.subject,
@@ -2308,7 +1747,7 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
                 tv, timeout=10)
             if info:
                 parts = info.strip().split("\x1e")
-                known_prereqs_detail.append(_serialize_commit_reference(
+                known_prereqs_detail.append(serialize_commit_reference(
                     config, git_mgr, tv, parts[0],
                     extra={
                         "subject": parts[1] if len(parts) > 1 else "",
@@ -2316,7 +1755,7 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
                     },
                 ))
             else:
-                known_prereqs_detail.append(_serialize_commit_reference(
+                known_prereqs_detail.append(serialize_commit_reference(
                     config, git_mgr, tv, kid,
                     extra={"subject": "", "author": ""}))
 
@@ -2429,17 +1868,9 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
             "analysis_narrative": narrative,
             "fix_patch_detail": fix_patch_detail,
             "dryrun_detail": dryrun_detail,
-            "level_decision": (result.level_decision.__dict__ if result.level_decision else {}),
-            "validation_details": (
-                {
-                    "workflow_steps": result.validation_details.workflow_steps,
-                    "warnings": result.validation_details.warnings,
-                    "rule_profile": result.validation_details.rule_profile,
-                    "rule_version": result.validation_details.rule_version,
-                    "strategy_buckets": result.validation_details.strategy_buckets,
-                } if result.validation_details else {}
-            ),
-            "function_impacts": [fi.__dict__ for fi in (result.function_impacts or [])],
+            "level_decision": serialize_level_decision(result.level_decision),
+            "validation_details": serialize_validation_details(result.validation_details),
+            "function_impacts": serialize_function_impacts(result.function_impacts),
             "known_fix_detail": known_fix_detail,
             "diff_comparison": diff_comparison,
             "generated_vs_real": generated_vs_real,
@@ -2452,16 +1883,10 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
             "real_fix_patch_file": real_fix_patch_file,
             "analysis_stages": stage_events,
             "known_prereqs": known_prereqs,
-            "rules": _collect_rules_metadata(
+            "rules": collect_rules_metadata(
                 getattr(config, "policy", None),
                 level_decision=result.level_decision,
-                validation_details={
-                    "rule_profile": result.validation_details.rule_profile,
-                    "rule_version": result.validation_details.rule_version,
-                    "workflow_steps": result.validation_details.workflow_steps,
-                    "warnings": result.validation_details.warnings,
-                    "strategy_buckets": result.validation_details.strategy_buckets,
-                } if result.validation_details else {},
+                validation_details=serialize_validation_details(result.validation_details),
             ),
         }
         if deep_analysis is not None:
@@ -2472,727 +1897,12 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
         git_mgr.remove_worktree(tv, wt_dir)
 
 
-def cmd_validate(args, config):
-    """基于已修复 CVE 回退验证工具准确度"""
-    tv = args.target_version
-    git_mgr = _make_git_mgr(config, tv)
-    known_prereqs = [p.strip() for p in args.known_prereqs.split(",")
-                     if p.strip()] if args.known_prereqs else []
-
-    cve_info = None
-    mainline_fix = getattr(args, "mainline_fix", "") or ""
-    mainline_intro = getattr(args, "mainline_intro", "") or ""
-    if mainline_fix:
-        from core.models import CveInfo
-        fix_commits = [{"commit_id": mainline_fix, "subject": ""}]
-        intro_commits = ([{"commit_id": mainline_intro, "subject": ""}]
-                         if mainline_intro else [])
-        cve_info = CveInfo(
-            cve_id=args.cve_id,
-            fix_commits=fix_commits,
-            mainline_fix_commit=mainline_fix,
-            introduced_commits=intro_commits,
-        )
-
-    info_lines = [
-        f"[bold]CVE:[/] {args.cve_id}  [bold]目标:[/] {tv}",
-        f"[bold]Known Fix:[/] {args.known_fix[:12]}",
-        f"[bold]Known Prereqs:[/] {len(known_prereqs)} 个",
-    ]
-    if mainline_fix:
-        info_lines.append(
-            f"[bold]Mainline Fix:[/] {mainline_fix[:12]}  "
-            f"[dim](跳过 MITRE 爬取)[/]")
-    if mainline_intro:
-        info_lines.append(
-            f"[bold]Mainline Intro:[/] {mainline_intro[:12]}")
-    console.print(Panel(
-        "\n".join(info_lines),
-        title="[bold magenta]验证框架 — 单CVE回退验证[/]",
-        border_style="magenta", padding=(0, 2),
-    ))
-
-    deep = getattr(args, "deep", False)
-    result = _run_single_validate(
-        config, args.cve_id, tv, args.known_fix, known_prereqs,
-        git_mgr=git_mgr, show_stages=True, cve_info=cve_info,
-        deep=deep)
-
-    # LLM 智能分析
-    if not result.get("overall_pass"):
-        if config.llm.enabled:
-            from core.llm_analyzer import LLMAnalyzer
-            analyzer = LLMAnalyzer(config.llm)
-            if analyzer.enabled:
-                diff_cmp = result.get("diff_comparison", {})
-                fp_detail = result.get("fix_patch_detail", {})
-                dr_detail = result.get("dryrun_detail", {})
-                # 构建含实际代码差异的上下文
-                code_diff_ctx = ""
-                for kd in diff_cmp.get("key_differences", [])[:3]:
-                    code_diff_ctx += f"\n### {kd['file']} (相似度 {kd['similarity']:.0%})\n"
-                    ce = kd.get("community_extra", [])
-                    le = kd.get("local_extra", [])
-                    if ce:
-                        code_diff_ctx += "社区补丁独有:\n" + "\n".join(
-                            f"  {l}" for l in ce[:5]) + "\n"
-                    if le:
-                        code_diff_ctx += "本地修复独有:\n" + "\n".join(
-                            f"  {l}" for l in le[:5]) + "\n"
-
-                llm_ctx = {
-                    "cve_id": args.cve_id,
-                    "fix_patch_summary": (
-                        f"Subject: {fp_detail.get('subject', 'N/A')}\n"
-                        f"Files: {', '.join(fp_detail.get('modified_files', []))}\n"
-                        f"Diff: {fp_detail.get('diff_lines', 0)} lines"
-                    ) if fp_detail else "",
-                    "code_diff_comparison": (
-                        f"总体相似度: {diff_cmp.get('overall_similarity', 0):.0%}\n"
-                        f"社区独有文件: {diff_cmp.get('community_only_files', [])}\n"
-                        f"本地独有文件: {diff_cmp.get('local_only_files', [])}\n"
-                        f"{code_diff_ctx}"
-                    ),
-                    "root_cause_diagnosis": "\n".join(
-                        result.get("root_cause", [])),
-                    "dryrun_detail": (
-                        f"applies_cleanly: {dr_detail.get('applies_cleanly')}\n"
-                        f"conflicting_files: {dr_detail.get('conflicting_files', [])}\n"
-                        f"error: {dr_detail.get('error_output', '')[:400]}"
-                    ) if dr_detail else "",
-                    "tool_prereqs": "\n".join(
-                        f"- [{p['grade']}] {p['commit_id']} {p['subject'][:60]} "
-                        f"(score={p['score']}, hunks={p.get('overlap_hunks',0)})"
-                        for p in result.get("tool_prereqs", [])
-                    ),
-                    "known_prereqs_info": "\n".join(
-                        f"- {p['commit_id']} {p['subject']}"
-                        for p in result.get("known_prereqs_detail", [])
-                    ) if result.get("known_prereqs_detail") else "无已知前置依赖",
-                    "known_fix_diff_summary": (
-                        f"Subject: {result.get('known_fix_detail', {}).get('subject', '')}\n"
-                        f"{result.get('known_fix_detail', {}).get('stat', '')}"
-                    ),
-                    "issues": result.get("issues", []),
-                }
-                with console.status("[cyan]LLM 正在分析验证差异..."):
-                    llm_analysis = analyzer.analyze_validate_diff(llm_ctx)
-                if llm_analysis:
-                    result["llm_analysis"] = llm_analysis
-                else:
-                    result["llm_status"] = "LLM 调用失败，请检查日志"
-            else:
-                result["llm_status"] = "LLM api_key 未配置"
-        else:
-            result["llm_status"] = "LLM 未启用 (config.yaml → llm.enabled: true)"
-
-    console.print()
-    render_validate_report(result, policy_config=getattr(config, "policy", None))
-
-    v2 = result.get("deep_analysis")
-    if v2 is not None:
-        console.print()
-        console.print(Panel(
-            "[bold]以下为 v2 深度分析结果 (漏洞/补丁检视/风险收益/合入建议)[/]",
-            border_style="magenta"))
-        _render_deep_report(v2)
-
-    out_dir = config.output.output_dir
-    os.makedirs(out_dir, exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    fp = os.path.join(out_dir, f"validate_{args.cve_id}_{tv}_{ts}.json")
-    save_data = _prepare_validate_json(result)
-    with open(fp, "w", encoding="utf-8") as f:
-        json.dump(save_data, f, indent=2, ensure_ascii=False, default=str)
-    console.print(f"[dim]验证报告已保存: {fp}[/]")
-
-
-def cmd_benchmark(args, config):
-    """批量基准测试 — 从 YAML 文件加载已修复 CVE 列表并逐一验证"""
-    import yaml
-
-    with open(args.file, "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f)
-
-    entries = data.get("benchmarks", [])
-    if not entries:
-        console.print("[red]YAML 文件中无 benchmarks 条目[/]")
-        return
-
-    tv = args.target_version
-    git_mgr = _make_git_mgr(config, tv)
-
-    console.print(Panel(
-        f"[bold]基准集:[/] {len(entries)} 个 CVE  [bold]目标:[/] {tv}\n"
-        f"[bold]文件:[/] {args.file}",
-        title="[bold cyan]Benchmark — 批量准确度度量[/]",
-        border_style="cyan", padding=(0, 2),
-    ))
-
-    results = []
-    for i, entry in enumerate(entries, 1):
-        cve_id = entry.get("cve_id", "N/A")
-        known_fix = entry.get("known_fix_commit", "")
-        known_prereqs = entry.get("known_prereqs", []) or []
-        notes = entry.get("notes", "")
-
-        console.print(f"\n{'━' * 60}")
-        console.print(
-            f"[bold cyan][{i}/{len(entries)}][/]  {cve_id}  "
-            f"[dim]fix={known_fix[:12]}  prereqs={len(known_prereqs)}[/]"
-            + (f"  [dim italic]{notes}[/]" if notes else ""))
-
-        if not known_fix:
-            console.print("[yellow]  跳过: 缺少 known_fix_commit[/]")
-            results.append({
-                "cve_id": cve_id, "known_fix": "", "target": tv,
-                "worktree_commit": "", "checks": {},
-                "overall_pass": False, "summary": "缺少known_fix_commit",
-            })
-            continue
-
-        r = _run_single_validate(
-            config, cve_id, tv, known_fix, known_prereqs,
-            git_mgr=git_mgr, show_stages=True)
-        results.append(r)
-
-        icon = "[green]✔ PASS[/]" if r.get("overall_pass") else "[red]✘ FAIL[/]"
-        console.print(f"  {icon}  {r.get('summary', '')}")
-
-    console.print(f"\n{'━' * 60}\n")
-    render_benchmark_report(results, tv)
-
-    out_dir = config.output.output_dir
-    os.makedirs(out_dir, exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    fp = os.path.join(out_dir, f"benchmark_{tv}_{ts}.json")
-    with open(fp, "w", encoding="utf-8") as f:
-        json.dump({"target": tv, "total": len(results), "results": results},
-                  f, indent=2, ensure_ascii=False, default=str)
-    console.print(f"[dim]基准测试报告已保存: {fp}[/]")
-
-
-# ─── batch-validate ──────────────────────────────────────────────────
-
-def _build_cve_info_from_json(info: dict, cve_id: str):
-    """从 JSON 条目构建 CveInfo，使用 mainline_fix_patchs / mainline_import_patchs"""
-    from core.models import CveInfo
-
-    mainline_fixes = info.get("mainline_fix_patchs", [])
-    mainline_intros = info.get("mainline_import_patchs", [])
-
-    fix_commits = []
-    mainline_fix = ""
-    for p in (mainline_fixes if isinstance(mainline_fixes, list) else []):
-        if isinstance(p, dict) and p.get("commit"):
-            fix_commits.append({
-                "commit_id": p["commit"],
-                "subject": p.get("subject", ""),
-            })
-            if not mainline_fix:
-                mainline_fix = p["commit"]
-
-    intro_commits = []
-    for p in (mainline_intros if isinstance(mainline_intros, list) else []):
-        if isinstance(p, dict) and p.get("commit"):
-            intro_commits.append({
-                "commit_id": p["commit"],
-                "subject": p.get("subject", ""),
-            })
-
-    if not mainline_fix:
-        return None
-
-    return CveInfo(
-        cve_id=cve_id,
-        fix_commits=fix_commits,
-        mainline_fix_commit=mainline_fix,
-        introduced_commits=intro_commits,
-    )
-
-
-def _flush_live_report(path: str, target: str, total: int,
-                       passed: list, failed: list, errors: list):
-    """实时写入 JSON 报告，每完成一个 CVE 就更新"""
-    done = len(passed) + len(failed) + len(errors)
-    report = {
-        "target": target,
-        "progress": f"{done}/{total}",
-        "summary": {
-            "total": total,
-            "done": done,
-            "passed": len(passed),
-            "failed": len(failed),
-            "errors": len(errors),
-        },
-        "passed": passed,
-        "failed": failed,
-        "errors": errors,
-    }
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(report, f, indent=2, ensure_ascii=False, default=str)
-
-
-def cmd_batch_validate(args, config):
-    """批量验证 — 从 JSON 文件加载 CVE 数据并逐一验证补丁生成准确度"""
-    try:
-        with open(args.file, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (json.JSONDecodeError, OSError) as e:
-        console.print(f"[red bold]错误:[/] 无法解析 JSON 文件: {e}")
-        return
-
-    if not isinstance(data, dict):
-        console.print("[red bold]错误:[/] JSON 顶层结构应为 dict "
-                      "(key=CVE编号, value=CVE数据)")
-        return
-
-    tv = args.target_version
-    git_mgr = _make_git_mgr(config, tv)
-
-    # ── 解析 JSON → 按 CVE 分组 ─────────────────────────────────
-    from collections import OrderedDict
-    all_cve_groups = OrderedDict()
-    skipped = 0
-    offset = max(args.offset, 0) if hasattr(args, "offset") else 0
-    limit = args.limit if args.limit and args.limit > 0 else 0
-
-    for cve_id, info in data.items():
-        try:
-            if not isinstance(info, dict):
-                continue
-            hulk_fixes = info.get("hulk_fix_patchs", [])
-            if not hulk_fixes or not isinstance(hulk_fixes, list):
-                continue
-            real_cve = info.get("cve_id", cve_id)
-            cve_info = _build_cve_info_from_json(info, real_cve)
-            mainline_fix_id = (cve_info.mainline_fix_commit
-                               if cve_info else "")
-
-            valid_fixes = []
-            for fix in hulk_fixes:
-                if not isinstance(fix, dict):
-                    continue
-                commit = fix.get("commit", "")
-                if not commit or len(commit) < 8:
-                    continue
-                valid_fixes.append({
-                    "commit": commit,
-                    "subject": fix.get("subject", ""),
-                    "mainline_commit": fix.get("mainline_commit", ""),
-                })
-            if not valid_fixes:
-                continue
-
-            # 识别主修复: mainline_commit 匹配 mainline fix 的 hulk_fix
-            primary_idx = len(valid_fixes) - 1
-            if mainline_fix_id:
-                for idx, f in enumerate(valid_fixes):
-                    if f["mainline_commit"] == mainline_fix_id:
-                        primary_idx = idx
-                        break
-
-            primary_fix = valid_fixes[primary_idx]
-            prereq_fixes = [f for i, f in enumerate(valid_fixes)
-                            if i != primary_idx]
-
-            all_cve_groups[real_cve] = {
-                "primary_fix": primary_fix,
-                "prereq_fixes": prereq_fixes,
-                "all_fixes": valid_fixes,
-                "cve_info": cve_info,
-            }
-        except Exception as e:
-            skipped += 1
-            logger.warning("解析 CVE 条目 %s 跳过: %s", cve_id, e)
-
-    # offset + limit 切片
-    all_keys = list(all_cve_groups.keys())
-    total_available = len(all_keys)
-    sliced_keys = all_keys[offset:]
-    if limit:
-        sliced_keys = sliced_keys[:limit]
-    cve_groups = OrderedDict(
-        (k, all_cve_groups[k]) for k in sliced_keys)
-
-    if not cve_groups:
-        console.print("[red]JSON 文件中未找到有效的 CVE 验证条目[/]")
-        console.print(
-            "[dim]要求: 每个条目需有 hulk_fix_patchs[].commit 字段[/]")
-        return
-
-    total_patches = sum(len(g["all_fixes"]) for g in cve_groups.values())
-    multi_fix_cves = sum(1 for g in cve_groups.values()
-                         if len(g["prereq_fixes"]) > 0)
-    has_mainline = sum(1 for g in cve_groups.values() if g.get("cve_info"))
-    range_desc = f"第 {offset + 1}~{offset + len(cve_groups)} 个" \
-        if offset else f"共 {len(cve_groups)} 个"
-    info_parts = [
-        f"[bold]验证集:[/] {range_desc} CVE / {total_patches} 个补丁"
-        f"  [dim](JSON 共 {total_available} 个 CVE)[/]",
-        f"[bold]目标分支:[/] {tv}",
-        f"[bold]数据文件:[/] {args.file}",
-        f"[bold]Mainline信息:[/] {has_mainline}/{len(cve_groups)} "
-        f"个 CVE 使用 JSON 提供的 mainline commit (跳过 MITRE 爬取)",
-        f"[bold]统计维度:[/] 每 CVE 一次验证 "
-        f"({multi_fix_cves} 个含前置补丁, 额外 fix 作为 known_prereqs)",
-    ]
-    if offset or limit:
-        parts = []
-        if offset:
-            parts.append(f"offset={offset}")
-        if limit:
-            parts.append(f"limit={limit}")
-        info_parts.append(f"[bold]范围:[/] {', '.join(parts)}")
-    if skipped:
-        info_parts.append(f"[yellow]跳过:[/] {skipped} 个解析异常条目")
-    console.print(Panel(
-        "\n".join(info_parts),
-        title="[bold magenta]批量验证 — 补丁生成准确度[/]",
-        border_style="magenta", padding=(0, 2),
-    ))
-
-    out_dir = config.output.output_dir
-    os.makedirs(out_dir, exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    live_report_path = os.path.join(
-        out_dir, f"batch_validate_{tv}_{ts}.json")
-    console.print(
-        f"[dim]实时报告: {live_report_path} (每完成一个 CVE 自动更新)[/]")
-
-    cve_results = []
-    passed_list = []
-    failed_list = []
-    error_list = []
-
-    _PASS_VERDICTS = {"identical", "essentially_same"}
-    _VERDICT_ICONS = {
-        "identical": "[green]✔ 完全一致[/]",
-        "essentially_same": "[green]✔ 本质相同[/]",
-        "partially_same": "[yellow]△ 部分一致[/]",
-        "different": "[red]✘ 差异较大[/]",
-        "no_data": "[dim]- 无数据[/]",
-    }
-
-    for ci, (cve_id, group) in enumerate(cve_groups.items(), 1):
-        primary = group["primary_fix"]
-        prereqs = group["prereq_fixes"]
-        cve_info = group.get("cve_info")
-        src = "JSON" if cve_info else "MITRE"
-
-        console.print(f"\n{'━' * 60}")
-        fix_desc = f"主修复={primary['commit'][:12]}"
-        if prereqs:
-            fix_desc += f"  前置={len(prereqs)}个"
-        console.print(
-            f"[bold magenta][{ci}/{len(cve_groups)}][/]  {cve_id}  "
-            f"[dim]{fix_desc}  mainline={src}[/]")
-        if prereqs:
-            for pi, pf in enumerate(prereqs, 1):
-                console.print(
-                    f"  [dim]prereq[{pi}] {pf['commit'][:12]}"
-                    + (f"  {pf['subject'][:40]}" if pf.get("subject") else "")
-                    + "[/]")
-
-        known_prereq_commits = [p["commit"] for p in prereqs]
-
-        _MAX_RETRIES = 3
-        deep = getattr(args, "deep", False)
-        try:
-            r = None
-            for _attempt in range(1, _MAX_RETRIES + 1):
-                r = _run_single_validate(
-                    config, cve_id, tv, primary["commit"],
-                    known_prereq_commits,
-                    git_mgr=git_mgr, show_stages=True,
-                    cve_info=cve_info, deep=deep)
-
-                has_patch = r.get("dryrun_detail", {}).get(
-                    "has_adapted_patch", False)
-                gvr_v = r.get("generated_vs_real", {}).get(
-                    "verdict", "no_data")
-                if has_patch or gvr_v not in ("no_data", "error"):
-                    break
-                if _attempt < _MAX_RETRIES:
-                    console.print(
-                        f"  [yellow]⟳ 未生成补丁 (verdict={gvr_v}), "
-                        f"重试 {_attempt}/{_MAX_RETRIES}...[/]")
-
-            gvr = r.get("generated_vs_real", {})
-            verdict = gvr.get("verdict", "no_data")
-            core_sim = gvr.get("core_similarity", 0)
-            method = r.get("dryrun_detail", {}).get("apply_method", "-")
-
-            # ── 前置补丁交叉验证 ──────────────────────────────
-            prereq_validation = {}
-            if prereqs and r.get("dryrun_detail"):
-                tool_prereqs = r.get("tool_prereqs", [])
-                tool_prereq_ids = set()
-                for tp in tool_prereqs:
-                    cid = tp.get("commit_id", "")
-                    if cid:
-                        tool_prereq_ids.add(cid[:12])
-
-                known_ids = {c[:12] for c in known_prereq_commits}
-
-                matched = tool_prereq_ids & known_ids
-                tool_only = tool_prereq_ids - known_ids
-                known_only = known_ids - tool_prereq_ids
-
-                prereq_validation = {
-                    "known_prereqs": len(known_ids),
-                    "tool_recommended": len(tool_prereq_ids),
-                    "matched": len(matched),
-                    "matched_ids": sorted(matched),
-                    "tool_only": sorted(tool_only),
-                    "known_only": sorted(known_only),
-                }
-                if known_ids:
-                    recall = len(matched) / len(known_ids)
-                    prereq_validation["recall"] = round(recall, 3)
-
-                recall_v = prereq_validation.get("recall", -1)
-                if recall_v >= 0:
-                    rc = "[green]" if recall_v >= 0.5 else "[yellow]"
-                    console.print(
-                        f"  [dim]前置补丁:[/] "
-                        f"已知={len(known_ids)} 工具推荐={len(tool_prereq_ids)} "
-                        f"命中={len(matched)}  "
-                        f"{rc}recall={recall_v:.0%}[/]")
-
-            r["prereq_cross_validation"] = prereq_validation
-            r["num_hulk_fixes"] = len(group["all_fixes"])
-            cve_results.append(r)
-
-            icon = _VERDICT_ICONS.get(verdict, f"[dim]{verdict}[/]")
-            deep_hint = ""
-            v2 = r.get("deep_analysis")
-            if v2 is not None:
-                rec = getattr(v2, "merge_recommendation", None)
-                if rec and hasattr(rec, "action"):
-                    _act_cn = {"merge": "直接合入",
-                               "merge_with_prereqs": "合入(需前置)",
-                               "manual_review": "需人工审查",
-                               "skip": "无需处理"}
-                    deep_hint = (
-                        f"  [magenta]建议={_act_cn.get(rec.action, rec.action)}"
-                        f"[/]")
-            console.print(
-                f"  {icon}  核心相似度={core_sim:.0%}  方法={method}"
-                f"{deep_hint}")
-
-            item = {
-                "cve_id": cve_id,
-                "known_fix": primary["commit"][:12],
-                "verdict": verdict,
-                "core_similarity": round(core_sim, 3),
-                "method": method,
-                "num_fixes": len(group["all_fixes"]),
-                "num_prereqs": len(prereqs),
-                "prereq_recall": prereq_validation.get("recall", None),
-                "summary": r.get("summary", ""),
-            }
-            if v2 is not None:
-                rec = getattr(v2, "merge_recommendation", None)
-                if rec and hasattr(rec, "action"):
-                    item["deep_action"] = rec.action
-                    item["deep_summary"] = getattr(rec, "summary", "")
-                    rb = getattr(rec, "risk_benefit", None)
-                    if rb:
-                        item["deep_overall_score"] = round(
-                            rb.overall_score, 2)
-                        item["deep_overall_detail"] = rb.overall_detail
-            if verdict in _PASS_VERDICTS:
-                passed_list.append(item)
-            else:
-                reason = r.get("summary", "")
-                if verdict == "no_data":
-                    reason = reason or "无补丁数据可比较"
-                elif verdict == "different":
-                    reason = reason or f"核心相似度仅 {core_sim:.0%}"
-                elif verdict == "partially_same":
-                    reason = reason or f"部分一致 (核心相似度 {core_sim:.0%})"
-                item["reason"] = reason
-                failed_list.append(item)
-
-        except Exception as e:
-            logger.exception("batch-validate 异常: %s %s", cve_id, e)
-            console.print(f"  [red]✘ 跳过 (异常: {e})[/]")
-            cve_results.append({
-                "cve_id": cve_id, "known_fix": primary["commit"],
-                "target": tv, "worktree_commit": "", "checks": {},
-                "overall_pass": False, "summary": f"执行异常: {e}",
-                "dryrun_detail": {},
-                "generated_vs_real": {
-                    "verdict": "error", "core_similarity": 0,
-                    "file_coverage": 0},
-                "num_hulk_fixes": len(group["all_fixes"]),
-            })
-            error_list.append({
-                "cve_id": cve_id,
-                "known_fix": primary["commit"][:12],
-                "reason": str(e),
-            })
-
-        _flush_live_report(
-            live_report_path, tv, len(cve_groups),
-            passed_list, failed_list, error_list)
-
-    console.print(f"\n{'━' * 60}\n")
-    render_batch_validate_report(
-        cve_results, tv, policy_config=getattr(config, "policy", None))
-
-    serializable_results = [
-        _prepare_validate_json(r) for r in cve_results]
-    full_report_path = os.path.join(
-        out_dir, f"batch_validate_{tv}_{ts}_full.json")
-    with open(full_report_path, "w", encoding="utf-8") as f:
-        strategy_summary = _aggregate_strategy_buckets(serializable_results)
-        json.dump({
-            "target": tv,
-            "total_cves": len(cve_groups),
-            "total_patches": total_patches,
-            "skipped_parse_errors": skipped,
-            "cve_results": serializable_results,
-            "strategy_summary": strategy_summary,
-            "cve_summary": {
-                "passed": passed_list,
-                "failed": failed_list,
-                "errors": error_list,
-            },
-        }, f, indent=2, ensure_ascii=False, default=str)
-    console.print(f"[dim]完整结果: {full_report_path}[/]")
-    console.print(f"[dim]实时报告: {live_report_path}[/]")
-
-
 # ─── build-cache ─────────────────────────────────────────────────────
-
-def cmd_build_cache(args, config):
-    git_mgr = _make_git_mgr(config, args.target_version)
-    rv = args.target_version
-
-    cached_count = git_mgr.get_cache_count(rv)
-    is_full = args.full
-    incremental = not is_full and cached_count > 0
-    mode_label = "[yellow]全量重建[/]" if is_full else (
-        "[green]增量更新[/]" if incremental else "[cyan]首次构建[/]"
-    )
-
-    console.print(Panel(
-        f"[bold]目标仓库:[/] {rv}  [bold]分支:[/] {git_mgr._get_repo_branch(rv) or '当前'}\n"
-        f"[bold]现有缓存:[/] {cached_count:,} commits\n"
-        f"[bold]构建模式:[/] {mode_label}",
-        title="[bold blue]缓存构建[/]", border_style="blue", padding=(0, 2),
-    ))
-
-    if incremental:
-        latest = git_mgr.get_latest_cached_commit(rv)
-        if latest:
-            console.print(f"[dim]将从 {latest[:12]} 之后增量拉取新commit[/]\n")
-
-        progress = make_cache_progress(known_total=False)
-        with progress:
-            task = progress.add_task("增量缓存", total=None)
-
-            def on_progress(current, _total):
-                progress.update(task, completed=current,
-                                description=f"增量缓存 ({current:,} 新commits)")
-
-            git_mgr.build_commit_cache(rv, progress_cb=on_progress, incremental=True)
-
-        final_count = git_mgr.get_cache_count(rv)
-        new_count = final_count - cached_count
-        console.print(Panel(
-            f"[green bold]完成![/]  新增: [bold]{new_count:,}[/]  "
-            f"总缓存: [bold]{final_count:,}[/] commits",
-            border_style="green", padding=(0, 2),
-        ))
-    else:
-        console.print("[dim]正在统计分支 commit 数量 (大仓库可能需要几分钟)...[/]")
-        actual_count = git_mgr.count_commits(rv)
-        mx = config.cache.max_cached_commits if hasattr(config.cache, "max_cached_commits") else None
-
-        if actual_count > 0:
-            if mx and mx > actual_count:
-                mx = None
-            total = mx or actual_count
-            console.print(f"[dim]分支共 {actual_count:,} 个commits, 将缓存 {total:,} 个[/]\n")
-        else:
-            total = mx or 0
-            if total:
-                console.print(f"[dim]commit总数未知, 将缓存最多 {total:,} 个[/]\n")
-            else:
-                console.print("[dim]commit总数未知, 将流式缓存全部commits[/]\n")
-
-        known_total = total > 0
-        progress = make_cache_progress(known_total=known_total)
-        with progress:
-            task = progress.add_task(
-                "构建commit缓存",
-                total=total if known_total else None,
-            )
-
-            def on_progress(current, _total):
-                if known_total:
-                    progress.update(task, completed=current)
-                else:
-                    progress.update(task, completed=current,
-                                    description=f"构建commit缓存 ({current:,})")
-
-            git_mgr.build_commit_cache(rv, max_commits=mx, progress_cb=on_progress,
-                                       incremental=False)
-            if known_total:
-                progress.update(task, completed=total)
-
-        final_count = git_mgr.get_cache_count(rv)
-        console.print(Panel(
-            f"[green bold]完成![/]  缓存: [bold]{final_count:,}[/] commits",
-            border_style="green", padding=(0, 2),
-        ))
-
-
-# ─── search ──────────────────────────────────────────────────────────
-
-def cmd_search(args, config):
-    git_mgr = _make_git_mgr(config, args.target_version)
-    r = git_mgr.find_commit_by_id(args.commit_id, args.target_version)
-    if r:
-        from rich.table import Table
-        t = Table(title="Commit 信息", box=box.ROUNDED, border_style="cyan")
-        t.add_column("字段", style="bold")
-        t.add_column("值")
-        t.add_row("Commit ID", r["commit_id"])
-        t.add_row("Subject", r["subject"])
-        t.add_row("Author", r.get("author", ""))
-        t.add_row("Timestamp", str(r.get("timestamp", "")))
-        console.print(t)
-    else:
-        console.print(f"[yellow]未找到:[/] {args.commit_id}")
-
-
-# ─── server ───────────────────────────────────────────────────────
-
-
-def cmd_server(args, config):
-    """启动 HTTP API 服务，暴露 analyze / validate / batch-validate。"""
-    from api_server import run_api_server
-
-    host = args.host
-    port = args.port
-    config_path = args.config if hasattr(args, "config") else "config.yaml"
-
-    console.print(
-        f"[green]启动 API 服务:[/] {host}:{port}\n"
-        f"[dim]配置文件: {config_path}\n"
-        f"可用路由: /health, /api/analyze, /api/analyzer, "
-        f"/api/validate, /api/batch-validate[/]"
-    )
-    run_api_server(host, port, config_path=config_path)
-
-
 # ─── main ────────────────────────────────────────────────────────────
 
 def main():
+    from commands import register_all
+
     parent = argparse.ArgumentParser(add_help=False)
     parent.add_argument("-q", "--quiet", action="store_true", help="静默模式(仅日志文件)")
 
@@ -3203,65 +1913,7 @@ def main():
     )
     p.add_argument("-c", "--config", default="config.yaml")
     sub = p.add_subparsers(dest="command")
-
-    ap = sub.add_parser("analyze", help="分析CVE", parents=[parent])
-    ap.add_argument("--cve", dest="cve_id")
-    ap.add_argument("--batch", dest="batch_file")
-    ap.add_argument("--target", dest="target_version", required=True)
-    ap.add_argument("--no-dryrun", action="store_true", help="跳过dry-run检测")
-    ap.add_argument("--deep", action="store_true",
-                    help="深度分析模式: 漏洞分析+社区讨论+补丁检视+风险收益+合入建议")
-
-    ip = sub.add_parser("check-intro", help="检测漏洞引入commit", parents=[parent])
-    ip.add_argument("--commit", dest="commit_id", help="mainline引入commit ID")
-    ip.add_argument("--cve", dest="cve_id", help="CVE ID (自动提取引入commit)")
-    ip.add_argument("--target", dest="target_version", required=True)
-
-    fp = sub.add_parser("check-fix", help="检测修复补丁是否已合入", parents=[parent])
-    fp.add_argument("--commit", dest="commit_id", help="修复commit ID")
-    fp.add_argument("--cve", dest="cve_id", help="CVE ID (自动提取修复commit)")
-    fp.add_argument("--target", dest="target_version", required=True)
-
-    vp = sub.add_parser("validate", help="基于已修复CVE验证工具准确度", parents=[parent])
-    vp.add_argument("--cve", dest="cve_id", required=True)
-    vp.add_argument("--target", dest="target_version", required=True)
-    vp.add_argument("--known-fix", required=True, help="本地仓库中真实修复的commit ID")
-    vp.add_argument("--known-prereqs", default="",
-                    help="实际先合入的前置commit列表 (逗号分隔)")
-    vp.add_argument("--mainline-fix", default="",
-                    help="社区 mainline 修复 commit ID (提供后跳过 MITRE 爬取)")
-    vp.add_argument("--mainline-intro", default="",
-                    help="社区 mainline 引入 commit ID (可选)")
-    vp.add_argument("--deep", action="store_true",
-                    help="深度分析模式: 漏洞分析+补丁检视+风险收益+合入建议")
-
-    bmp = sub.add_parser("benchmark", help="批量准确度基准测试", parents=[parent])
-    bmp.add_argument("--file", required=True, help="基准测试YAML文件 (benchmarks.yaml)")
-    bmp.add_argument("--target", dest="target_version", required=True)
-
-    bvp = sub.add_parser("batch-validate",
-                         help="批量验证补丁生成准确度 (JSON)", parents=[parent])
-    bvp.add_argument("--file", required=True,
-                     help="CVE 数据 JSON 文件 (含 hulk_fix_patchs)")
-    bvp.add_argument("--target", dest="target_version", required=True)
-    bvp.add_argument("--offset", type=int, default=0,
-                     help="跳过前 N 个 CVE, 从第 N+1 个开始 (默认 0)")
-    bvp.add_argument("--limit", type=int, default=0,
-                     help="处理的 CVE 数量 (0=全部, 与 --offset 配合使用)")
-    bvp.add_argument("--deep", action="store_true",
-                     help="深度分析模式: 漏洞分析+补丁检视+风险收益+合入建议")
-
-    cp = sub.add_parser("build-cache", help="构建commit缓存", parents=[parent])
-    cp.add_argument("--target", dest="target_version", required=True)
-    cp.add_argument("--full", action="store_true", help="强制全量重建缓存（默认增量）")
-
-    sp = sub.add_parser("search", help="搜索commit", parents=[parent])
-    sp.add_argument("--commit", dest="commit_id", required=True)
-    sp.add_argument("--target", dest="target_version", required=True)
-
-    srv = sub.add_parser("server", help="启动 HTTP API 服务", parents=[parent])
-    srv.add_argument("--host", default="127.0.0.1")
-    srv.add_argument("--port", type=int, default=8000)
+    dispatch = register_all(sub, parent)
 
     args = p.parse_args()
     if not args.command:
@@ -3270,19 +1922,7 @@ def main():
 
     config = ConfigLoader.load(args.config)
     _setup_logging(config, quiet=args.quiet)
-
-    dispatch = {
-        "analyze": cmd_analyze,
-        "check-intro": cmd_check_intro,
-        "check-fix": cmd_check_fix,
-        "validate": cmd_validate,
-        "benchmark": cmd_benchmark,
-        "batch-validate": cmd_batch_validate,
-        "build-cache": cmd_build_cache,
-        "search": cmd_search,
-        "server": cmd_server,
-    }
-    dispatch[args.command](args, config)
+    dispatch[args.command](args, config, sys.modules[__name__])
 
 
 if __name__ == "__main__":
