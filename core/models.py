@@ -184,6 +184,7 @@ class ValidationDetails:
     workflow_steps: List[str] = field(default_factory=list)
     level_decision: Optional[LevelDecision] = None
     function_impacts: List[FunctionImpact] = field(default_factory=list)
+    special_risk_report: Dict[str, Any] = field(default_factory=dict)
     warnings: List[str] = field(default_factory=list)
     rule_profile: str = "default"
     rule_version: str = "v2"

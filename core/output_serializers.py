@@ -159,6 +159,7 @@ def serialize_validation_details(validation_details) -> dict:
         return dict(validation_details)
     return {
         "workflow_steps": getattr(validation_details, "workflow_steps", []),
+        "special_risk_report": getattr(validation_details, "special_risk_report", {}),
         "warnings": getattr(validation_details, "warnings", []),
         "rule_profile": getattr(validation_details, "rule_profile", ""),
         "rule_version": getattr(validation_details, "rule_version", ""),
@@ -175,6 +176,7 @@ def collect_rules_metadata(policy_config, level_decision=None, validation_detail
         "profile": getattr(policy_config, "profile", "default") if policy_config else "default",
         "enabled": bool(getattr(policy_config, "enabled", True)),
         "policy_overrides": {
+            "special_risk_rules_enabled": bool(getattr(policy_config, "special_risk_rules_enabled", True)),
             "large_change_rules_enabled": bool(getattr(policy_config, "large_change_rules_enabled", True)),
             "call_chain_rules_enabled": bool(getattr(policy_config, "call_chain_rules_enabled", True)),
             "critical_structure_rules_enabled": bool(getattr(policy_config, "critical_structure_rules_enabled", True)),
@@ -296,4 +298,98 @@ def aggregate_l0_l5_levels(results: list) -> dict:
         "levels": ["L0", "L1", "L2", "L3", "L4", "L5"],
         "current_level_distribution": dict(current_counter),
         "base_level_distribution": dict(base_counter),
+    }
+
+
+def aggregate_special_risk_metrics(results: list) -> dict:
+    section_counter = Counter()
+    critical_structure_change_count = 0
+    any_special_risk_count = 0
+    samples = {
+        "critical_structure_change_cves": [],
+        "manual_prereq_analysis_cves": [],
+        "deterministic_exact_match_cves": [],
+    }
+
+    for result in results or []:
+        if not isinstance(result, dict):
+            continue
+        cve_id = result.get("cve_id", "")
+        validation_details = serialize_validation_details(result.get("validation_details"))
+        report = validation_details.get("special_risk_report") or {}
+        summary = report.get("summary") or {}
+        triggered_sections = summary.get("triggered_sections") or []
+        if triggered_sections:
+            any_special_risk_count += 1
+        for section in triggered_sections:
+            section_counter[section] += 1
+        if summary.get("has_critical_structure_change"):
+            critical_structure_change_count += 1
+            if cve_id and len(samples["critical_structure_change_cves"]) < 20:
+                samples["critical_structure_change_cves"].append(cve_id)
+
+        generated = result.get("generated_vs_real") or {}
+        if generated.get("deterministic_exact_match") and cve_id:
+            if len(samples["deterministic_exact_match_cves"]) < 20:
+                samples["deterministic_exact_match_cves"].append(cve_id)
+
+        strategy_buckets = validation_details.get("strategy_buckets") or {}
+        if strategy_buckets.get("dependency_bucket") in ("required", "recommended"):
+            if cve_id and len(samples["manual_prereq_analysis_cves"]) < 20:
+                samples["manual_prereq_analysis_cves"].append(cve_id)
+
+    return {
+        "any_special_risk_count": any_special_risk_count,
+        "critical_structure_change_count": critical_structure_change_count,
+        "section_counts": dict(sorted(section_counter.items())),
+        "samples": samples,
+    }
+
+
+def aggregate_batch_validate_summary(results: list) -> dict:
+    level_summary = aggregate_l0_l5_levels(results)
+    special_risk_summary = aggregate_special_risk_metrics(results)
+    dependency_bucket_counter = Counter()
+    verdict_counter = Counter()
+    deterministic_exact_match_count = 0
+    manual_prereq_analysis_count = 0
+
+    for result in results or []:
+        if not isinstance(result, dict):
+            continue
+        generated = result.get("generated_vs_real") or {}
+        verdict = generated.get("verdict", "no_data")
+        verdict_counter[verdict] += 1
+        if generated.get("deterministic_exact_match"):
+            deterministic_exact_match_count += 1
+
+        validation_details = serialize_validation_details(result.get("validation_details"))
+        strategy_buckets = validation_details.get("strategy_buckets") or {}
+        dep_bucket = strategy_buckets.get("dependency_bucket", "")
+        if dep_bucket:
+            dependency_bucket_counter[dep_bucket] += 1
+        if dep_bucket in ("required", "recommended"):
+            manual_prereq_analysis_count += 1
+
+    total = len(results or [])
+    return {
+        "total": total,
+        "l0_l5": level_summary,
+        "verdict_distribution": dict(sorted(verdict_counter.items())),
+        "deterministic_exact_match": {
+            "count": deterministic_exact_match_count,
+            "rate": round(deterministic_exact_match_count / total, 4) if total else 0.0,
+            "definition": "generated_vs_real.deterministic_exact_match == true",
+        },
+        "critical_structure_change": {
+            "count": special_risk_summary["critical_structure_change_count"],
+            "rate": round(special_risk_summary["critical_structure_change_count"] / total, 4) if total else 0.0,
+        },
+        "manual_prerequisite_analysis": {
+            "count": manual_prereq_analysis_count,
+            "rate": round(manual_prereq_analysis_count / total, 4) if total else 0.0,
+            "dependency_bucket_distribution": dict(sorted(dependency_bucket_counter.items())),
+            "definition": "strategy_buckets.dependency_bucket in {required, recommended}",
+        },
+        "special_risk": special_risk_summary,
     }

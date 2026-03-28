@@ -1410,6 +1410,7 @@ def _compare_generated_vs_real(generated_patch: str, real_diff: str) -> dict:
             "verdict": "no_data",
             "core_similarity": 0.0,
             "overall_similarity": 0.0,
+            "deterministic_exact_match": False,
             "detail": [],
             "diagnosis": "缺少补丁数据，无法比较",
         }
@@ -1527,11 +1528,27 @@ def _compare_generated_vs_real(generated_patch: str, real_diff: str) -> dict:
         diagnosis_parts.append(
             f"生成补丁与真实修复差异较大 (核心改动相似度仅 {avg_core:.0%})")
 
+    deterministic_exact_match = (
+        bool(all_pairs)
+        and not gen_only
+        and not real_only
+        and all(
+            fd.get("core_similarity") == 1.0
+            and fd.get("overall_similarity") == 1.0
+            and not fd.get("add_only_in_generated")
+            and not fd.get("add_only_in_real")
+            and not fd.get("rm_only_in_generated")
+            and not fd.get("rm_only_in_real")
+            for fd in file_details
+        )
+    )
+
     return {
         "verdict": verdict,
         "core_similarity": round(avg_core, 3),
         "overall_similarity": round(avg_overall, 3),
         "file_coverage": round(file_coverage, 3),
+        "deterministic_exact_match": deterministic_exact_match,
         "gen_only_files": gen_only,
         "real_only_files": real_only,
         "detail": file_details,

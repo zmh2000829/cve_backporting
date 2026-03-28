@@ -90,3 +90,7 @@ path_mappings:
 # ─── 规则配置示例已迁移 ───────────────────────────────────────
 # `policy:` 规则编排示例已迁移至 `rules/policy.example.yaml`
 # 如需启用或调整 L0-L5 策略与可插拔规则，请将该文件中的 `policy:` 段复制到你的 `config.yaml`
+#
+# P2 专项分析也支持命令行覆盖：
+#   python cli.py analyze --cve CVE-2024-26633 --target 5.10-hulk --disable-p2
+#   python cli.py batch-validate --file cves.json --target 5.10-hulk --enable-p2

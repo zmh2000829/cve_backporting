@@ -71,6 +71,7 @@ class PolicyConfig:
     """L0-L5 分级与规则引擎配置"""
     enabled: bool = True
     profile: str = "balanced"
+    special_risk_rules_enabled: bool = True
     prerequisite_rules_enabled: bool = True
     direct_backport_rules_enabled: bool = True
     direct_backport_line_threshold: int = 24
@@ -139,6 +140,7 @@ class ConfigLoader:
                 merged_policy["profile"] = prof
                 allowed_policy_keys = (
                     "enabled", "profile",
+                    "special_risk_rules_enabled",
                     "prerequisite_rules_enabled",
                     "direct_backport_rules_enabled",
                     "direct_backport_line_threshold",

@@ -26,6 +26,11 @@ def _count_params(signature: str) -> int:
     return len([p for p in inner.split(",") if p.strip()])
 
 
+def _special_section(ctx: RuleContext, section: str) -> Dict:
+    report = getattr(ctx, "special_risk_report", {}) or {}
+    return ((report.get("sections") or {}).get(section) or {})
+
+
 class LargeChangeRule(PolicyRule):
     rule_id = "large_change"
     name = "Large Change Warning"
@@ -76,6 +81,132 @@ class CriticalStructureRule(PolicyRule):
             "level_floor": "L3",
             "message": "检测到关键结构/锁变更: " + ", ".join(uniq[:6]),
             "evidence": {"keywords": uniq, "categories": categories},
+        }
+
+
+class P2LockingSyncRule(PolicyRule):
+    rule_id = "p2_locking_sync"
+    name = "P2 Locking / Synchronization"
+    severity = "high"
+
+    def evaluate(self, ctx: RuleContext) -> Optional[Dict]:
+        section = _special_section(ctx, "locking_sync")
+        if not section.get("triggered"):
+            return None
+        return {
+            "rule_id": self.rule_id,
+            "name": self.name,
+            "severity": "high",
+            "level_floor": "L3",
+            "message": section.get("summary", "检测到锁与同步语义变化"),
+            "evidence": {
+                "lock_objects": section.get("lock_objects", []),
+                "operation_changes": section.get("operation_changes", []),
+                "protected_data_objects": section.get("protected_data_objects", []),
+                "sync_order_changes": section.get("sync_order_changes", []),
+                "evidence_lines": section.get("evidence_lines", []),
+            },
+        }
+
+
+class P2LifecycleResourceRule(PolicyRule):
+    rule_id = "p2_lifecycle_resource"
+    name = "P2 Lifecycle / Resource"
+    severity = "high"
+
+    def evaluate(self, ctx: RuleContext) -> Optional[Dict]:
+        section = _special_section(ctx, "lifecycle_resource")
+        if not section.get("triggered"):
+            return None
+        return {
+            "rule_id": self.rule_id,
+            "name": self.name,
+            "severity": "high",
+            "level_floor": "L3",
+            "message": section.get("summary", "检测到生命周期/资源管理变化"),
+            "evidence": {
+                "categories": section.get("categories", []),
+                "ownership_objects": section.get("ownership_objects", []),
+                "release_order_clues": section.get("release_order_clues", []),
+                "rollback_paths": section.get("rollback_paths", []),
+                "evidence_lines": section.get("evidence_lines", []),
+            },
+        }
+
+
+class P2StateMachineRule(PolicyRule):
+    rule_id = "p2_state_machine_control_flow"
+    name = "P2 State Machine / Control Flow"
+    severity = "warn"
+
+    def evaluate(self, ctx: RuleContext) -> Optional[Dict]:
+        section = _special_section(ctx, "state_machine_control_flow")
+        if not section.get("triggered"):
+            return None
+        high_risk = section.get("risk") == "high"
+        return {
+            "rule_id": self.rule_id,
+            "name": self.name,
+            "severity": "high" if high_risk else "warn",
+            "level_floor": "L3" if high_risk else "L2",
+            "message": section.get("summary", "检测到状态机/控制流变化"),
+            "evidence": {
+                "condition_changes": section.get("condition_changes", []),
+                "return_path_changes": section.get("return_path_changes", []),
+                "error_codes": section.get("error_codes", []),
+                "state_fields": section.get("state_fields", []),
+                "callback_or_ops_changes": section.get("callback_or_ops_changes", []),
+                "evidence_lines": section.get("evidence_lines", []),
+            },
+        }
+
+
+class P2StructFieldRule(PolicyRule):
+    rule_id = "p2_struct_field_data_path"
+    name = "P2 Struct Field / Data Path"
+    severity = "warn"
+
+    def evaluate(self, ctx: RuleContext) -> Optional[Dict]:
+        section = _special_section(ctx, "struct_field_data_path")
+        if not section.get("triggered"):
+            return None
+        high_risk = section.get("risk") == "high"
+        return {
+            "rule_id": self.rule_id,
+            "name": self.name,
+            "severity": "high" if high_risk else "warn",
+            "level_floor": "L3" if high_risk else "L2",
+            "message": section.get("summary", "检测到结构体字段/数据路径变化"),
+            "evidence": {
+                "field_changes": section.get("field_changes", []),
+                "field_usages": section.get("field_usages", [])[:6],
+                "evidence_lines": section.get("evidence_lines", []),
+            },
+        }
+
+
+class P2ErrorPathRule(PolicyRule):
+    rule_id = "p2_error_path"
+    name = "P2 Error Path"
+    severity = "warn"
+
+    def evaluate(self, ctx: RuleContext) -> Optional[Dict]:
+        section = _special_section(ctx, "error_path")
+        if not section.get("triggered"):
+            return None
+        return {
+            "rule_id": self.rule_id,
+            "name": self.name,
+            "severity": "warn",
+            "level_floor": "L2",
+            "message": section.get("summary", "检测到错误路径变化"),
+            "evidence": {
+                "goto_err_paths": section.get("goto_err_paths", []),
+                "cleanup_changes": section.get("cleanup_changes", []),
+                "error_codes": section.get("error_codes", []),
+                "recovery_changes": section.get("recovery_changes", []),
+                "evidence_lines": section.get("evidence_lines", []),
+            },
         }
 
 
@@ -410,6 +541,13 @@ def register_rules(registry: RuleRegistry, config=None):
 
     if not config or getattr(config, "critical_structure_rules_enabled", True):
         registry.register(CriticalStructureRule())
+
+    if not config or getattr(config, "special_risk_rules_enabled", True):
+        registry.register(P2LockingSyncRule())
+        registry.register(P2LifecycleResourceRule())
+        registry.register(P2StateMachineRule())
+        registry.register(P2StructFieldRule())
+        registry.register(P2ErrorPathRule())
 
     if not config or getattr(config, "call_chain_rules_enabled", True):
         registry.register(CallChainPropagationRule())

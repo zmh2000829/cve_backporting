@@ -57,6 +57,7 @@ def _policy_config_panel(policy_config) -> Table:
     fields = [
         ("profile", "规则 Profile"),
         ("enabled", "规则引擎"),
+        ("special_risk_rules_enabled", "P2 专项分析"),
         ("prerequisite_rules_enabled", "关联补丁规则"),
         ("direct_backport_rules_enabled", "直接回合规则"),
         ("direct_backport_line_threshold", "直回 line 阈值"),
@@ -173,6 +174,10 @@ def _render_rules_overview_panel(
     if sb:
         if sb.get("dependency_bucket"):
             rule_meta.add_row("依赖分桶", str(sb.get("dependency_bucket")))
+        if sb.get("special_risk_sections"):
+            rule_meta.add_row("P2 专项命中", ", ".join(sb.get("special_risk_sections") or []))
+        if "critical_structure_change" in sb:
+            rule_meta.add_row("关键结构变更", "是" if sb.get("critical_structure_change") else "否")
         dep_counts = sb.get("dependency_counts") or {}
         if dep_counts:
             rule_meta.add_row(
@@ -1926,6 +1931,18 @@ def render_batch_validate_report(results: list, target: str, policy_config=None)
     accurate = (verdict_counts.get("identical", 0)
                 + verdict_counts.get("essentially_same", 0))
     accuracy_rate = accurate / total if total else 0
+    deterministic_exact = sum(
+        1 for r in results
+        if (r.get("generated_vs_real", {}) or {}).get("deterministic_exact_match")
+    )
+    critical_structure_count = sum(
+        1 for r in results
+        if ((r.get("validation_details", {}) or {}).get("special_risk_report", {}) or {}).get("summary", {}).get("has_critical_structure_change")
+    )
+    manual_prereq_analysis_count = sum(
+        1 for r in results
+        if ((r.get("validation_details", {}) or {}).get("strategy_buckets", {}) or {}).get("dependency_bucket") in ("required", "recommended")
+    )
     avg_core = sum(core_sims) / len(core_sims) if core_sims else 0
 
     total_patches = sum(r.get("num_hulk_fixes", 1) for r in results)
@@ -1949,6 +1966,10 @@ def render_batch_validate_report(results: list, target: str, policy_config=None)
         f"[{acc_color} bold]{accurate}/{total}  "
         f"({accuracy_rate:.1%})[/{acc_color} bold]"
         f"  [dim](identical + essentially_same)[/]")
+    summary.add_row(
+        "100% 正确补丁数",
+        f"[bold]{deterministic_exact}/{total} ({deterministic_exact / total:.1%})[/]"
+        "  [dim](deterministic_exact_match)[/]")
     summary.add_row("平均核心相似度",
                     f"[bold]{avg_core:.1%}[/]")
     summary.add_row("工具验证通过率",
@@ -1961,6 +1982,13 @@ def render_batch_validate_report(results: list, target: str, policy_config=None)
             "前置补丁识别 recall",
             f"[{rc} bold]{avg_recall:.1%}[/{rc} bold]"
             f"  [dim]({len(prereq_recalls)} 个含前置的 CVE)[/]")
+    summary.add_row(
+        "关键结构变更数",
+        f"[bold]{critical_structure_count}/{total} ({critical_structure_count / total:.1%})[/]")
+    summary.add_row(
+        "关联补丁需人工分析",
+        f"[bold]{manual_prereq_analysis_count}/{total} ({manual_prereq_analysis_count / total:.1%})[/]"
+        "  [dim](dependency_bucket=required/recommended)[/]")
     summary.add_row("", "")
 
     verdict_info = [

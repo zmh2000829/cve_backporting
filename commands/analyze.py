@@ -1,7 +1,16 @@
 """`analyze` 命令入口。"""
 
+import copy
 import os
 import sys
+
+
+def _apply_p2_override(config, args):
+    cfg = copy.deepcopy(config)
+    override = getattr(args, "p2_enabled", None)
+    if override is not None and getattr(cfg, "policy", None):
+        cfg.policy.special_risk_rules_enabled = bool(override)
+    return cfg
 
 
 def register(subparsers, parent):
@@ -15,10 +24,16 @@ def register(subparsers, parent):
         action="store_true",
         help="深度分析模式: 漏洞分析+社区讨论+补丁检视+风险收益+合入建议",
     )
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--enable-p2", dest="p2_enabled", action="store_true", default=None,
+                       help="启用 P2 关键结构/关键语义/高风险场景专项分析")
+    group.add_argument("--disable-p2", dest="p2_enabled", action="store_false",
+                       help="关闭 P2 关键结构/关键语义/高风险场景专项分析")
     return {"analyze": run}
 
 
 def run(args, config, runtime):
+    config = _apply_p2_override(config, args)
     git_mgr = runtime._make_git_mgr(config, args.target_version)
     pipe = runtime.Pipeline(
         git_mgr,

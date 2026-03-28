@@ -8,6 +8,7 @@ policy:
   profile: "balanced"
 
   # 规则开关
+  special_risk_rules_enabled: true
   prerequisite_rules_enabled: true
   direct_backport_rules_enabled: true
   large_change_rules_enabled: true

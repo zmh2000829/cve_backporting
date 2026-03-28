@@ -2293,6 +2293,11 @@ DryRun 成功方法
 |------|----------|----------|
 | `large_change` | 改动行数 / hunk 数超阈值 | warning，至少抬升到 `L2` |
 | `critical_structures` | 锁/RCU/refcount/struct 等关键结构命中 | high risk，至少抬升到 `L3` |
+| `p2_locking_sync` | 锁对象、加解锁位置、保护区间、同步顺序变化 | high risk，至少抬升到 `L3` |
+| `p2_lifecycle_resource` | alloc/free、get/put、refcount、回滚路径变化 | high risk，至少抬升到 `L3` |
+| `p2_state_machine_control_flow` | 条件分支、返回路径、状态字段、ops 行为变化 | warning/high，至少抬升到 `L2/L3` |
+| `p2_struct_field_data_path` | struct 字段定义、访问路径、读写位置变化 | warning/high，至少抬升到 `L2/L3` |
+| `p2_error_path` | `goto err`、cleanup、错误码、恢复逻辑变化 | warning，至少抬升到 `L2` |
 | `call_chain_propagation` | 修改函数存在调用/被调用牵连 | warning / high，关键变更时可抬升到 `L4` |
 | `call_chain_fanout` | callers + callees 扇出超阈值 | warning，至少抬升到 `L2` |
 | `l1_api_surface` | 签名变化 / return 路径变化 | L1 复核证据 |
@@ -2303,6 +2308,81 @@ DryRun 成功方法
 - 默认策略：`rules/level_policies.py`
 - 配置样例：`rules/policy.example.yaml`
 - 目录说明：`rules/README.md`
+
+---
+
+# P2 专项分析本轮已落地
+
+### 覆盖范围
+
+- 锁与同步语义
+- 生命周期与资源管理
+- 状态机与控制流
+- 结构体字段与数据路径
+- 错误路径专项
+
+### 输出形式
+
+```json
+{
+  "validation_details": {
+    "special_risk_report": {
+      "enabled": true,
+      "summary": {
+        "triggered_sections": ["locking_sync", "error_path"],
+        "high_risk_sections": ["locking_sync"],
+        "has_critical_structure_change": true
+      },
+      "sections": {
+        "locking_sync": { "...": "锁对象/保护数据/同步顺序证据" },
+        "error_path": { "...": "goto err / cleanup / error code 证据" }
+      }
+    },
+    "strategy_buckets": {
+      "special_risk_sections": ["locking_sync", "error_path"],
+      "critical_structure_change": true
+    }
+  }
+}
+```
+
+### 使用方式
+
+- 配置：`policy.special_risk_rules_enabled: true/false`
+- CLI：`--enable-p2` / `--disable-p2`
+- API：请求体支持 `p2_enabled: true/false`
+
+---
+
+# CLI / API 返回已统一
+
+### 统一原则
+
+- `analyze` / `validate` / `batch-validate` 三条链路都输出同一套 `validation_details`
+- API 不再只是“精简版摘要”，而是返回与 CLI JSON 报告同口径的数据
+- 批量接口额外输出最终聚合统计，便于平台直接消费
+
+### `/api/batch-validate` 关键汇总字段
+
+```json
+{
+  "operation": "batch-validate",
+  "p2_enabled": true,
+  "batch_summary": {
+    "l0_l5": { "...": "L0~L5 分布" },
+    "deterministic_exact_match": { "count": 12 },
+    "critical_structure_change": { "count": 7 },
+    "manual_prerequisite_analysis": { "count": 9 },
+    "special_risk": { "...": "P2 五类命中统计" }
+  }
+}
+```
+
+### 这意味着什么
+
+- 平台侧可以直接统计 L0~L5 占比
+- 可以直接统计“100% 确定性正确补丁”数量
+- 可以直接统计关键结构变更与需人工分析的关联补丁数量
 
 ---
 

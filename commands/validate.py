@@ -1,11 +1,30 @@
 """`validate` / `benchmark` / `batch-validate` 命令入口。"""
 
+import copy
 import json
 import os
 from collections import OrderedDict
 from datetime import datetime
 
 from rich.panel import Panel
+
+from core.output_serializers import aggregate_batch_validate_summary
+
+
+def _apply_p2_override(config, args):
+    cfg = copy.deepcopy(config)
+    override = getattr(args, "p2_enabled", None)
+    if override is not None and getattr(cfg, "policy", None):
+        cfg.policy.special_risk_rules_enabled = bool(override)
+    return cfg
+
+
+def _add_p2_toggle(parser):
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--enable-p2", dest="p2_enabled", action="store_true", default=None,
+                       help="启用 P2 关键结构/关键语义/高风险场景专项分析")
+    group.add_argument("--disable-p2", dest="p2_enabled", action="store_false",
+                       help="关闭 P2 关键结构/关键语义/高风险场景专项分析")
 
 
 def register(subparsers, parent):
@@ -17,10 +36,12 @@ def register(subparsers, parent):
     validate.add_argument("--mainline-fix", default="", help="社区 mainline 修复 commit ID (提供后跳过 MITRE 爬取)")
     validate.add_argument("--mainline-intro", default="", help="社区 mainline 引入 commit ID (可选)")
     validate.add_argument("--deep", action="store_true", help="深度分析模式: 漏洞分析+补丁检视+风险收益+合入建议")
+    _add_p2_toggle(validate)
 
     benchmark = subparsers.add_parser("benchmark", help="批量准确度基准测试", parents=[parent])
     benchmark.add_argument("--file", required=True, help="基准测试YAML文件 (benchmarks.yaml)")
     benchmark.add_argument("--target", dest="target_version", required=True)
+    _add_p2_toggle(benchmark)
 
     batch = subparsers.add_parser("batch-validate", help="批量验证补丁生成准确度 (JSON)", parents=[parent])
     batch.add_argument("--file", required=True, help="CVE 数据 JSON 文件 (含 hulk_fix_patchs)")
@@ -28,6 +49,7 @@ def register(subparsers, parent):
     batch.add_argument("--offset", type=int, default=0, help="跳过前 N 个 CVE, 从第 N+1 个开始 (默认 0)")
     batch.add_argument("--limit", type=int, default=0, help="处理的 CVE 数量 (0=全部, 与 --offset 配合使用)")
     batch.add_argument("--deep", action="store_true", help="深度分析模式: 漏洞分析+补丁检视+风险收益+合入建议")
+    _add_p2_toggle(batch)
 
     return {
         "validate": run_validate,
@@ -93,6 +115,7 @@ def _flush_live_report(path: str, target: str, total: int, passed: list, failed:
 
 
 def run_validate(args, config, runtime):
+    config = _apply_p2_override(config, args)
     tv = args.target_version
     git_mgr = runtime._make_git_mgr(config, tv)
     known_prereqs = [p.strip() for p in args.known_prereqs.split(",") if p.strip()] if args.known_prereqs else []
@@ -219,6 +242,7 @@ def run_validate(args, config, runtime):
 
 
 def run_benchmark(args, config, runtime):
+    config = _apply_p2_override(config, args)
     import yaml
 
     with open(args.file, "r", encoding="utf-8") as f:
@@ -285,6 +309,7 @@ def run_benchmark(args, config, runtime):
 
 
 def run_batch_validate(args, config, runtime):
+    config = _apply_p2_override(config, args)
     try:
         with open(args.file, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -500,6 +525,7 @@ def run_batch_validate(args, config, runtime):
                 "known_fix": primary["commit"][:12],
                 "verdict": verdict,
                 "core_similarity": round(core_sim, 3),
+                "deterministic_exact_match": bool(generated.get("deterministic_exact_match")),
                 "method": method,
                 "num_fixes": len(group["all_fixes"]),
                 "num_prereqs": len(prereqs),
@@ -553,6 +579,7 @@ def run_batch_validate(args, config, runtime):
     runtime.render_batch_validate_report(cve_results, tv, policy_config=getattr(config, "policy", None))
 
     serializable_results = [runtime._prepare_validate_json(r) for r in cve_results]
+    batch_summary = aggregate_batch_validate_summary(serializable_results)
     full_report_path = os.path.join(out_dir, f"batch_validate_{tv}_{ts}_full.json")
     with open(full_report_path, "w", encoding="utf-8") as f:
         json.dump({
@@ -560,6 +587,8 @@ def run_batch_validate(args, config, runtime):
             "total_cves": len(cve_groups),
             "total_patches": total_patches,
             "skipped_parse_errors": skipped,
+            "p2_enabled": bool(getattr(config.policy, "special_risk_rules_enabled", True)) if getattr(config, "policy", None) else True,
+            "batch_summary": batch_summary,
             "cve_results": serializable_results,
             "strategy_summary": runtime.aggregate_strategy_buckets(serializable_results),
             "cve_summary": {

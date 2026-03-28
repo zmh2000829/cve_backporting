@@ -328,7 +328,8 @@ Or batch call in one request:
   "known_prereqs": "abc111,def222",
   "mainline_fix": "aaabbb000111",
   "mainline_intro": "bbb222ccc333",
-  "deep": false
+  "deep": false,
+  "p2_enabled": true
 }
 ```
 
@@ -346,6 +347,7 @@ Or batch call in one request:
 {
   "target": "5.10-hulk",
   "deep": false,
+  "p2_enabled": true,
   "items": [
     {
       "cve_id": "CVE-2024-26633",
@@ -376,7 +378,24 @@ Response includes per-item result list and summary:
       "total": 0,
       "success": 0,
       "error": 0
-    }
+    },
+    "p2_enabled": true,
+    "batch_summary": {
+      "l0_l5": {},
+      "deterministic_exact_match": {
+        "count": 0,
+        "rate": 0.0
+      },
+      "critical_structure_change": {
+        "count": 0,
+        "rate": 0.0
+      },
+      "manual_prerequisite_analysis": {
+        "count": 0,
+        "rate": 0.0
+      }
+    },
+    "results": []
   }
 }
 ```
@@ -404,6 +423,7 @@ Response includes per-item result list and summary:
 - **Full JSON report** (`batch_validate_*_full.json`) — final aggregate metrics with per-CVE detail
 - **TUI summary** — patch accuracy rate, average core similarity, verdict distribution, DryRun method distribution, per-CVE table
 - **Analysis Narrative** — each CVE entry includes `analysis_narrative` with human-readable workflow, prerequisite analysis, applicability, and developer action suggestions
+- **Special Risk Report** — `validation_details.special_risk_report` exposes the P2 locking/lifecycle/state-machine/field/error-path analysis used by both CLI and API
 
 Mainline fix/intro commits from JSON (`mainline_fix_patchs`, `mainline_import_patchs`) are used directly, skipping MITRE crawl. Entries that fail parsing or cause runtime errors are automatically skipped without affecting the overall batch.
 

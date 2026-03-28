@@ -3,7 +3,7 @@
 import importlib
 import inspect
 import re
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from core.function_analyzer import FunctionAnalyzer
 from core.matcher import extract_hunks_from_diff
@@ -77,6 +77,7 @@ class PolicyEngine:
                 warnings=["fix_patch 为空"],
                 rule_profile=getattr(self.config, "profile", "default") if self.config else "default",
                 rule_version="v2",
+                special_risk_report={"enabled": bool(getattr(self.config, "special_risk_rules_enabled", True)) if self.config else True},
                 strategy_buckets={},
             )
 
@@ -87,6 +88,7 @@ class PolicyEngine:
         funcs = self._extract_modified_function_names(patch.diff_code or "")
         impacts = self._analyze_function_impacts(patch, funcs, git_mgr, target_version, path_mapper)
         critical_hits = self._scan_critical_structure_hits(patch.diff_code or "")
+        special_risk_report = self._build_special_risk_report(patch.diff_code or "")
 
         ctx = RuleContext(
             patch=patch,
@@ -97,6 +99,7 @@ class PolicyEngine:
             prerequisite_patches=list(prerequisite_patches or []),
             dependency_details=dependency_details,
             critical_structure_hits=critical_hits,
+            special_risk_report=special_risk_report,
             llm_enabled=self.llm_enabled,
             base_level=base_level,
             base_method=base_method,
@@ -107,7 +110,8 @@ class PolicyEngine:
         cross_n = getattr(self, "_last_cross_file_count", 0)
         prereq_summary = self._summarize_prerequisites(prerequisite_patches, dependency_details)
         direct_summary = self._summarize_direct_backport(level_decision, rule_hits, prerequisite_patches)
-        impact_summary = self._summarize_impact_focus(rule_hits, impacts, critical_hits)
+        impact_summary = self._summarize_impact_focus(rule_hits, impacts, critical_hits, special_risk_report)
+        special_risk_summary = self._summarize_special_risk(special_risk_report)
         steps = [
             f"DryRun 基线: {base_level} ({base_method or 'none'})",
             f"最终场景: {level_decision.level} ({level_decision.review_mode})",
@@ -116,15 +120,17 @@ class PolicyEngine:
             f"变更规模: {changed} 行, {hunks} hunk, {len(funcs)} 函数",
             f"调用链影响函数: {len(impacts)}（跨文件合并源文件 {cross_n} 个）",
             f"高影响关注: {impact_summary}",
+            f"P2 专项分析: {special_risk_summary}",
             f"规则命中: {len(rule_hits)}",
         ]
         warnings = [hit["message"] for hit in rule_hits if hit.get("severity") in ("warn", "high")]
-        strategy_buckets = self._build_strategy_buckets(level_decision, rule_hits, prerequisite_patches)
+        strategy_buckets = self._build_strategy_buckets(level_decision, rule_hits, prerequisite_patches, special_risk_report)
 
         return ValidationDetails(
             workflow_steps=steps,
             level_decision=level_decision,
             function_impacts=impacts,
+            special_risk_report=special_risk_report,
             warnings=warnings,
             rule_profile=getattr(self.config, "profile", "default") if self.config else "default",
             rule_version="v2",
@@ -156,7 +162,13 @@ class PolicyEngine:
             return "补丁主体接近可直回，但需结合规则证据确认"
         return "不建议直接回合，需先审查风险或依赖"
 
-    def _summarize_impact_focus(self, rule_hits: List[Dict], impacts: List[FunctionImpact], critical_hits: List[str]) -> str:
+    def _summarize_impact_focus(
+        self,
+        rule_hits: List[Dict],
+        impacts: List[FunctionImpact],
+        critical_hits: List[str],
+        special_risk_report: Dict[str, Any],
+    ) -> str:
         highlights = []
         for hit in rule_hits or []:
             rule_id = hit.get("rule_id")
@@ -164,10 +176,16 @@ class PolicyEngine:
                 highlights.append("单行高影响变更")
             elif rule_id == "critical_structures":
                 highlights.append("关键结构/锁/引用计数")
+            elif rule_id.startswith("p2_"):
+                highlights.append("P2 专项高风险语义")
             elif rule_id in ("call_chain_propagation", "call_chain_fanout"):
                 highlights.append("调用链扩散")
             elif rule_id == "l1_api_surface":
                 highlights.append("函数签名/入参/返回路径")
+        if not highlights:
+            sections = ((special_risk_report or {}).get("summary") or {}).get("triggered_sections", [])
+            if sections:
+                highlights.append("专项命中: " + "/".join(sections[:3]))
         if not highlights and critical_hits:
             highlights.append("关键结构关键词")
         if not highlights and impacts:
@@ -176,11 +194,31 @@ class PolicyEngine:
                 highlights.append(f"函数 {top.function} 的调用链影响")
         return "、".join(dict.fromkeys(highlights)) if highlights else "未发现额外高影响信号"
 
+    def _summarize_special_risk(self, special_risk_report: Dict[str, Any]) -> str:
+        if not special_risk_report:
+            return "未输出专项分析"
+        if not special_risk_report.get("enabled", True):
+            return "已禁用"
+        summary = special_risk_report.get("summary") or {}
+        sections = summary.get("triggered_sections") or []
+        if not sections:
+            return "未命中锁/生命周期/状态机/字段/错误路径专项信号"
+        labels = {
+            "locking_sync": "锁与同步",
+            "lifecycle_resource": "生命周期",
+            "state_machine_control_flow": "状态机/控制流",
+            "struct_field_data_path": "结构体字段",
+            "error_path": "错误路径",
+        }
+        cn = [labels.get(item, item) for item in sections]
+        return f"命中 {len(sections)} 类: {' / '.join(cn[:5])}"
+
     def _build_strategy_buckets(
         self,
         level_decision: LevelDecision,
         rule_hits: List[Dict],
         prerequisite_patches,
+        special_risk_report: Dict[str, Any],
     ) -> Dict:
         rule_type_counter: Dict[str, int] = {}
         for hit in rule_hits or []:
@@ -200,11 +238,16 @@ class PolicyEngine:
         else:
             dependency_bucket = "independent"
 
+        special_summary = (special_risk_report or {}).get("summary") or {}
+
         return {
             "level": level_decision.level,
             "base_level": level_decision.base_level,
             "rule_type_bucket": sorted(rule_type_counter.items()),
             "dependency_bucket": dependency_bucket,
+            "special_risk_enabled": bool((special_risk_report or {}).get("enabled", True)),
+            "special_risk_sections": list(special_summary.get("triggered_sections") or []),
+            "critical_structure_change": bool(special_summary.get("has_critical_structure_change")),
             "dependency_counts": {
                 "strong": strong,
                 "medium": medium,
@@ -224,6 +267,8 @@ class PolicyEngine:
             return "call_chain"
         if rule_id in ("critical_structures",):
             return "critical_structure"
+        if rule_id.startswith("p2_"):
+            return "special_risk"
         if rule_id in ("l1_api_surface",):
             return "api_surface"
         if rule_id in ("single_line_high_impact",):
@@ -370,3 +415,401 @@ class PolicyEngine:
                 if out is not None:
                     return out
         return None
+
+    def _build_special_risk_report(self, diff_text: str) -> Dict[str, Any]:
+        enabled = bool(getattr(self.config, "special_risk_rules_enabled", True)) if self.config else True
+        if not enabled:
+            return {
+                "enabled": False,
+                "summary": {
+                    "triggered_sections": [],
+                    "high_risk_sections": [],
+                    "has_critical_structure_change": False,
+                },
+                "sections": {},
+            }
+
+        entries = self._collect_diff_entries(diff_text)
+        hunk_groups: Dict[str, List[Dict[str, Any]]] = {}
+        for entry in entries:
+            hunk_groups.setdefault(entry["hunk_key"], []).append(entry)
+
+        sections = {
+            "locking_sync": self._analyze_locking_sync(entries, hunk_groups),
+            "lifecycle_resource": self._analyze_lifecycle_resource(entries),
+            "state_machine_control_flow": self._analyze_state_machine(entries),
+            "struct_field_data_path": self._analyze_struct_field_data_path(entries, hunk_groups),
+            "error_path": self._analyze_error_path(entries),
+        }
+        triggered_sections = [name for name, section in sections.items() if section.get("triggered")]
+        high_risk_sections = [name for name, section in sections.items() if section.get("risk") == "high"]
+        has_critical_structure_change = any(
+            sections.get(name, {}).get("triggered")
+            for name in ("locking_sync", "lifecycle_resource", "struct_field_data_path")
+        )
+        return {
+            "enabled": True,
+            "summary": {
+                "triggered_sections": triggered_sections,
+                "high_risk_sections": high_risk_sections,
+                "has_critical_structure_change": has_critical_structure_change,
+            },
+            "sections": sections,
+        }
+
+    def _collect_diff_entries(self, diff_text: str) -> List[Dict[str, Any]]:
+        entries: List[Dict[str, Any]] = []
+        current_file = ""
+        current_hunk = ""
+        current_func = ""
+        current_struct = ""
+        hunk_index = 0
+
+        for raw in (diff_text or "").splitlines():
+            if raw.startswith("diff --git"):
+                match = re.search(r" b/(.+)$", raw)
+                current_file = match.group(1) if match else current_file
+                current_hunk = ""
+                current_func = ""
+                current_struct = ""
+                hunk_index = 0
+                continue
+            if raw.startswith("@@"):
+                current_hunk = raw
+                current_func = self._extract_function_name_from_hunk(raw)
+                current_struct = ""
+                hunk_index += 1
+                continue
+            if raw.startswith(("index ", "new file mode", "deleted file mode", "similarity index", "rename ")):
+                continue
+            if raw.startswith(("+++", "---")):
+                continue
+
+            marker = raw[0] if raw else ""
+            body = raw[1:] if marker in (" ", "+", "-") else raw
+            stripped = body.strip()
+
+            struct_match = re.match(r"^\s*struct\s+([A-Za-z_]\w*)\s*\{", body)
+            if struct_match:
+                current_struct = struct_match.group(1)
+            elif re.match(r"^\s*};\s*$", body):
+                current_struct = ""
+
+            if marker not in ("+", "-"):
+                continue
+            if not stripped:
+                continue
+
+            entries.append({
+                "sign": marker,
+                "body": stripped,
+                "file": current_file,
+                "hunk": current_hunk,
+                "function": current_func,
+                "struct": current_struct,
+                "hunk_key": f"{current_file}#{hunk_index}",
+            })
+        return entries
+
+    def _extract_function_name_from_hunk(self, hunk_header: str) -> str:
+        match = re.search(r"@@.*@@\s*(.+)$", hunk_header or "")
+        if not match:
+            return ""
+        sig = match.group(1).strip()
+        func_match = re.search(r"\b([A-Za-z_]\w*)\s*\(", sig)
+        return func_match.group(1) if func_match else ""
+
+    def _extract_member_paths(self, body: str) -> List[str]:
+        pattern = re.compile(r"\b[A-Za-z_]\w*(?:(?:->|\.)[A-Za-z_]\w+)+")
+        return sorted(set(pattern.findall(body or "")))
+
+    def _normalize_object_name(self, value: str) -> str:
+        text = (value or "").strip()
+        text = re.sub(r"^\(.*?\)", "", text).strip()
+        text = text.lstrip("&*").strip()
+        return text[:80]
+
+    def _truncate_list(self, values: List[str], limit: int = 8) -> List[str]:
+        return list(dict.fromkeys([v for v in values if v]))[:limit]
+
+    def _analyze_locking_sync(self, entries: List[Dict[str, Any]], hunk_groups: Dict[str, List[Dict[str, Any]]]) -> Dict[str, Any]:
+        lock_re = re.compile(
+            r"\b(spin_lock(?:_[A-Za-z0-9_]+)?|spin_unlock(?:_[A-Za-z0-9_]+)?|"
+            r"mutex_lock|mutex_unlock|mutex_trylock|rcu_read_lock|rcu_read_unlock|"
+            r"synchronize_rcu|read_lock|read_unlock|write_lock|write_unlock|"
+            r"down_[A-Za-z0-9_]+|up_[A-Za-z0-9_]+)\s*\(([^)]*)\)"
+        )
+        lock_objects: List[str] = []
+        operation_changes: List[str] = []
+        protected_data: List[str] = []
+        sync_order_clues: List[str] = []
+        evidence: List[str] = []
+        has_added = False
+        has_removed = False
+        lock_hunks = set()
+
+        for entry in entries:
+            match = lock_re.search(entry["body"])
+            if not match:
+                continue
+            op = match.group(1)
+            arg0 = match.group(2).split(",", 1)[0].strip()
+            obj = self._normalize_object_name(arg0)
+            if obj:
+                lock_objects.append(obj)
+            operation_changes.append(f"{entry['sign']}{op}")
+            evidence.append(entry["body"])
+            lock_hunks.add(entry["hunk_key"])
+            has_added = has_added or entry["sign"] == "+"
+            has_removed = has_removed or entry["sign"] == "-"
+
+        for hunk_key in lock_hunks:
+            group = hunk_groups.get(hunk_key, [])
+            member_paths = []
+            for entry in group:
+                member_paths.extend(self._extract_member_paths(entry["body"]))
+            protected_data.extend(member_paths)
+            if any(item["sign"] == "+" for item in group) and any(item["sign"] == "-" for item in group):
+                sync_order_clues.append(group[0].get("function") or group[0].get("file") or hunk_key)
+
+        triggered = bool(operation_changes)
+        return {
+            "triggered": triggered,
+            "risk": "high" if triggered else "none",
+            "lock_objects": self._truncate_list(lock_objects),
+            "operation_changes": self._truncate_list(operation_changes, 12),
+            "protected_data_objects": self._truncate_list(protected_data, 12),
+            "sync_order_changes": self._truncate_list(sync_order_clues),
+            "summary": (
+                f"检测到 {len(operation_changes)} 处锁/同步操作变更"
+                + ("，同时存在加锁/解锁增删" if has_added and has_removed else "")
+            ) if triggered else "未检测到锁/同步语义变化",
+            "evidence_lines": self._truncate_list(evidence, 6),
+        }
+
+    def _analyze_lifecycle_resource(self, entries: List[Dict[str, Any]]) -> Dict[str, Any]:
+        lifecycle_re = re.compile(
+            r"\b(kmalloc|kzalloc|kvzalloc|alloc|free|kfree|kvfree|get|put|"
+            r"refcount_inc|refcount_dec|kref_get|kref_put|init|deinit|destroy|cleanup)\b"
+        )
+        hold_objects: List[str] = []
+        release_sequences: List[str] = []
+        rollback_paths: List[str] = []
+        categories = set()
+        evidence: List[str] = []
+
+        for entry in entries:
+            body = entry["body"]
+            match = lifecycle_re.search(body)
+            if not match:
+                if re.search(r"\bgoto\s+(err|out|fail|free|put)\w*\b", body):
+                    rollback_paths.append(body)
+                    evidence.append(body)
+                continue
+            token = match.group(1)
+            categories.add(token)
+            evidence.append(body)
+            assign_match = re.match(r"([A-Za-z_]\w*(?:->\w+)?)\s*=\s*\w+", body)
+            call_match = re.search(r"\(([^)]*)\)", body)
+            obj = ""
+            if assign_match:
+                obj = assign_match.group(1)
+            elif call_match:
+                obj = call_match.group(1).split(",", 1)[0].strip()
+            obj = self._normalize_object_name(obj)
+            if obj:
+                hold_objects.append(obj)
+            if token in ("free", "kfree", "kvfree", "put", "kref_put", "destroy", "cleanup"):
+                release_sequences.append(body)
+            if re.search(r"\bgoto\s+(err|out|fail|free|put)\w*\b", body):
+                rollback_paths.append(body)
+
+        triggered = bool(categories or rollback_paths)
+        return {
+            "triggered": triggered,
+            "risk": "high" if triggered else "none",
+            "categories": self._truncate_list(sorted(categories), 12),
+            "ownership_objects": self._truncate_list(hold_objects, 10),
+            "release_order_clues": self._truncate_list(release_sequences, 6),
+            "rollback_paths": self._truncate_list(rollback_paths, 6),
+            "summary": (
+                "检测到对象生命周期/资源管理变化，需核对持有关系、释放顺序与错误回滚"
+                if triggered else "未检测到明显生命周期变化"
+            ),
+            "evidence_lines": self._truncate_list(evidence, 6),
+        }
+
+    def _analyze_state_machine(self, entries: List[Dict[str, Any]]) -> Dict[str, Any]:
+        condition_changes: List[str] = []
+        return_changes: List[str] = []
+        error_codes: List[str] = []
+        state_fields: List[str] = []
+        callback_ops: List[str] = []
+        evidence: List[str] = []
+        state_re = re.compile(r"\b([A-Za-z_]\w*(?:->|\.)?(?:state|status|mode|flags?|enabled|disabled|phase|step))\b")
+
+        for entry in entries:
+            body = entry["body"]
+            hit = False
+            if re.search(r"^\s*(if|else\s+if|switch)\s*\(", body):
+                condition_changes.append(body)
+                hit = True
+            if re.search(r"\b(return|goto|break|continue)\b", body):
+                return_changes.append(body)
+                hit = True
+            error_codes.extend(re.findall(r"-E[A-Z0-9_]+", body))
+            state_fields.extend(state_re.findall(body))
+            if "ops->" in body or "->ops->" in body or ".ops->" in body:
+                callback_ops.append(body)
+                hit = True
+            if hit:
+                evidence.append(body)
+
+        triggered = bool(condition_changes or return_changes or state_fields or callback_ops or error_codes)
+        high_risk = bool(condition_changes and (state_fields or error_codes))
+        return {
+            "triggered": triggered,
+            "risk": "high" if high_risk else ("warn" if triggered else "none"),
+            "condition_changes": self._truncate_list(condition_changes, 6),
+            "return_path_changes": self._truncate_list(return_changes, 6),
+            "error_codes": self._truncate_list(error_codes, 8),
+            "state_fields": self._truncate_list(state_fields, 8),
+            "callback_or_ops_changes": self._truncate_list(callback_ops, 6),
+            "summary": (
+                "检测到条件/返回/状态字段变化，可能影响状态迁移与进入退出条件"
+                if triggered else "未检测到明显状态机/控制流专项变化"
+            ),
+            "evidence_lines": self._truncate_list(evidence, 6),
+        }
+
+    def _analyze_struct_field_data_path(self, entries: List[Dict[str, Any]], hunk_groups: Dict[str, List[Dict[str, Any]]]) -> Dict[str, Any]:
+        field_decl_re = re.compile(r"(?:struct\s+\w+\s+)?(?:const\s+)?[A-Za-z_][\w\s\*]+\s+([A-Za-z_]\w*)\s*(?:\[[^\]]+\])?\s*;")
+        field_defs: Dict[str, Dict[str, List[str]]] = {}
+        access_info: Dict[str, Dict[str, Any]] = {}
+        evidence: List[str] = []
+
+        for entry in entries:
+            body = entry["body"]
+            in_struct = entry.get("struct")
+            hunk_group = hunk_groups.get(entry["hunk_key"], [])
+            has_lock_context = any(
+                re.search(r"\b(lock|unlock|rcu_read_lock|rcu_read_unlock)\b", item["body"])
+                for item in hunk_group
+            )
+            has_error_context = any(
+                re.search(r"\b(goto\s+(err|out|fail)|return\s+-E[A-Z0-9_]+)\b", item["body"])
+                for item in hunk_group
+            )
+
+            if in_struct:
+                match = field_decl_re.search(body)
+                if match:
+                    field_name = match.group(1)
+                    bucket = field_defs.setdefault(field_name, {"added": [], "removed": [], "structs": []})
+                    bucket["added" if entry["sign"] == "+" else "removed"].append(body)
+                    if in_struct:
+                        bucket["structs"].append(in_struct)
+                    evidence.append(body)
+
+            for path in self._extract_member_paths(body):
+                field_name = path.split("->")[-1].split(".")[-1]
+                info = access_info.setdefault(field_name, {
+                    "field": field_name,
+                    "access_paths": set(),
+                    "read_functions": set(),
+                    "write_functions": set(),
+                    "lock_protected": False,
+                    "state_related": False,
+                    "error_path_related": False,
+                })
+                info["access_paths"].add(path)
+                func_name = entry.get("function") or entry.get("file") or ""
+                if "=" in body and path in body.split("=", 1)[0]:
+                    info["write_functions"].add(func_name)
+                else:
+                    info["read_functions"].add(func_name)
+                info["lock_protected"] = info["lock_protected"] or has_lock_context
+                info["state_related"] = info["state_related"] or bool(re.search(r"\b(state|status|mode|flags?)\b", body))
+                info["error_path_related"] = info["error_path_related"] or has_error_context
+
+        field_changes = []
+        for field_name, change in field_defs.items():
+            change_type = "type_change"
+            if change["added"] and not change["removed"]:
+                change_type = "added"
+            elif change["removed"] and not change["added"]:
+                change_type = "removed"
+            field_changes.append({
+                "field": field_name,
+                "change_type": change_type,
+                "structs": self._truncate_list(change.get("structs", []), 4),
+                "added_lines": self._truncate_list(change.get("added", []), 2),
+                "removed_lines": self._truncate_list(change.get("removed", []), 2),
+            })
+
+        field_usages = []
+        for field_name, info in access_info.items():
+            field_usages.append({
+                "field": field_name,
+                "access_paths": self._truncate_list(sorted(info["access_paths"]), 6),
+                "read_functions": self._truncate_list(sorted(info["read_functions"]), 6),
+                "write_functions": self._truncate_list(sorted(info["write_functions"]), 6),
+                "lock_protected": bool(info["lock_protected"]),
+                "state_related": bool(info["state_related"]),
+                "error_path_related": bool(info["error_path_related"]),
+            })
+
+        triggered = bool(field_changes or field_usages)
+        high_risk = bool(field_changes) or any(item["lock_protected"] for item in field_usages)
+        return {
+            "triggered": triggered,
+            "risk": "high" if high_risk else ("warn" if triggered else "none"),
+            "field_changes": field_changes[:10],
+            "field_usages": field_usages[:12],
+            "summary": (
+                "检测到结构体字段或数据路径变化，需核对字段定义、读写位置与锁保护域"
+                if triggered else "未检测到结构体字段/数据路径专项变化"
+            ),
+            "evidence_lines": self._truncate_list(evidence, 6),
+        }
+
+    def _analyze_error_path(self, entries: List[Dict[str, Any]]) -> Dict[str, Any]:
+        goto_err: List[str] = []
+        cleanup_logic: List[str] = []
+        error_codes: List[str] = []
+        recovery_changes: List[str] = []
+        evidence: List[str] = []
+
+        for entry in entries:
+            body = entry["body"]
+            hit = False
+            if re.search(r"\bgoto\s+(err|out|fail|free|put)\w*\b", body):
+                goto_err.append(body)
+                hit = True
+            if re.search(r"\b(cleanup|free|kfree|put|unlock|release|destroy)\b", body):
+                cleanup_logic.append(body)
+                hit = True
+            codes = re.findall(r"-E[A-Z0-9_]+", body)
+            if codes:
+                error_codes.extend(codes)
+                hit = True
+            if re.search(r"\b(reset|restore|rollback|unwind)\b", body):
+                recovery_changes.append(body)
+                hit = True
+            if hit:
+                evidence.append(body)
+
+        triggered = bool(goto_err or cleanup_logic or error_codes or recovery_changes)
+        return {
+            "triggered": triggered,
+            "risk": "warn" if triggered else "none",
+            "goto_err_paths": self._truncate_list(goto_err, 6),
+            "cleanup_changes": self._truncate_list(cleanup_logic, 6),
+            "error_codes": self._truncate_list(error_codes, 8),
+            "recovery_changes": self._truncate_list(recovery_changes, 6),
+            "summary": (
+                "检测到错误路径/清理逻辑变化，需确认失败后的状态恢复与清理完整性"
+                if triggered else "未检测到错误路径专项变化"
+            ),
+            "evidence_lines": self._truncate_list(evidence, 6),
+        }

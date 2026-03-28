@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """HTTP API 网关：将 analyze / validate / batch-validate 映射为 URL 接口。"""
 
+import copy
 import json
 import logging
 import traceback
@@ -9,7 +10,11 @@ from typing import Any, Callable, Dict
 
 from core.config import ConfigLoader
 from core.models import CveInfo
-from core.output_serializers import aggregate_l0_l5_levels, build_l0_l5_view
+from core.output_serializers import (
+    aggregate_batch_validate_summary,
+    aggregate_l0_l5_levels,
+    build_l0_l5_view,
+)
 
 import cli
 
@@ -70,7 +75,23 @@ def _build_mainline_cve_info(payload: Dict[str, Any], cve_id: str) -> CveInfo:
     )
 
 
+def _config_with_request_overrides(config, payload: Dict[str, Any]):
+    cfg = copy.deepcopy(config)
+    if not getattr(cfg, "policy", None):
+        return cfg
+
+    p2_enabled = payload.get("p2_enabled")
+    if p2_enabled is None and "enable_p2" in payload:
+        p2_enabled = bool(payload.get("enable_p2"))
+    if p2_enabled is None and payload.get("disable_p2") is True:
+        p2_enabled = False
+    if p2_enabled is not None:
+        cfg.policy.special_risk_rules_enabled = bool(p2_enabled)
+    return cfg
+
+
 def _default_analyze_handler(payload: Dict[str, Any], config):
+    cfg = _config_with_request_overrides(config, payload)
     target = _coerce_target(payload)
     if not target:
         raise ValueError("missing target_version")
@@ -87,7 +108,7 @@ def _default_analyze_handler(payload: Dict[str, Any], config):
             cli.run_analyze_payload(
                 cve_id,
                 target_version=target,
-                config=config,
+                config=cfg,
                 enable_dryrun=enable_dryrun,
                 deep=deep,
             )
@@ -96,6 +117,7 @@ def _default_analyze_handler(payload: Dict[str, Any], config):
     return {
         "ok": True,
         "operation": "analyze",
+        "p2_enabled": bool(getattr(cfg.policy, "special_risk_rules_enabled", True)) if getattr(cfg, "policy", None) else True,
         "results": results,
         "summary": {
             "total": len(results),
@@ -104,6 +126,7 @@ def _default_analyze_handler(payload: Dict[str, Any], config):
 
 
 def _default_validate_handler(payload: Dict[str, Any], config):
+    cfg = _config_with_request_overrides(config, payload)
     target = _coerce_target(payload)
     if not target:
         raise ValueError("missing target_version")
@@ -120,13 +143,15 @@ def _default_validate_handler(payload: Dict[str, Any], config):
     cve_info = _build_mainline_cve_info(payload, cve_id)
 
     result = cli._run_single_validate(
-        config, cve_id, target, known_fix, known_prereqs,
+        cfg, cve_id, target, known_fix, known_prereqs,
         show_stages=False, cve_info=cve_info, deep=deep)
     result["l0_l5"] = build_l0_l5_view(result)
+    result["p2_enabled"] = bool(getattr(cfg.policy, "special_risk_rules_enabled", True)) if getattr(cfg, "policy", None) else True
     return result
 
 
 def _default_batch_validate_handler(payload: Dict[str, Any], config):
+    cfg = _config_with_request_overrides(config, payload)
     target = _coerce_target(payload)
     if not target:
         raise ValueError("missing target_version")
@@ -135,7 +160,7 @@ def _default_batch_validate_handler(payload: Dict[str, Any], config):
         raise ValueError("missing items")
 
     deep = bool(payload.get("deep", False))
-    git_mgr = cli._make_git_mgr(config, target)
+    git_mgr = cli._make_git_mgr(cfg, target)
     results = []
     errors = []
 
@@ -163,7 +188,7 @@ def _default_batch_validate_handler(payload: Dict[str, Any], config):
 
         try:
             result = cli._run_single_validate(
-                config, cve_id, target, known_fix, known_prereqs,
+                cfg, cve_id, target, known_fix, known_prereqs,
                 git_mgr=git_mgr, show_stages=False, cve_info=cve_info,
                 deep=deep,
             )
@@ -174,9 +199,13 @@ def _default_batch_validate_handler(payload: Dict[str, Any], config):
             errors.append({"index": idx, "cve_id": cve_id, "reason": str(exc)})
 
     l0_l5_summary = aggregate_l0_l5_levels(results)
+    batch_summary = aggregate_batch_validate_summary([
+        cli._prepare_validate_json(result) for result in results
+    ])
     return {
         "ok": True,
         "operation": "batch-validate",
+        "p2_enabled": bool(getattr(cfg.policy, "special_risk_rules_enabled", True)) if getattr(cfg, "policy", None) else True,
         "results": results,
         "errors": errors,
         "summary": {
@@ -185,6 +214,7 @@ def _default_batch_validate_handler(payload: Dict[str, Any], config):
             "error": len(errors),
         },
         "l0_l5_summary": l0_l5_summary,
+        "batch_summary": batch_summary,
     }
 
 

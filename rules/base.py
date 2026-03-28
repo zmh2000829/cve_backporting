@@ -22,6 +22,7 @@ class RuleContext:
     prerequisite_patches: List[PrerequisitePatch] = field(default_factory=list)
     dependency_details: Optional[DependencyAnalysisDetails] = None
     critical_structure_hits: List[str] = field(default_factory=list)
+    special_risk_report: Dict = field(default_factory=dict)
     llm_enabled: bool = False
     base_level: str = "L5"
     base_method: str = ""

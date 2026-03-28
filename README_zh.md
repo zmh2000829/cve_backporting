@@ -359,7 +359,8 @@ python cli.py server --host 127.0.0.1 --port 8000 --config config.yaml
   "known_prereqs": "abc111,def222",
   "mainline_fix": "aaabbb000111",
   "mainline_intro": "bbb222ccc333",
-  "deep": false
+  "deep": false,
+  "p2_enabled": true
 }
 ```
 
@@ -377,6 +378,7 @@ python cli.py server --host 127.0.0.1 --port 8000 --config config.yaml
 {
   "target": "5.10-hulk",
   "deep": false,
+  "p2_enabled": true,
   "items": [
     {
       "cve_id": "CVE-2024-26633",
@@ -394,7 +396,7 @@ python cli.py server --host 127.0.0.1 --port 8000 --config config.yaml
 }
 ```
 
-返回结果包含 `results` / `errors` / `summary`：
+返回结果包含 `results` / `errors` / `summary`，并补充与 CLI 同口径的 `batch_summary`：
 
 ```json
 {
@@ -407,7 +409,24 @@ python cli.py server --host 127.0.0.1 --port 8000 --config config.yaml
       "total": 0,
       "success": 0,
       "error": 0
-    }
+    },
+    "p2_enabled": true,
+    "batch_summary": {
+      "l0_l5": {},
+      "deterministic_exact_match": {
+        "count": 0,
+        "rate": 0.0
+      },
+      "critical_structure_change": {
+        "count": 0,
+        "rate": 0.0
+      },
+      "manual_prerequisite_analysis": {
+        "count": 0,
+        "rate": 0.0
+      }
+    },
+    "results": []
   }
 }
 ```

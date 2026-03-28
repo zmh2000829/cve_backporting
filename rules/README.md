@@ -22,7 +22,7 @@
 当前 Python 模块：
 
 - `base.py`：`RuleContext` / `PolicyRule` / `RuleRegistry` / `LevelPolicyRegistry`
-- `default_rules.py`：默认大改动、关键结构、调用链、L1 API surface 规则
+- `default_rules.py`：默认大改动、关键结构、调用链、L1 API surface、P2 专项高风险规则
 - `level_policies.py`：L0-L5 默认场景策略与 `level_floor` 抬升逻辑
 
 插件约定：
