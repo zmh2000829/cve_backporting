@@ -70,6 +70,14 @@
 - 可应用性判定（成功/失败原因）
 - 开发者动作建议（下一步怎么做）
 
+同时，`analyze / validate / batch-validate` 现在统一输出顶层 `analysis_framework`：
+
+- `process`：分析过程骨架
+- `evidence`：证据骨架
+- `conclusion`：结论骨架
+
+用户可以先看这三部分，再决定是否继续下钻 `level_decision` 和 `rule_hits`。
+
 ---
 
 ## 项目优势提炼（可直接用于汇报）
@@ -230,6 +238,12 @@ Patch Input
 - `rules/level_policies.py`：L0-L5 默认策略与 `level_floor` 抬升逻辑
 - `rules/policy.example.yaml`：规则配置示例
 
+当前规则进一步收敛为三类：
+
+- `admission`：支持“可直接回移”的正向准入规则
+- `veto`：阻止误入低级别或阻止直接回移的否决规则
+- `risk_profile`：锁、生命周期、状态机、结构体字段、错误路径等高风险画像规则
+
 后续业务规则可直接放到 `rules/*.py`，并通过 `policy.extra_rule_modules` 以插件方式加载。
 
 ---
@@ -349,6 +363,14 @@ python cli.py server --host 127.0.0.1 --port 8000 --config config.yaml
 
 `cve_id`、`cves`、`cve_ids` 会被合并并统一处理。
 
+关键返回字段：
+
+- `analysis_framework.process`
+- `analysis_framework.evidence`
+- `analysis_framework.conclusion`
+- `level_decision`
+- `validation_details`
+
 ### `POST /api/validate`
 
 ```json
@@ -371,6 +393,16 @@ python cli.py server --host 127.0.0.1 --port 8000 --config config.yaml
   "known_prereqs": ["abc111", "def222"]
 }
 ```
+
+关键返回字段：
+
+- `analysis_framework.process`
+- `analysis_framework.evidence`
+- `analysis_framework.conclusion`
+- `l0_l5.current_level`
+- `l0_l5.base_level`
+- `level_decision`
+- `validation_details`
 
 ### `POST /api/batch-validate`
 
@@ -426,10 +458,21 @@ python cli.py server --host 127.0.0.1 --port 8000 --config config.yaml
         "rate": 0.0
       }
     },
-    "results": []
+    "l0_l5_summary": {
+      "levels": ["L0", "L1", "L2", "L3", "L4", "L5"],
+      "current_level_distribution": {},
+      "base_level_distribution": {}
+    }
   }
 }
 ```
+
+`results` 中每条结果也都会包含：
+
+- `analysis_framework`
+- `l0_l5`
+- `level_decision`
+- `validation_details`
 
 ---
 

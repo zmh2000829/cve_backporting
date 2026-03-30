@@ -164,6 +164,7 @@ def serialize_validation_details(validation_details) -> dict:
         "rule_profile": getattr(validation_details, "rule_profile", ""),
         "rule_version": getattr(validation_details, "rule_version", ""),
         "strategy_buckets": getattr(validation_details, "strategy_buckets", {}),
+        "decision_skeleton": getattr(validation_details, "decision_skeleton", {}),
     }
 
 
@@ -197,6 +198,18 @@ def collect_rules_metadata(policy_config, level_decision=None, validation_detail
     if serialized_level:
         payload["level_decision"] = serialized_level
         payload["rule_hits"] = list(serialized_level.get("rule_hits", []) or [])
+        payload["rule_class_summary"] = {
+            "admission": sum(1 for hit in payload["rule_hits"] if hit.get("rule_class") == "admission"),
+            "low_level_veto": sum(1 for hit in payload["rule_hits"] if hit.get("rule_class") == "low_level_veto"),
+            "direct_backport_veto": sum(1 for hit in payload["rule_hits"] if hit.get("rule_class") == "direct_backport_veto"),
+            "risk_profile": sum(1 for hit in payload["rule_hits"] if hit.get("rule_class") == "risk_profile"),
+        }
+        payload["rule_taxonomy"] = {
+            "admission": "用于支持可直接回移的正向准入规则",
+            "low_level_veto": "用于阻止误入 L0/L1 等低级别处理区的否决规则",
+            "direct_backport_veto": "用于阻止“可直接回移”结论的否决规则",
+            "risk_profile": "用于识别锁、生命周期、状态机、结构体字段、错误路径等高风险画像规则",
+        }
 
     return payload
 
@@ -205,8 +218,10 @@ def aggregate_strategy_buckets(results: list) -> dict:
     level_counter = Counter()
     dependency_counter = Counter()
     rule_type_counter = Counter()
+    rule_class_counter = Counter()
     level_by_dependency = Counter()
     level_by_rule_type = Counter()
+    level_by_rule_class = Counter()
 
     for result in results or []:
         if not isinstance(result, dict):
@@ -216,6 +231,7 @@ def aggregate_strategy_buckets(results: list) -> dict:
         level = strategy_buckets.get("level") or (result.get("level_decision") or {}).get("level", "")
         dependency_bucket = strategy_buckets.get("dependency_bucket", "")
         rule_type_bucket = strategy_buckets.get("rule_type_bucket", []) or []
+        rule_class_bucket = strategy_buckets.get("rule_class_bucket", []) or []
 
         if level:
             level_counter[level] += 1
@@ -230,13 +246,22 @@ def aggregate_strategy_buckets(results: list) -> dict:
             rule_type_counter[rule_type] += int(count or 0)
             if level:
                 level_by_rule_type[f"{rule_type}:{level}"] += int(count or 0)
+        for item in rule_class_bucket:
+            if not isinstance(item, (list, tuple)) or len(item) != 2:
+                continue
+            rule_class, count = item[0], item[1]
+            rule_class_counter[rule_class] += int(count or 0)
+            if level:
+                level_by_rule_class[f"{rule_class}:{level}"] += int(count or 0)
 
     return {
         "level_distribution": dict(sorted(level_counter.items())),
         "dependency_distribution": dict(sorted(dependency_counter.items())),
         "rule_type_distribution": dict(sorted(rule_type_counter.items())),
+        "rule_class_distribution": dict(sorted(rule_class_counter.items())),
         "level_by_dependency": dict(sorted(level_by_dependency.items())),
         "level_by_rule_type": dict(sorted(level_by_rule_type.items())),
+        "level_by_rule_class": dict(sorted(level_by_rule_class.items())),
     }
 
 

@@ -58,6 +58,8 @@ class PolicyEngineRegressionTests(unittest.TestCase):
         self.assertIn("L0", vd.level_decision.strategy)
         self.assertTrue(any(h.get("rule_id") == "direct_backport_candidate" for h in vd.level_decision.rule_hits))
         self.assertEqual(vd.strategy_buckets.get("dependency_bucket"), "independent")
+        self.assertEqual(vd.decision_skeleton["conclusion"]["direct_backport"]["status"], "direct")
+        self.assertIn("admission_rules", vd.decision_skeleton["evidence"])
 
     def test_strict_critical_structure_promotes_out_of_l0(self):
         diff = """diff --git a/lock.c b/lock.c
@@ -75,6 +77,8 @@ class PolicyEngineRegressionTests(unittest.TestCase):
         self.assertEqual(vd.level_decision.level, "L3")
         self.assertFalse(vd.level_decision.harmless)
         self.assertTrue(any("mutex" in m.lower() or "关键" in m for m in vd.warnings))
+        self.assertIn("b", vd.decision_skeleton["evidence"]["lock_objects"])
+        self.assertEqual(vd.decision_skeleton["conclusion"]["risk"]["status"], "high")
 
     def test_large_change_warning(self):
         body = "\n".join(f"- old{i}\n+ new{i}" for i in range(50))
@@ -209,6 +213,8 @@ int foo(void) {
         self.assertEqual(vd.level_decision.level, "L3")
         self.assertTrue(any(h.get("rule_id") == "prerequisite_required" for h in vd.level_decision.rule_hits))
         self.assertEqual(vd.strategy_buckets.get("dependency_bucket"), "required")
+        self.assertTrue(any(h.get("rule_class") == "direct_backport_veto" for h in vd.level_decision.rule_hits))
+        self.assertEqual(vd.decision_skeleton["conclusion"]["prerequisite"]["status"], "required")
 
     def test_independent_patch_rule_when_no_prereq(self):
         diff = """diff --git a/a.c b/a.c
@@ -229,6 +235,7 @@ int foo(void) {
         self.assertTrue(any(h.get("rule_id") == "independent_patch" for h in vd.level_decision.rule_hits))
         self.assertTrue(any("关联补丁判断" in s for s in vd.workflow_steps))
         self.assertEqual(vd.strategy_buckets.get("dependency_bucket"), "independent")
+        self.assertEqual(vd.decision_skeleton["conclusion"]["prerequisite"]["status"], "independent")
 
     def test_single_line_high_impact_rule(self):
         diff = """diff --git a/lock.c b/lock.c
@@ -243,6 +250,27 @@ int foo(void) {
         )
         self.assertEqual(vd.level_decision.level, "L3")
         self.assertTrue(any(h.get("rule_id") == "single_line_high_impact" for h in vd.level_decision.rule_hits))
+        risk_evidence = vd.decision_skeleton["evidence"]
+        self.assertIn("foo", risk_evidence["lock_objects"])
+        self.assertTrue(any(h.get("rule_class") == "risk_profile" for h in vd.level_decision.rule_hits))
+
+    def test_risk_markers_capture_fields_states_and_error_nodes(self):
+        diff = """diff --git a/net.c b/net.c
+@@ -1,5 +1,5 @@
+-if (ctx->state == OLD_STATE)
++if (ctx->state == NEW_STATE)
+-    return -EINVAL;
++    goto err_unlock;
+"""
+        p = _patch(diff, ["net.c"])
+        dr = DryRunResult(applies_cleanly=True, apply_method="context-C1")
+        vd = PolicyEngine(PolicyConfig(profile="default"), llm_enabled=False).evaluate(
+            p, dr, _MockGit({}), "any"
+        )
+        evidence = vd.decision_skeleton["evidence"]
+        self.assertIn("ctx->state", evidence["fields"])
+        self.assertTrue(any("state" in item.lower() for item in evidence["state_points"]))
+        self.assertTrue(any("err_unlock" in item for item in evidence["error_path_nodes"]))
 
     def test_profile_conservative_presets_exist(self):
         self.assertIn("conservative", POLICY_PROFILE_PRESETS)

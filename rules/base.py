@@ -1,7 +1,7 @@
 """规则与级别策略的基础抽象。"""
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from core.models import (
     DependencyAnalysisDetails,
@@ -23,6 +23,7 @@ class RuleContext:
     dependency_details: Optional[DependencyAnalysisDetails] = None
     critical_structure_hits: List[str] = field(default_factory=list)
     special_risk_report: Dict = field(default_factory=dict)
+    risk_markers: Dict[str, List[str]] = field(default_factory=dict)
     llm_enabled: bool = False
     base_level: str = "L5"
     base_method: str = ""
@@ -32,6 +33,8 @@ class PolicyRule:
     rule_id = "base"
     name = "BaseRule"
     severity = "info"
+    rule_class = "risk_profile"
+    rule_scope = "risk"
 
     def evaluate(self, ctx: RuleContext) -> Optional[Dict]:
         raise NotImplementedError
@@ -50,12 +53,16 @@ class RuleRegistry:
             try:
                 out = rule.evaluate(ctx)
                 if out:
+                    out.setdefault("rule_class", getattr(rule, "rule_class", "risk_profile"))
+                    out.setdefault("rule_scope", getattr(rule, "rule_scope", "risk"))
                     hits.append(out)
             except Exception as exc:
                 hits.append({
                     "rule_id": f"{rule.rule_id}_error",
                     "name": rule.name,
                     "severity": "warn",
+                    "rule_class": getattr(rule, "rule_class", "risk_profile"),
+                    "rule_scope": getattr(rule, "rule_scope", "risk"),
                     "level_floor": "L2",
                     "message": f"规则异常: {exc}",
                     "evidence": {},

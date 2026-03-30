@@ -89,6 +89,7 @@ class PolicyEngine:
         impacts = self._analyze_function_impacts(patch, funcs, git_mgr, target_version, path_mapper)
         critical_hits = self._scan_critical_structure_hits(patch.diff_code or "")
         special_risk_report = self._build_special_risk_report(patch.diff_code or "")
+        risk_markers = self._extract_risk_markers(patch.diff_code or "")
 
         ctx = RuleContext(
             patch=patch,
@@ -100,6 +101,7 @@ class PolicyEngine:
             dependency_details=dependency_details,
             critical_structure_hits=critical_hits,
             special_risk_report=special_risk_report,
+            risk_markers=risk_markers,
             llm_enabled=self.llm_enabled,
             base_level=base_level,
             base_method=base_method,
@@ -125,6 +127,10 @@ class PolicyEngine:
         ]
         warnings = [hit["message"] for hit in rule_hits if hit.get("severity") in ("warn", "high")]
         strategy_buckets = self._build_strategy_buckets(level_decision, rule_hits, prerequisite_patches, special_risk_report)
+        decision_skeleton = self._build_decision_skeleton(
+            steps, level_decision, rule_hits, prerequisite_patches, impacts, critical_hits, risk_markers, special_risk_report
+        )
+        strategy_buckets = self._build_strategy_buckets(level_decision, rule_hits, prerequisite_patches, special_risk_report)
 
         return ValidationDetails(
             workflow_steps=steps,
@@ -135,6 +141,7 @@ class PolicyEngine:
             rule_profile=getattr(self.config, "profile", "default") if self.config else "default",
             rule_version="v2",
             strategy_buckets=strategy_buckets,
+            decision_skeleton=decision_skeleton,
         )
 
     def _summarize_prerequisites(self, prerequisite_patches, dependency_details) -> str:
@@ -221,9 +228,12 @@ class PolicyEngine:
         special_risk_report: Dict[str, Any],
     ) -> Dict:
         rule_type_counter: Dict[str, int] = {}
+        rule_class_counter: Dict[str, int] = {}
         for hit in rule_hits or []:
             rule_type = self._classify_rule_type(hit.get("rule_id", ""))
             rule_type_counter[rule_type] = rule_type_counter.get(rule_type, 0) + 1
+            rule_class = self._classify_rule_class(hit)
+            rule_class_counter[rule_class] = rule_class_counter.get(rule_class, 0) + 1
 
         prereqs = list(prerequisite_patches or [])
         strong = sum(1 for p in prereqs if getattr(p, "grade", "") == "strong")
@@ -244,6 +254,7 @@ class PolicyEngine:
             "level": level_decision.level,
             "base_level": level_decision.base_level,
             "rule_type_bucket": sorted(rule_type_counter.items()),
+            "rule_class_bucket": sorted(rule_class_counter.items()),
             "dependency_bucket": dependency_bucket,
             "special_risk_enabled": bool((special_risk_report or {}).get("enabled", True)),
             "special_risk_sections": list(special_summary.get("triggered_sections") or []),
@@ -274,6 +285,152 @@ class PolicyEngine:
         if rule_id in ("single_line_high_impact",):
             return "high_impact_single_line"
         return "other"
+
+    def _classify_rule_class(self, hit: Dict) -> str:
+        rule_class = (hit or {}).get("rule_class", "")
+        if rule_class in ("admission", "low_level_veto", "direct_backport_veto", "risk_profile"):
+            return rule_class
+        return "risk_profile"
+
+    def _compact_rule_hit(self, hit: Dict) -> Dict:
+        evidence = (hit or {}).get("evidence", {}) or {}
+        return {
+            "rule_id": hit.get("rule_id", ""),
+            "rule_class": self._classify_rule_class(hit),
+            "rule_scope": hit.get("rule_scope", ""),
+            "severity": hit.get("severity", ""),
+            "level_floor": hit.get("level_floor", ""),
+            "message": hit.get("message", ""),
+            "evidence": evidence,
+        }
+
+    def _build_decision_skeleton(
+        self,
+        steps: List[str],
+        level_decision: LevelDecision,
+        rule_hits: List[Dict],
+        prerequisite_patches,
+        impacts: List[FunctionImpact],
+        critical_hits: List[str],
+        risk_markers: Dict[str, List[str]],
+        special_risk_report: Dict[str, Any],
+    ) -> Dict:
+        prereqs = list(prerequisite_patches or [])
+        admission_hits = [
+            self._compact_rule_hit(hit)
+            for hit in (rule_hits or [])
+            if self._classify_rule_class(hit) == "admission"
+        ]
+        low_level_veto_hits = [
+            self._compact_rule_hit(hit)
+            for hit in (rule_hits or [])
+            if self._classify_rule_class(hit) == "low_level_veto"
+        ]
+        direct_backport_veto_hits = [
+            self._compact_rule_hit(hit)
+            for hit in (rule_hits or [])
+            if self._classify_rule_class(hit) == "direct_backport_veto"
+        ]
+        risk_hits = [
+            self._compact_rule_hit(hit)
+            for hit in (rule_hits or [])
+            if self._classify_rule_class(hit) == "risk_profile"
+        ]
+
+        strong = sum(1 for p in prereqs if getattr(p, "grade", "") == "strong")
+        medium = sum(1 for p in prereqs if getattr(p, "grade", "") == "medium")
+        weak = sum(1 for p in prereqs if getattr(p, "grade", "") not in ("strong", "medium"))
+
+        if level_decision.level == "L0" and admission_hits and not low_level_veto_hits and not direct_backport_veto_hits and not prereqs:
+            direct_status = "direct"
+        elif not prereqs and level_decision.level in ("L0", "L1"):
+            direct_status = "review"
+        else:
+            direct_status = "blocked"
+
+        if strong:
+            prereq_status = "required"
+        elif medium:
+            prereq_status = "recommended"
+        elif weak:
+            prereq_status = "weak_only"
+        else:
+            prereq_status = "independent"
+
+        if critical_hits or any(hit.get("severity") == "high" for hit in risk_hits):
+            risk_status = "high"
+        elif risk_hits or low_level_veto_hits or direct_backport_veto_hits or impacts:
+            risk_status = "attention"
+        else:
+            risk_status = "low"
+
+        return {
+            "process": {
+                "workflow_steps": list(steps or []),
+                "base_level": level_decision.base_level,
+                "base_method": level_decision.base_method,
+                "final_level": level_decision.level,
+            },
+            "evidence": {
+                "admission_rules": admission_hits,
+                "low_level_veto_rules": low_level_veto_hits,
+                "direct_backport_veto_rules": direct_backport_veto_hits,
+                "risk_profile_rules": risk_hits,
+                "prerequisite_patches": [
+                    {
+                        "commit_id": p.commit_id,
+                        "subject": p.subject,
+                        "grade": getattr(p, "grade", ""),
+                        "score": getattr(p, "score", 0.0),
+                    }
+                    for p in prereqs[:8]
+                ],
+                "critical_structure_hits": sorted(set(critical_hits))[:12],
+                "lock_objects": risk_markers.get("lock_objects", [])[:12],
+                "fields": risk_markers.get("fields", [])[:12],
+                "state_points": risk_markers.get("state_points", [])[:12],
+                "error_path_nodes": risk_markers.get("error_path_nodes", [])[:12],
+                "special_risk_report": special_risk_report,
+                "function_impacts": [
+                    {
+                        "function": fi.function,
+                        "impact_score": fi.impact_score,
+                        "callers": fi.callers[:8],
+                        "callees": fi.callees[:8],
+                        "warnings": fi.warnings[:6],
+                    }
+                    for fi in sorted(impacts, key=lambda item: item.impact_score, reverse=True)[:8]
+                ],
+            },
+            "conclusion": {
+                "direct_backport": {
+                    "status": direct_status,
+                    "summary": self._summarize_direct_backport(level_decision, rule_hits, prereqs),
+                },
+                "prerequisite": {
+                    "status": prereq_status,
+                    "summary": self._summarize_prerequisites(prereqs, None if prereqs else True),
+                    "counts": {
+                        "strong": strong,
+                        "medium": medium,
+                        "weak": weak,
+                        "total": len(prereqs),
+                    },
+                },
+                "risk": {
+                    "status": risk_status,
+                    "summary": self._summarize_impact_focus(rule_hits, impacts, critical_hits, special_risk_report),
+                },
+                "final": {
+                    "level": level_decision.level,
+                    "base_level": level_decision.base_level,
+                    "review_mode": level_decision.review_mode,
+                    "next_action": level_decision.next_action,
+                    "harmless": level_decision.harmless,
+                    "reason": level_decision.reason,
+                },
+            },
+        }
 
     def _decide_level(self, base_method: str, base_level: str, rule_hits: List[Dict]) -> LevelDecision:
         final_level = derive_final_level(base_level, rule_hits)
@@ -402,6 +559,59 @@ class PolicyEngine:
                 if keyword in change:
                     hits.append(keyword)
         return hits
+
+    def _extract_risk_markers(self, diff_text: str) -> Dict[str, List[str]]:
+        lock_objects = []
+        fields = []
+        state_points = []
+        error_path_nodes = []
+
+        changes = [
+            line[1:].strip()
+            for line in diff_text.split("\n")
+            if line.startswith(("+", "-")) and not line.startswith(("+++", "---"))
+        ]
+
+        lock_patterns = [
+            re.compile(r"\b(?:spin_lock|spin_unlock|mutex_lock|mutex_unlock|mutex_trylock|mutex_lock_interruptible|read_lock|write_lock|down_write|up_write)\s*\(\s*&?([a-zA-Z_][\w>\.\-]*)"),
+            re.compile(r"\b(?:rcu_assign_pointer|rcu_dereference|refcount_inc|refcount_dec|kref_get|kref_put)\s*\(\s*&?([a-zA-Z_][\w>\.\-]*)"),
+        ]
+        field_pattern = re.compile(r"(?:\b[a-zA-Z_]\w*(?:->|\.)[a-zA-Z_]\w*(?:->|\.)*[a-zA-Z_]\w*)")
+        state_pattern = re.compile(r"\b([a-zA-Z_]\w*(?:state|status|mode|phase|flag|flags))\b", re.IGNORECASE)
+        error_patterns = [
+            re.compile(r"\bgoto\s+([a-zA-Z_]\w*)"),
+            re.compile(r"\breturn\s+(-[A-Z0-9_]+|NULL|ERR_PTR\([^)]+\)|PTR_ERR\([^)]+\))"),
+            re.compile(r"\b(IS_ERR|PTR_ERR|ERR_PTR|WARN_ON|BUG_ON)\b"),
+        ]
+
+        def _append_unique(bucket, value):
+            if value and value not in bucket:
+                bucket.append(value)
+
+        for change in changes:
+            for pattern in lock_patterns:
+                for match in pattern.finditer(change):
+                    _append_unique(lock_objects, match.group(1))
+            for match in field_pattern.finditer(change):
+                _append_unique(fields, match.group(0))
+            for match in state_pattern.finditer(change):
+                _append_unique(state_points, match.group(1))
+            for pattern in error_patterns:
+                for match in pattern.finditer(change):
+                    node = match.group(1)
+                    if node:
+                        _append_unique(error_path_nodes, node)
+            if "goto err" in change or "goto out" in change:
+                _append_unique(error_path_nodes, change)
+            if re.search(r"\bif\s*\(", change) and ("return" in change or "goto" in change):
+                _append_unique(state_points, change)
+
+        return {
+            "lock_objects": lock_objects,
+            "fields": fields,
+            "state_points": state_points,
+            "error_path_nodes": error_path_nodes,
+        }
 
     def _get_file_content(self, git_mgr, target_version: str, fpath: str, path_mapper=None) -> Optional[str]:
         out = git_mgr.run_git(["git", "show", f"HEAD:{fpath}"], target_version, timeout=15)

@@ -117,6 +117,19 @@ Every `validate`, `batch-validate`, and `analyze` JSON output now includes an `a
 - **patch_quality_assessment** — How the generated patch compares to the real fix (validate mode)
 - **developer_action** — Actionable next steps for the developer
 
+### Process + Evidence + Conclusion Skeleton (NEW)
+
+To make results easier to understand, `analyze`, `validate`, and `batch-validate` now expose a unified top-level `analysis_framework` block:
+
+- `process` — what the engine checked, in which order, and what the base/final L0-L5 path was
+- `evidence` — admission rules, veto rules, risk-profile rules, prerequisite patches, critical structure hits, and function-impact evidence
+- `conclusion` — three user-facing answers:
+  - can this patch be directly backported?
+  - do prerequisite patches need to be considered?
+  - is there a large-impact risk?
+
+This block is designed to be the primary user-facing explanation layer. `L0-L5` remains available, but no longer needs to be the first thing users parse.
+
 ### L0-L5 Strategy Orchestration + Pluggable Rules (NEW)
 
 The engine now separates:
@@ -146,6 +159,10 @@ Rule engine highlights:
 - Built-in Python rules now live in [rules/default_rules.py](/Users/junxiaoqiong/Workplace/cve_backporting/rules/default_rules.py)
 - Built-in level policies now live in [rules/level_policies.py](/Users/junxiaoqiong/Workplace/cve_backporting/rules/level_policies.py)
 - Rule config example now lives in [rules/policy.example.yaml](/Users/junxiaoqiong/Workplace/cve_backporting/rules/policy.example.yaml)
+- Rules are now grouped into three classes:
+  - `admission` — positive rules that support direct backport eligibility
+  - `veto` — rules that block low-level/direct classification
+  - `risk_profile` — rules that identify high-risk patterns such as locking, lifetime, state-machine, struct-field, and error-path changes
 - **Large change warning**: changed lines / hunk count thresholds, promotes to at least `L2`
 - **Call-chain propagation + fanout**: caller/callee impact inside the modified-file set, including cross-file edges
 - **Critical structure warning**: lock/RCU/refcount/struct-sensitive changes, promotes to at least `L3`
@@ -153,11 +170,12 @@ Rule engine highlights:
 - **L1 API surface** (`l1_api_surface`): signature-line add/remove mismatch, return-statement delta
 - **Pluggable extension** via `policy.extra_rule_modules` with `register_rules(registry, config=None)`, `RULES`, `register_level_policies(...)`, or `LEVEL_POLICIES`
 
-Validate output (`validation_details.rule_version` **v2**) includes:
+Validate output (`validation_details.rule_version` **v3**) includes:
 - `level_decision` (`level`, `base_level`, `base_method`, `review_mode`, `next_action`, `harmless`, `confidence`, `reason`, `rule_hits`)
 - `function_impacts` (callers/callees/impact score)
 - `dryrun_detail.apply_attempts` (full strategy attempt trace)
-- `validation_details` (workflow steps + warning summary)
+- `validation_details` (workflow steps + warning summary + strategy buckets + `decision_skeleton`)
+- `analysis_framework` (top-level process/evidence/conclusion skeleton)
 
 Regression: `python -m unittest tests.test_policy_engine -v`
 
@@ -318,6 +336,14 @@ Or batch call in one request:
 
 `cve_id`, `cves`, `cve_ids` are all accepted and merged by server.
 
+Key response fields:
+
+- `analysis_framework.process`
+- `analysis_framework.evidence`
+- `analysis_framework.conclusion`
+- `level_decision`
+- `validation_details`
+
 ### `POST /api/validate`
 
 ```json
@@ -340,6 +366,16 @@ Or batch call in one request:
   "known_prereqs": ["abc111", "def222"]
 }
 ```
+
+Key response fields:
+
+- `analysis_framework.process`
+- `analysis_framework.evidence`
+- `analysis_framework.conclusion`
+- `l0_l5.current_level`
+- `l0_l5.base_level`
+- `level_decision`
+- `validation_details`
 
 ### `POST /api/batch-validate`
 
@@ -380,6 +416,11 @@ Response includes per-item result list and summary:
       "error": 0
     },
     "p2_enabled": true,
+    "l0_l5_summary": {
+      "levels": ["L0", "L1", "L2", "L3", "L4", "L5"],
+      "current_level_distribution": {},
+      "base_level_distribution": {}
+    },
     "batch_summary": {
       "l0_l5": {},
       "deterministic_exact_match": {
@@ -394,11 +435,17 @@ Response includes per-item result list and summary:
         "count": 0,
         "rate": 0.0
       }
-    },
-    "results": []
+    }
   }
 }
 ```
+
+Each item inside `results` also contains:
+
+- `analysis_framework`
+- `l0_l5`
+- `level_decision`
+- `validation_details`
 
 **JSON input format** — top-level dict keyed by CVE ID:
 

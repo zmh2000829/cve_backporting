@@ -189,6 +189,7 @@ class ValidationDetails:
     rule_profile: str = "default"
     rule_version: str = "v2"
     strategy_buckets: Dict[str, Any] = field(default_factory=dict)
+    decision_skeleton: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

@@ -161,6 +161,7 @@ def _build_analyze_payload(result, pipe: Pipeline, config, target: str,
         narrative = {}
 
     valid_details = serialize_validation_details(result.validation_details)
+    analysis_framework = valid_details.get("decision_skeleton", {}) if isinstance(valid_details, dict) else {}
 
     payload = {
         "cve_id": result.cve_id,
@@ -177,6 +178,7 @@ def _build_analyze_payload(result, pipe: Pipeline, config, target: str,
             validation_details=valid_details,
         ),
         "analysis_narrative": narrative,
+        "analysis_framework": analysis_framework,
         "recommendations": result.recommendations,
         "analysis_stages": stage_events or [],
         "fix_patch_detail": fix_patch_detail,
@@ -1883,6 +1885,10 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
             "summary": "; ".join(issues) if issues else "验证通过",
             "issues": issues,
             "analysis_narrative": narrative,
+            "analysis_framework": (
+                serialize_validation_details(result.validation_details).get("decision_skeleton", {})
+                if result.validation_details else {}
+            ),
             "fix_patch_detail": fix_patch_detail,
             "dryrun_detail": dryrun_detail,
             "level_decision": serialize_level_decision(result.level_decision),

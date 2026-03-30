@@ -35,6 +35,8 @@ class LargeChangeRule(PolicyRule):
     rule_id = "large_change"
     name = "Large Change Warning"
     severity = "warn"
+    rule_class = "low_level_veto"
+    rule_scope = "low_level"
 
     def __init__(self, line_threshold: int, hunk_threshold: int):
         self.line_threshold = line_threshold
@@ -62,6 +64,8 @@ class CriticalStructureRule(PolicyRule):
     rule_id = "critical_structures"
     name = "Critical Structures Changed"
     severity = "high"
+    rule_class = "risk_profile"
+    rule_scope = "risk"
 
     def evaluate(self, ctx: RuleContext) -> Optional[Dict]:
         if not ctx.critical_structure_hits:
@@ -80,7 +84,14 @@ class CriticalStructureRule(PolicyRule):
             "severity": self.severity,
             "level_floor": "L3",
             "message": "检测到关键结构/锁变更: " + ", ".join(uniq[:6]),
-            "evidence": {"keywords": uniq, "categories": categories},
+            "evidence": {
+                "keywords": uniq,
+                "categories": categories,
+                "lock_objects": ctx.risk_markers.get("lock_objects", [])[:8],
+                "fields": ctx.risk_markers.get("fields", [])[:8],
+                "state_points": ctx.risk_markers.get("state_points", [])[:8],
+                "error_path_nodes": ctx.risk_markers.get("error_path_nodes", [])[:8],
+            },
         }
 
 
@@ -214,6 +225,8 @@ class PrerequisiteRequiredRule(PolicyRule):
     rule_id = "prerequisite_required"
     name = "Strong Prerequisite Required"
     severity = "high"
+    rule_class = "direct_backport_veto"
+    rule_scope = "direct_backport"
 
     def evaluate(self, ctx: RuleContext) -> Optional[Dict]:
         strong = [p for p in ctx.prerequisite_patches if getattr(p, "grade", "") == "strong"]
@@ -237,6 +250,8 @@ class PrerequisiteRecommendedRule(PolicyRule):
     rule_id = "prerequisite_recommended"
     name = "Prerequisite Review Recommended"
     severity = "warn"
+    rule_class = "direct_backport_veto"
+    rule_scope = "direct_backport"
 
     def evaluate(self, ctx: RuleContext) -> Optional[Dict]:
         medium = [p for p in ctx.prerequisite_patches if getattr(p, "grade", "") == "medium"]
@@ -260,6 +275,8 @@ class IndependentPatchRule(PolicyRule):
     rule_id = "independent_patch"
     name = "Independent Patch Hint"
     severity = "info"
+    rule_class = "admission"
+    rule_scope = "direct_backport"
 
     def evaluate(self, ctx: RuleContext) -> Optional[Dict]:
         if ctx.prerequisite_patches:
@@ -285,6 +302,8 @@ class DirectBackportRule(PolicyRule):
     rule_id = "direct_backport_candidate"
     name = "Direct Backport Candidate"
     severity = "info"
+    rule_class = "admission"
+    rule_scope = "direct_backport"
 
     def __init__(self, line_threshold: int, hunk_threshold: int):
         self.line_threshold = line_threshold
@@ -323,6 +342,8 @@ class CallChainPropagationRule(PolicyRule):
     rule_id = "call_chain_propagation"
     name = "Call Chain Propagation Warning"
     severity = "warn"
+    rule_class = "risk_profile"
+    rule_scope = "risk"
 
     def evaluate(self, ctx: RuleContext) -> Optional[Dict]:
         risky = []
@@ -361,6 +382,8 @@ class CallChainFanoutRule(PolicyRule):
     rule_id = "call_chain_fanout"
     name = "Call Chain Fanout Warning"
     severity = "warn"
+    rule_class = "risk_profile"
+    rule_scope = "risk"
 
     def __init__(self, fanout_threshold: int):
         self.fanout_threshold = fanout_threshold
@@ -391,6 +414,8 @@ class L1APISurfaceRule(PolicyRule):
     rule_id = "l1_api_surface"
     name = "API Surface / Return-Path Hint"
     severity = "warn"
+    rule_class = "low_level_veto"
+    rule_scope = "low_level"
 
     def __init__(self, return_delta_threshold: int = 2):
         self.return_delta_threshold = return_delta_threshold
@@ -475,6 +500,8 @@ class SingleLineHighImpactRule(PolicyRule):
     rule_id = "single_line_high_impact"
     name = "Single Line But High Impact"
     severity = "warn"
+    rule_class = "risk_profile"
+    rule_scope = "risk"
 
     CATEGORY_PATTERNS = {
         "locking": re.compile(r"\b(spin_lock|spin_unlock|mutex_lock|mutex_unlock|read_lock|write_lock|rcu_|rwlock|down_write|up_write)\b"),
@@ -515,6 +542,10 @@ class SingleLineHighImpactRule(PolicyRule):
                 "categories": uniq,
                 "sample_lines": sample_lines,
                 "max_changed_lines": self.max_changed_lines,
+                "lock_objects": ctx.risk_markers.get("lock_objects", [])[:8],
+                "fields": ctx.risk_markers.get("fields", [])[:8],
+                "state_points": ctx.risk_markers.get("state_points", [])[:8],
+                "error_path_nodes": ctx.risk_markers.get("error_path_nodes", [])[:8],
             },
         }
 

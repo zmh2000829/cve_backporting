@@ -46,7 +46,9 @@ llm:
 # local:    本地低版本路径前缀
 # since:    发生迁移的内核版本 (仅供参考)
 path_mappings:
-  # ── 6.2: CIFS/SMB 子系统重组 ──
+  # ==========================================
+  # 已经存在的映射 (用户提供)
+  # ==========================================
   - upstream: "fs/smb/client/"
     local: "fs/cifs/"
     since: "6.2"
@@ -56,37 +58,29 @@ path_mappings:
   - upstream: "fs/smb/common/"
     local: "fs/smbfs_common/"
     since: "6.2"
-
-  # ── 6.2: DRM AMD display link 重构 ──
   - upstream: "drivers/gpu/drm/amd/display/dc/link/"
     local: "drivers/gpu/drm/amd/display/dc/core/"
     since: "6.2"
-
-  # ── 5.18: i915 display 拆分 ──
   - upstream: "drivers/gpu/drm/i915/display/"
     local: "drivers/gpu/drm/i915/"
     since: "5.18"
-
-  # ── 5.16: rtw89 从 staging 毕业 ──
   - upstream: "drivers/net/wireless/realtek/rtw89/"
     local: "drivers/staging/rtw89/"
     since: "5.16"
-
-  # ── 6.5: ath12k 从 staging 毕业 ──
   - upstream: "drivers/net/wireless/ath/ath12k/"
     local: "drivers/staging/ath12k/"
     since: "6.5"
-
-  # ── 6.1: fscache → netfs 重组 ──
   - upstream: "fs/netfs/"
     local: "fs/fscache/"
     since: "6.1"
 
-  # ── 自定义映射 (按需添加) ──
-  # - upstream: "path/in/newer/kernel/"
-  #   local: "path/in/your/kernel/"
-  #   since: "x.y"
-
+  # ==========================================
+  # 补充：文件系统 (File Systems) 毕业与迁移
+  # ==========================================
+  # ── 5.4: erofs 从 staging 毕业 ──
+  - upstream: "fs/erofs/"
+    local: "drivers/staging/erofs/"
+    since: "5.4"
 # ─── 规则配置示例已迁移 ───────────────────────────────────────
 # `policy:` 规则编排示例已迁移至 `rules/policy.example.yaml`
 # 如需启用或调整 L0-L5 策略与可插拔规则，请将该文件中的 `policy:` 段复制到你的 `config.yaml`
@@ -94,3 +88,77 @@ path_mappings:
 # P2 专项分析也支持命令行覆盖：
 #   python cli.py analyze --cve CVE-2024-26633 --target 5.10-hulk --disable-p2
 #   python cli.py batch-validate --file cves.json --target 5.10-hulk --enable-p2
+
+  # ── 5.7: exfat 从 staging 毕业 ──
+  - upstream: "fs/exfat/"
+    local: "drivers/staging/exfat/"
+    since: "5.7"
+
+  # ==========================================
+  # 补充：显卡与显示驱动 (DRM / GPU) 迁移
+  # ==========================================
+  # ── 5.6: vboxvideo 从 staging 毕业 ──
+  - upstream: "drivers/gpu/drm/vboxvideo/"
+    local: "drivers/staging/vboxvideo/"
+    since: "5.6"
+
+  # ==========================================
+  # 补充：无线网卡与网络驱动 (Networking)
+  # ==========================================
+  # ── 5.17: wfx 从 staging 毕业 ──
+  - upstream: "drivers/net/wireless/silabs/wfx/"
+    local: "drivers/staging/wfx/"
+    since: "5.17"
+
+  # ── 5.2: rtw88 从 staging 毕业 ──
+  - upstream: "drivers/net/wireless/realtek/rtw88/"
+    local: "drivers/staging/rtw88/"
+    since: "5.2"
+
+  # ==========================================
+  # 补充：媒体子系统 (Media/V4L2) 大规模重构
+  # 注：6.2 中，媒体子系统的平台驱动被严格按厂商(vendor)目录分类
+  # ==========================================
+  # ── 6.2: Renesas 媒体驱动目录重组 ──
+  - upstream: "drivers/media/platform/renesas/vsp1/"
+    local: "drivers/media/platform/vsp1/"
+    since: "6.2"
+  - upstream: "drivers/media/platform/renesas/rcar-vin/"
+    local: "drivers/media/platform/rcar-vin/"
+    since: "6.2"
+
+  # ── 6.2: Samsung 媒体驱动目录重组 ──
+  - upstream: "drivers/media/platform/samsung/s5p-mfc/"
+    local: "drivers/media/platform/s5p-mfc/"
+    since: "6.2"
+  - upstream: "drivers/media/platform/samsung/exynos4-is/"
+    local: "drivers/media/platform/exynos4-is/"
+    since: "6.2"
+
+  # ── 6.2: Amlogic 媒体驱动目录重组 ──
+  - upstream: "drivers/media/platform/amlogic/meson-ge2d/"
+    local: "drivers/media/platform/meson/ge2d/"
+    since: "6.2"
+
+  # ── 6.2: ST 媒体驱动目录重组 ──
+  - upstream: "drivers/media/platform/st/sti/"
+    local: "drivers/media/platform/sti/"
+    since: "6.2"
+
+  # ── 5.17: Hantro 媒体驱动从 staging 毕业并重命名厂商 ──
+  - upstream: "drivers/media/platform/verisilicon/"
+    local: "drivers/staging/media/hantro/"
+    since: "5.17"
+
+  # ==========================================
+  # 补充：其他子系统与工业控制 (Misc / Industrial)
+  # ==========================================
+  # ── 5.10: fieldbus 工业总线从 staging 毕业 ──
+  - upstream: "drivers/fieldbus/"
+    local: "drivers/staging/fieldbus/"
+    since: "5.10"
+
+  # ── 5.4: fbtft (小屏幕SPI显示) 移入正式目录 ──
+  - upstream: "drivers/video/fbdev/fbtft/"
+    local: "drivers/staging/fbtft/"
+    since: "5.4"
