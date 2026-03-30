@@ -2240,23 +2240,25 @@ Step 5: 产出可答辩结论（工具自动生成 narrative）
 
 ---
 
-# 为什么还要继续推进这一层
+# 本轮变化边界：哪些没变，哪些变了？
 
-### 当前已经做对的事
+### 先回答最关键的两个问题
 
-1. **DryRun 与最终级别已经解耦**
-   - `base_level/base_method` = DryRun 基线
-   - `level` = 规则抬升后的最终场景
-2. **L0 被收紧**
-   - 只有“严格命中 + 无风险规则”才允许 `harmless=true`
-3. **rules/ 已经成为真实插件入口**
-   - 默认规则、默认级别策略已经迁入 `rules/*.py`
+1. **L0-L5 的核心算法主干没有变化**
+   - 仍然是先得到 `DryRun baseline`
+   - 再通过规则 `level_floor` 做风险抬升
+   - `strict / context-C1 / 3way / regenerated / verified-direct / conflict-adapted` 这些基础路径没有被重写
 
-### 当前仍然缺的事
+2. **七策略序列搜索引擎没有变化**
+   - 仍然用于 `Regenerated` 路径中的 hunk 定位
+   - 仍然是“确定性序列搜索优先，代码语义匹配兜底”
+   - 本轮没有改动七策略的顺序、核心匹配逻辑或触发边界
 
-- 规则配置样例此前还在根级配置文件里，资产没有完全收口
-- L1 规则已有启发式，但样本验证体系还不够
-- 调用链影响分析仍需明确边界与后续升级路径
+### 本轮真正变化的是三层
+
+- **规则层**：从“命中几个 warning”升级为“准入 / 否决 / 高风险画像”三类意图
+- **证据层**：从笼统 warning 升级为锁对象、字段、状态点、错误路径节点等具体证据
+- **输出层**：新增统一 `analysis_framework`，让用户先看过程、证据、结论，再看 L0-L5
 
 ---
 
@@ -2268,14 +2270,16 @@ DryRun 成功方法
 
 规则引擎
   └─ 每条规则输出 risk evidence
+  └─ 每条规则归属 admission / veto / risk_profile
+  └─ veto 已继续拆成 low_level_veto / direct_backport_veto
   └─ 如有需要显式给出 level_floor
 
 最终输出:
-  level_decision
-    ├─ level
-    ├─ base_level / base_method
+  level_decision + analysis_framework
+    ├─ level / base_level / base_method
     ├─ review_mode / next_action
-    └─ rule_hits / warnings / evidence
+    ├─ rule_hits / warnings / evidence
+    └─ process / evidence / conclusion
 ```
 
 ### 关键收敛原则
@@ -2291,6 +2295,8 @@ DryRun 成功方法
 
 | 规则 | 触发条件 | 当前输出 |
 |------|----------|----------|
+| `direct_backport_candidate` | strict 命中、无强依赖、改动小、无明显传播 | admission，支持 `可直接回移` |
+| `independent_patch` | 无强/中依赖，依赖分析结论可独立成立 | admission，支持 `可不优先考虑关联补丁` |
 | `large_change` | 改动行数 / hunk 数超阈值 | warning，至少抬升到 `L2` |
 | `critical_structures` | 锁/RCU/refcount/struct 等关键结构命中 | high risk，至少抬升到 `L3` |
 | `p2_locking_sync` | 锁对象、加解锁位置、保护区间、同步顺序变化 | high risk，至少抬升到 `L3` |
@@ -2298,9 +2304,19 @@ DryRun 成功方法
 | `p2_state_machine_control_flow` | 条件分支、返回路径、状态字段、ops 行为变化 | warning/high，至少抬升到 `L2/L3` |
 | `p2_struct_field_data_path` | struct 字段定义、访问路径、读写位置变化 | warning/high，至少抬升到 `L2/L3` |
 | `p2_error_path` | `goto err`、cleanup、错误码、恢复逻辑变化 | warning，至少抬升到 `L2` |
+| `prerequisite_required` | 存在强依赖前置补丁 | direct_backport_veto，阻止“可直接回移” |
+| `prerequisite_recommended` | 存在中等依赖前置补丁 | direct_backport_veto，提示优先评估关联补丁 |
 | `call_chain_propagation` | 修改函数存在调用/被调用牵连 | warning / high，关键变更时可抬升到 `L4` |
 | `call_chain_fanout` | callers + callees 扇出超阈值 | warning，至少抬升到 `L2` |
-| `l1_api_surface` | 签名变化 / return 路径变化 | L1 复核证据 |
+| `l1_api_surface` | 签名变化 / return 路径变化 | low_level_veto，阻止误入 `L0/L1` |
+| `single_line_high_impact` | 变更行数很少但命中锁/生命周期/布局/控制流敏感语义 | risk_profile，避免“单行=低风险”误判 |
+
+### 规则意图收敛
+
+- `admission`：支持“可直接回移”
+- `low_level_veto`：阻止误入低级别处理区
+- `direct_backport_veto`：阻止“可直接回移”结论
+- `risk_profile`：识别锁、生命周期、状态机、结构体字段、错误路径等高风险画像
 
 ### 目录收口
 
@@ -2361,6 +2377,42 @@ DryRun 成功方法
 - `analyze` / `validate` / `batch-validate` 三条链路都输出同一套 `validation_details`
 - API 不再只是“精简版摘要”，而是返回与 CLI JSON 报告同口径的数据
 - 批量接口额外输出最终聚合统计，便于平台直接消费
+
+### 新的统一解释骨架
+
+```json
+{
+  "analysis_framework": {
+    "process": {
+      "workflow_steps": ["fix 搜索", "依赖分析", "dryrun", "高风险扫描", "最终结论"],
+      "base_level": "L1",
+      "base_method": "context-C1",
+      "final_level": "L2"
+    },
+    "evidence": {
+      "admission_rules": [],
+      "low_level_veto_rules": [],
+      "direct_backport_veto_rules": [],
+      "risk_profile_rules": [],
+      "lock_objects": ["foo->lock"],
+      "fields": ["ctx->state"],
+      "state_points": ["ctx->state", "if (ctx->state == NEW_STATE) goto err_unlock;"],
+      "error_path_nodes": ["err_unlock", "-EINVAL"]
+    },
+    "conclusion": {
+      "direct_backport": {"status": "blocked"},
+      "prerequisite": {"status": "recommended"},
+      "risk": {"status": "high"}
+    }
+  }
+}
+```
+
+### 这意味着什么
+
+- 用户先看 `analysis_framework`
+- 再看 `level_decision`
+- `L0-L5` 仍然保留，但不再是唯一理解入口
 
 ### `/api/batch-validate` 关键汇总字段
 

@@ -192,6 +192,154 @@ def _build_analyze_payload(result, pipe: Pipeline, config, target: str,
     return payload
 
 
+def _build_json_reading_guide(mode: str) -> dict:
+    common = {
+        "purpose": "本文件已按“先看结论、再看证据、最后看技术细节”的顺序重组，优先阅读 summary。",
+        "recommended_order": [
+            "1. summary.overview：先看漏洞、目标分支、最终结论",
+            "2. summary.conclusion：看是否可直接回移、是否要考虑关联补丁、风险是否偏高",
+            "3. summary.key_evidence：看锁对象、字段、状态点、错误路径等关键证据",
+            "4. technical_details：需要深挖时再看完整技术明细",
+        ],
+        "field_explanations": {
+            "analysis_framework": "统一的过程 + 证据 + 结论骨架，用于快速理解工具为什么这么判。",
+            "l0_l5": "最终 L0-L5 级别与 DryRun 基线级别。L0/L1 更偏低风险，L3/L4/L5 更需要人工关注。",
+            "special_risk_report": "P2 专项高风险分析，重点看锁、生命周期、状态机、结构体字段、错误路径。",
+            "level_decision": "最终级别、下一步动作和规则抬升原因。",
+        },
+    }
+    if mode == "validate":
+        common["field_explanations"]["generated_vs_real"] = "工具生成补丁与真实修复补丁的本质对比结果。"
+    return common
+
+
+def _normalize_rule_messages(items) -> list:
+    out = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        msg = item.get("message", "")
+        if msg:
+            out.append(msg)
+    return out[:6]
+
+
+def _status_to_cn(kind: str, status: str) -> str:
+    mapping = {
+        "direct_backport": {
+            "direct": "可直接回移",
+            "review": "接近可直接回移，但建议复核",
+            "blocked": "不建议直接回移",
+        },
+        "prerequisite": {
+            "required": "必须考虑关联补丁",
+            "recommended": "建议考虑关联补丁",
+            "weak_only": "仅弱关联，可按需复核",
+            "independent": "可不优先考虑关联补丁",
+        },
+        "risk": {
+            "high": "高风险",
+            "attention": "需要重点关注",
+            "low": "未发现显著额外风险",
+        },
+    }
+    return mapping.get(kind, {}).get(status or "", status or "未知")
+
+
+def _build_human_friendly_summary(data: dict, mode: str) -> dict:
+    framework = data.get("analysis_framework") or {}
+    process = framework.get("process") or {}
+    evidence = framework.get("evidence") or {}
+    conclusion = framework.get("conclusion") or {}
+    level = (data.get("l0_l5") or {}).get("current_level") or (data.get("level_decision") or {}).get("level") or "未知"
+    base_level = (data.get("l0_l5") or {}).get("base_level") or (data.get("level_decision") or {}).get("base_level") or "未知"
+
+    overview = {
+        "cve_id": data.get("cve_id", ""),
+        "target_version": data.get("target_version") or data.get("target", ""),
+        "最终级别": level,
+        "基线级别": base_level,
+    }
+    if mode == "analyze":
+        overview.update({
+            "漏洞是否已引入": "是" if data.get("is_vulnerable") else "否/未确认",
+            "修复是否已存在": "是" if data.get("is_fixed") else "否",
+            "DryRun是否通过": "是" if data.get("dry_run_clean") else "否/未执行",
+        })
+    else:
+        overview.update({
+            "验证是否通过": "是" if data.get("overall_pass") else "否",
+            "真实修复commit": data.get("known_fix", ""),
+            "结论摘要": data.get("summary", ""),
+        })
+
+    summary = {
+        "overview": overview,
+        "conclusion": {
+            "是否可直接回移": {
+                "状态": _status_to_cn("direct_backport", (conclusion.get("direct_backport") or {}).get("status", "")),
+                "说明": (conclusion.get("direct_backport") or {}).get("summary", ""),
+            },
+            "是否需要关联补丁": {
+                "状态": _status_to_cn("prerequisite", (conclusion.get("prerequisite") or {}).get("status", "")),
+                "说明": (conclusion.get("prerequisite") or {}).get("summary", ""),
+            },
+            "风险判断": {
+                "状态": _status_to_cn("risk", (conclusion.get("risk") or {}).get("status", "")),
+                "说明": (conclusion.get("risk") or {}).get("summary", ""),
+            },
+            "下一步建议": (conclusion.get("final") or {}).get("next_action", ""),
+        },
+        "process": {
+            "说明": "下面是工具实际走过的分析步骤，建议从上到下阅读。",
+            "workflow_steps": process.get("workflow_steps") or [],
+        },
+        "key_evidence": {
+            "准入规则命中": _normalize_rule_messages(evidence.get("admission_rules")),
+            "低级别否决命中": _normalize_rule_messages(evidence.get("low_level_veto_rules")),
+            "直接回移否决命中": _normalize_rule_messages(evidence.get("direct_backport_veto_rules")),
+            "高风险画像命中": _normalize_rule_messages(evidence.get("risk_profile_rules")),
+            "锁对象": evidence.get("lock_objects", [])[:8],
+            "关键字段": evidence.get("fields", [])[:8],
+            "状态点": evidence.get("state_points", [])[:8],
+            "错误路径节点": evidence.get("error_path_nodes", [])[:8],
+        },
+    }
+
+    if mode == "validate":
+        generated = data.get("generated_vs_real") or {}
+        summary["patch_quality"] = {
+            "工具补丁与真实修复关系": generated.get("verdict", ""),
+            "核心相似度": generated.get("core_similarity", 0),
+            "比较来源": generated.get("compare_source", ""),
+        }
+
+    return summary
+
+
+def _prepare_analyze_json(payload: dict) -> dict:
+    return {
+        "report_version": "friendly-json-v1",
+        "mode": "analyze",
+        "reading_guide": _build_json_reading_guide("analyze"),
+        "summary": _build_human_friendly_summary(payload, "analyze"),
+        "technical_details": {
+            "analysis_framework": payload.get("analysis_framework", {}),
+            "level_decision": payload.get("level_decision", {}),
+            "validation_details": payload.get("validation_details", {}),
+            "dryrun_detail": payload.get("dryrun_detail", {}),
+            "function_impacts": payload.get("function_impacts", []),
+            "prerequisite_patches": payload.get("prerequisite_patches", []),
+            "fix_patch_detail": payload.get("fix_patch_detail", {}),
+            "analysis_stages": payload.get("analysis_stages", []),
+            "rules": payload.get("rules", {}),
+            "analysis_narrative": payload.get("analysis_narrative", {}),
+            "recommendations": payload.get("recommendations", []),
+            "deep_analysis": payload.get("deep_analysis"),
+        },
+    }
+
+
 def run_analyze_payload(cve_id: str, target_version: str, config, *,
                        enable_dryrun: bool = True, deep: bool = False,
                        stage_callback=None):
@@ -261,7 +409,7 @@ def _analyze_one(pipe: Pipeline, cve_id: str, target: str,
         policy_config=policy_config)
 
     with open(fp, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2, ensure_ascii=False, default=str)
+        json.dump(_prepare_analyze_json(payload), f, indent=2, ensure_ascii=False, default=str)
     console.print(f"[dim]报告已保存: {fp}[/]")
 
 
@@ -674,14 +822,38 @@ def _v2_to_json(v2) -> dict:
 
 
 def _prepare_validate_json(result: dict) -> dict:
-    """准备 validate 结果供 JSON 序列化 — 处理 deep_analysis 对象"""
-    out = {}
+    """准备 validate 结果供 JSON 序列化 — 输出更适合用户阅读的结构。"""
+    raw = {}
     for k, v in result.items():
         if k == "deep_analysis" and v is not None:
-            out["deep_analysis"] = _v2_to_json(v)
+            raw["deep_analysis"] = _v2_to_json(v)
         else:
-            out[k] = v
-    return out
+            raw[k] = v
+
+    return {
+        "report_version": "friendly-json-v1",
+        "mode": "validate",
+        "reading_guide": _build_json_reading_guide("validate"),
+        "summary": _build_human_friendly_summary(raw, "validate"),
+        "technical_details": {
+            "checks": raw.get("checks", {}),
+            "issues": raw.get("issues", []),
+            "analysis_framework": raw.get("analysis_framework", {}),
+            "l0_l5": raw.get("l0_l5", {}),
+            "level_decision": raw.get("level_decision", {}),
+            "validation_details": raw.get("validation_details", {}),
+            "dryrun_detail": raw.get("dryrun_detail", {}),
+            "function_impacts": raw.get("function_impacts", []),
+            "generated_vs_real": raw.get("generated_vs_real", {}),
+            "diff_comparison": raw.get("diff_comparison", {}),
+            "tool_prereqs": raw.get("tool_prereqs", []),
+            "known_prereqs_detail": raw.get("known_prereqs_detail", []),
+            "analysis_stages": raw.get("analysis_stages", []),
+            "analysis_narrative": raw.get("analysis_narrative", {}),
+            "rules": raw.get("rules", {}),
+            "deep_analysis": raw.get("deep_analysis"),
+        },
+    }
 
 
 # ─── validate / benchmark ────────────────────────────────────────────
