@@ -9,7 +9,7 @@ from datetime import datetime
 
 from rich.panel import Panel
 
-from core.output_serializers import aggregate_batch_validate_summary
+from core.output_serializers import aggregate_batch_validate_summary, build_l0_l5_view
 
 
 def _apply_p2_override(config, args):
@@ -178,6 +178,10 @@ def _execute_batch_validate_case(runtime, config, tv, cve_id, group, *, deep=Fal
     result["prereq_cross_validation"] = prereq_validation
     result["num_hulk_fixes"] = len(group["all_fixes"])
 
+    level_view = build_l0_l5_view(result)
+    special_risk_summary = ((result.get("validation_details") or {}).get("special_risk_report") or {}).get("summary", {})
+    conclusion = ((result.get("analysis_framework") or {}).get("conclusion") or {})
+
     item = {
         "cve_id": cve_id,
         "known_fix": primary["commit"][:12],
@@ -185,6 +189,15 @@ def _execute_batch_validate_case(runtime, config, tv, cve_id, group, *, deep=Fal
         "core_similarity": round(core_sim, 3),
         "deterministic_exact_match": bool(generated.get("deterministic_exact_match")),
         "method": method,
+        "l0_l5": level_view,
+        "current_level": level_view.get("current_level", ""),
+        "base_level": level_view.get("base_level", ""),
+        "dependency_bucket": level_view.get("dependency_bucket", ""),
+        "critical_structure_change": bool(special_risk_summary.get("has_critical_structure_change")),
+        "special_risk_sections": list(special_risk_summary.get("triggered_sections") or []),
+        "direct_backport_status": ((conclusion.get("direct_backport") or {}).get("status", "")),
+        "prerequisite_status": ((conclusion.get("prerequisite") or {}).get("status", "")),
+        "risk_status": ((conclusion.get("risk") or {}).get("status", "")),
         "num_fixes": len(group["all_fixes"]),
         "num_prereqs": len(prereqs),
         "prereq_recall": prereq_validation.get("recall", None),
@@ -222,6 +235,76 @@ def _execute_batch_validate_case(runtime, config, tv, cve_id, group, *, deep=Fal
         "verdict": verdict,
         "core_similarity": core_sim,
         "method": method,
+    }
+
+
+def _build_batch_reading_guide() -> dict:
+    return {
+        "purpose": "本文件已按“先看汇总结论，再看分组结果，最后看技术明细”的顺序重组，优先阅读 summary。",
+        "recommended_order": [
+            "1. summary.overview：先看总量、并行参数、P2 是否开启",
+            "2. summary.level_distribution：看每个 L0-L5 级别有多少个",
+            "3. summary.key_findings：看关键结构变更、专项高风险、关联补丁等统计",
+            "4. result_groups.passed / failed / errors：看每个 CVE 的简要结果",
+            "5. technical_details.cve_results：需要深挖时再看每个 CVE 的完整技术明细",
+        ],
+        "field_explanations": {
+            "current_level": "最终 L0-L5 级别，表示结合规则抬升后的最终场景。",
+            "base_level": "DryRun 基线级别，表示规则抬升前的原始级别。",
+            "critical_structure_change": "是否涉及锁、生命周期、状态机、结构体字段等关键结构变化。",
+            "special_risk_sections": "命中的专项高风险类别。",
+        },
+    }
+
+
+def _build_batch_summary_view(tv: str, total_cves: int, total_patches: int, skipped: int, workers: int, p2_enabled: bool, batch_summary: dict) -> dict:
+    l0_l5 = batch_summary.get("l0_l5", {}) or {}
+    special_risk = batch_summary.get("special_risk", {}) or {}
+    return {
+        "overview": {
+            "target_version": tv,
+            "total_cves": total_cves,
+            "total_patches": total_patches,
+            "skipped_parse_errors": skipped,
+            "workers": workers,
+            "parallel_mode": workers > 1,
+            "p2_enabled": p2_enabled,
+        },
+        "level_distribution": {
+            "final_level_counts": l0_l5.get("current_level_distribution", {}),
+            "base_level_counts": l0_l5.get("base_level_distribution", {}),
+        },
+        "key_findings": {
+            "deterministic_exact_match": batch_summary.get("deterministic_exact_match", {}),
+            "critical_structure_change": batch_summary.get("critical_structure_change", {}),
+            "manual_prerequisite_analysis": batch_summary.get("manual_prerequisite_analysis", {}),
+            "special_risk_section_counts": special_risk.get("section_counts", {}),
+            "special_risk_samples": special_risk.get("samples", {}),
+            "verdict_distribution": batch_summary.get("verdict_distribution", {}),
+        },
+    }
+
+
+def _prepare_batch_validate_json(tv: str, *, workers: int, total_cves: int, total_patches: int, skipped: int,
+                                 p2_enabled: bool, batch_summary: dict, strategy_summary: dict,
+                                 passed_list: list, failed_list: list, error_list: list, cve_results: list) -> dict:
+    return {
+        "report_version": "friendly-json-v1",
+        "mode": "batch-validate",
+        "reading_guide": _build_batch_reading_guide(),
+        "summary": _build_batch_summary_view(
+            tv, total_cves, total_patches, skipped, workers, p2_enabled, batch_summary
+        ),
+        "result_groups": {
+            "passed": passed_list,
+            "failed": failed_list,
+            "errors": error_list,
+        },
+        "technical_details": {
+            "batch_summary": batch_summary,
+            "strategy_summary": strategy_summary,
+            "cve_results": cve_results,
+        },
     }
 
 
@@ -653,24 +736,26 @@ def run_batch_validate(args, config, runtime):
 
     serializable_results = [runtime._prepare_validate_json(r) for r in cve_results]
     batch_summary = aggregate_batch_validate_summary(serializable_results)
+    strategy_summary = runtime.aggregate_strategy_buckets(serializable_results)
+    p2_enabled = bool(getattr(config.policy, "special_risk_rules_enabled", True)) if getattr(config, "policy", None) else True
     full_report_path = os.path.join(out_dir, f"batch_validate_{tv}_{ts}_full.json")
     with open(full_report_path, "w", encoding="utf-8") as f:
-        json.dump({
-            "target": tv,
-            "workers": workers,
-            "parallel_mode": workers > 1,
-            "total_cves": len(cve_groups),
-            "total_patches": total_patches,
-            "skipped_parse_errors": skipped,
-            "p2_enabled": bool(getattr(config.policy, "special_risk_rules_enabled", True)) if getattr(config, "policy", None) else True,
-            "batch_summary": batch_summary,
-            "cve_results": serializable_results,
-            "strategy_summary": runtime.aggregate_strategy_buckets(serializable_results),
-            "cve_summary": {
-                "passed": passed_list,
-                "failed": failed_list,
-                "errors": error_list,
-            },
-        }, f, indent=2, ensure_ascii=False, default=str)
+        json.dump(
+            _prepare_batch_validate_json(
+                tv,
+                workers=workers,
+                total_cves=len(cve_groups),
+                total_patches=total_patches,
+                skipped=skipped,
+                p2_enabled=p2_enabled,
+                batch_summary=batch_summary,
+                strategy_summary=strategy_summary,
+                passed_list=passed_list,
+                failed_list=failed_list,
+                error_list=error_list,
+                cve_results=serializable_results,
+            ),
+            f, indent=2, ensure_ascii=False, default=str
+        )
     runtime.console.print(f"[dim]完整结果: {full_report_path}[/]")
     runtime.console.print(f"[dim]实时报告: {live_report_path}[/]")
