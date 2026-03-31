@@ -12,6 +12,117 @@ from rich.panel import Panel
 from core.output_serializers import aggregate_batch_validate_summary, build_l0_l5_view
 
 
+def _status_to_cn(kind: str, status: str) -> str:
+    mapping = {
+        "direct_backport": {
+            "allowed": "可直接回移",
+            "blocked": "不建议直接回移",
+            "needs_review": "需要进一步确认",
+        },
+        "prerequisite": {
+            "independent": "可按独立补丁处理",
+            "consider": "建议检查关联补丁",
+            "required": "必须检查关联补丁",
+        },
+        "risk": {
+            "high": "高风险",
+            "attention": "需要重点关注",
+            "low": "未发现显著额外风险",
+        },
+    }
+    return mapping.get(kind, {}).get(status or "", status or "未知")
+
+
+def _describe_dependency_bucket(bucket: str) -> str:
+    mapping = {
+        "independent": "未发现必须额外关注的关联补丁，可按独立补丁处理。",
+        "recommended": "建议检查关联补丁，当前补丁不是最稳妥的“直接回移”场景。",
+        "required": "存在必须关注的关联补丁，不能仅按单补丁回移处理。",
+    }
+    return mapping.get(bucket or "", "未形成明确的关联补丁判断。")
+
+
+def _build_batch_case_summary(item: dict, result: dict) -> dict:
+    framework = (result.get("analysis_framework") or {})
+    process = framework.get("process") or {}
+    conclusion = framework.get("conclusion") or {}
+    current_level = item.get("current_level") or "未知"
+    base_level = item.get("base_level") or "未知"
+    dependency_bucket = item.get("dependency_bucket") or ""
+    direct_status = _status_to_cn("direct_backport", item.get("direct_backport_status", ""))
+    prereq_status = _status_to_cn("prerequisite", item.get("prerequisite_status", ""))
+    risk_status = _status_to_cn("risk", item.get("risk_status", ""))
+    special_risk_sections = item.get("special_risk_sections") or []
+    critical_structure_change = bool(item.get("critical_structure_change"))
+
+    key_hits = []
+    if critical_structure_change:
+        key_hits.append("命中关键结构变更")
+    if special_risk_sections:
+        key_hits.append("命中专项高风险: " + "、".join(special_risk_sections[:4]))
+    if not key_hits:
+        key_hits.append("未命中显著专项高风险")
+
+    return {
+        "一句话结论": f"最终级别 {current_level}，{direct_status}，{prereq_status}，风险判断为“{risk_status}”。",
+        "结论": {
+            "最终级别": current_level,
+            "基线级别": base_level,
+            "是否可直接回移": direct_status,
+            "是否需要关联补丁": prereq_status,
+            "风险判断": risk_status,
+        },
+        "为什么这样判": [
+            f"DryRun 基线先给出 {base_level} 级。",
+            _describe_dependency_bucket(dependency_bucket),
+            "涉及锁/生命周期/状态机/结构体字段等关键结构变化。" if critical_structure_change else "未发现明显的关键结构变更信号。",
+            ("专项高风险命中: " + "、".join(special_risk_sections[:4])) if special_risk_sections else "未命中专项高风险分项。",
+        ],
+        "关键命中": {
+            "关键结构变更": critical_structure_change,
+            "专项高风险": special_risk_sections,
+            "关联补丁分桶": dependency_bucket or "unknown",
+        },
+        "下一步建议": ((conclusion.get("final") or {}).get("next_action", "")),
+        "过程步骤": (process.get("workflow_steps") or [])[:6],
+    }
+
+
+def _aggregate_item_statistics(passed: list, failed: list) -> dict:
+    level_counts = OrderedDict((f"L{i}", 0) for i in range(6))
+    special_risk_section_counts = {}
+    critical_structure_change_count = 0
+    any_special_risk_count = 0
+    manual_prerequisite_analysis_count = 0
+
+    for item in list(passed or []) + list(failed or []):
+        level = item.get("current_level") or ((item.get("l0_l5") or {}).get("current_level"))
+        if level in level_counts:
+            level_counts[level] += 1
+        if item.get("critical_structure_change"):
+            critical_structure_change_count += 1
+        sections = item.get("special_risk_sections") or []
+        if sections:
+            any_special_risk_count += 1
+        for section in sections:
+            special_risk_section_counts[section] = special_risk_section_counts.get(section, 0) + 1
+        if item.get("dependency_bucket") in ("required", "recommended"):
+            manual_prerequisite_analysis_count += 1
+
+    return {
+        "level_distribution": {
+            "levels": list(level_counts.keys()),
+            "final_level_counts": dict(level_counts),
+        },
+        "risk_hit_summary": {
+            "critical_structure_change_count": critical_structure_change_count,
+            "any_special_risk_count": any_special_risk_count,
+            "manual_prerequisite_analysis_count": manual_prerequisite_analysis_count,
+            "special_risk_section_counts": dict(sorted(special_risk_section_counts.items())),
+        },
+    }
+
+
 def _apply_p2_override(config, args):
     cfg = copy.deepcopy(config)
     override = getattr(args, "p2_enabled", None)
@@ -98,6 +209,7 @@ def _build_cve_info_from_json(info: dict, cve_id: str):
 
 def _flush_live_report(path: str, target: str, total: int, passed: list, failed: list, errors: list):
     done = len(passed) + len(failed) + len(errors)
+    statistics = _aggregate_item_statistics(passed, failed)
     report = {
         "target": target,
         "progress": f"{done}/{total}",
@@ -107,6 +219,7 @@ def _flush_live_report(path: str, target: str, total: int, passed: list, failed:
             "passed": len(passed),
             "failed": len(failed),
             "errors": len(errors),
+            "statistics": statistics,
         },
         "passed": passed,
         "failed": failed,
@@ -201,8 +314,11 @@ def _execute_batch_validate_case(runtime, config, tv, cve_id, group, *, deep=Fal
         "num_fixes": len(group["all_fixes"]),
         "num_prereqs": len(prereqs),
         "prereq_recall": prereq_validation.get("recall", None),
-        "summary": result.get("summary", ""),
+        "summary": "",
+        "technical_summary": result.get("summary", ""),
     }
+    item["summary_cn"] = _build_batch_case_summary(item, result)
+    item["summary"] = item["summary_cn"]["一句话结论"]
 
     v2 = result.get("deep_analysis")
     if v2 is not None:
@@ -244,8 +360,8 @@ def _build_batch_reading_guide() -> dict:
         "recommended_order": [
             "1. summary.overview：先看总量、并行参数、P2 是否开启",
             "2. summary.level_distribution：看每个 L0-L5 级别有多少个",
-            "3. summary.key_findings：看关键结构变更、专项高风险、关联补丁等统计",
-            "4. result_groups.passed / failed / errors：看每个 CVE 的简要结果",
+            "3. summary.risk_hit_summary：看关键结构变更、专项高风险、关联补丁等统计",
+            "4. result_groups.passed / failed / errors[*].summary_cn：看每个 CVE 的中文结论与原因",
             "5. technical_details.cve_results：需要深挖时再看每个 CVE 的完整技术明细",
         ],
         "field_explanations": {
@@ -253,6 +369,7 @@ def _build_batch_reading_guide() -> dict:
             "base_level": "DryRun 基线级别，表示规则抬升前的原始级别。",
             "critical_structure_change": "是否涉及锁、生命周期、状态机、结构体字段等关键结构变化。",
             "special_risk_sections": "命中的专项高风险类别。",
+            "summary_cn": "面向用户的中文结论块，优先阅读这一段而不是 technical_summary。",
         },
     }
 
@@ -272,6 +389,7 @@ def _build_batch_summary_view(tv: str, total_cves: int, total_patches: int, skip
             "parallel_mode": workers > 1,
             "p2_enabled": p2_enabled,
         },
+        "statistics": batch_summary.get("statistics", {}),
         "level_distribution": {
             "levels": level_distribution.get("levels", l0_l5.get("levels", ["L0", "L1", "L2", "L3", "L4", "L5"])),
             "final_level_counts": level_distribution.get("final_level_counts", l0_l5.get("current_level_distribution", {})),

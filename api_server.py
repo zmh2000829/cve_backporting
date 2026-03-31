@@ -256,6 +256,7 @@ def _default_batch_validate_handler(payload: Dict[str, Any], config):
             "total": len(results) + len(errors),
             "success": len(results),
             "error": len(errors),
+            "statistics": batch_summary.get("statistics", {}),
             "level_distribution": batch_summary.get("level_distribution", {
                 "levels": l0_l5_summary.get("levels", ["L0", "L1", "L2", "L3", "L4", "L5"]),
                 "final_level_counts": l0_l5_summary.get("current_level_distribution", {}),

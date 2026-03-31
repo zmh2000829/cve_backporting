@@ -435,5 +435,14 @@ def aggregate_batch_validate_summary(results: list) -> dict:
             "special_risk_section_counts": dict(sorted(special_risk_summary.get("section_counts", {}).items())),
             "samples": special_risk_summary.get("samples", {}),
         },
+        "statistics": {
+            "levels": level_summary.get("levels", ["L0", "L1", "L2", "L3", "L4", "L5"]),
+            "final_level_counts": level_summary.get("current_level_distribution", {}),
+            "base_level_counts": level_summary.get("base_level_distribution", {}),
+            "critical_structure_change_count": critical_structure_change_count,
+            "any_special_risk_count": any_special_risk_count,
+            "manual_prerequisite_analysis_count": manual_prereq_analysis_count,
+            "special_risk_section_counts": dict(sorted(special_risk_summary.get("section_counts", {}).items())),
+        },
         "special_risk": special_risk_summary,
     }
