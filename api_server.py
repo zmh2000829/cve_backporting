@@ -256,6 +256,20 @@ def _default_batch_validate_handler(payload: Dict[str, Any], config):
             "total": len(results) + len(errors),
             "success": len(results),
             "error": len(errors),
+            "level_distribution": batch_summary.get("level_distribution", {
+                "levels": l0_l5_summary.get("levels", ["L0", "L1", "L2", "L3", "L4", "L5"]),
+                "final_level_counts": l0_l5_summary.get("current_level_distribution", {}),
+                "base_level_counts": l0_l5_summary.get("base_level_distribution", {}),
+            }),
+            "risk_hit_summary": batch_summary.get("risk_hit_summary", {
+                "any_special_risk": {
+                    "count": (batch_summary.get("special_risk") or {}).get("any_special_risk_count", 0),
+                },
+                "critical_structure_change": batch_summary.get("critical_structure_change", {}),
+                "special_risk_section_counts": (batch_summary.get("special_risk") or {}).get("section_counts", {}),
+            }),
+            "manual_prerequisite_analysis": batch_summary.get("manual_prerequisite_analysis", {}),
+            "verdict_distribution": batch_summary.get("verdict_distribution", {}),
         },
         "l0_l5_summary": l0_l5_summary,
         "batch_summary": batch_summary,

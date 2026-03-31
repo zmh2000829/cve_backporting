@@ -397,9 +397,16 @@ def aggregate_batch_validate_summary(results: list) -> dict:
             manual_prereq_analysis_count += 1
 
     total = len(results or [])
+    any_special_risk_count = special_risk_summary["any_special_risk_count"]
+    critical_structure_change_count = special_risk_summary["critical_structure_change_count"]
     return {
         "total": total,
         "l0_l5": level_summary,
+        "level_distribution": {
+            "levels": level_summary.get("levels", ["L0", "L1", "L2", "L3", "L4", "L5"]),
+            "final_level_counts": level_summary.get("current_level_distribution", {}),
+            "base_level_counts": level_summary.get("base_level_distribution", {}),
+        },
         "verdict_distribution": dict(sorted(verdict_counter.items())),
         "deterministic_exact_match": {
             "count": deterministic_exact_match_count,
@@ -407,14 +414,26 @@ def aggregate_batch_validate_summary(results: list) -> dict:
             "definition": "generated_vs_real.deterministic_exact_match == true",
         },
         "critical_structure_change": {
-            "count": special_risk_summary["critical_structure_change_count"],
-            "rate": round(special_risk_summary["critical_structure_change_count"] / total, 4) if total else 0.0,
+            "count": critical_structure_change_count,
+            "rate": round(critical_structure_change_count / total, 4) if total else 0.0,
         },
         "manual_prerequisite_analysis": {
             "count": manual_prereq_analysis_count,
             "rate": round(manual_prereq_analysis_count / total, 4) if total else 0.0,
             "dependency_bucket_distribution": dict(sorted(dependency_bucket_counter.items())),
             "definition": "strategy_buckets.dependency_bucket in {required, recommended}",
+        },
+        "risk_hit_summary": {
+            "any_special_risk": {
+                "count": any_special_risk_count,
+                "rate": round(any_special_risk_count / total, 4) if total else 0.0,
+            },
+            "critical_structure_change": {
+                "count": critical_structure_change_count,
+                "rate": round(critical_structure_change_count / total, 4) if total else 0.0,
+            },
+            "special_risk_section_counts": dict(sorted(special_risk_summary.get("section_counts", {}).items())),
+            "samples": special_risk_summary.get("samples", {}),
         },
         "special_risk": special_risk_summary,
     }

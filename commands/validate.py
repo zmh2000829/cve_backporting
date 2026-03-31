@@ -260,6 +260,8 @@ def _build_batch_reading_guide() -> dict:
 def _build_batch_summary_view(tv: str, total_cves: int, total_patches: int, skipped: int, workers: int, p2_enabled: bool, batch_summary: dict) -> dict:
     l0_l5 = batch_summary.get("l0_l5", {}) or {}
     special_risk = batch_summary.get("special_risk", {}) or {}
+    risk_hit_summary = batch_summary.get("risk_hit_summary", {}) or {}
+    level_distribution = batch_summary.get("level_distribution", {}) or {}
     return {
         "overview": {
             "target_version": tv,
@@ -271,8 +273,17 @@ def _build_batch_summary_view(tv: str, total_cves: int, total_patches: int, skip
             "p2_enabled": p2_enabled,
         },
         "level_distribution": {
-            "final_level_counts": l0_l5.get("current_level_distribution", {}),
-            "base_level_counts": l0_l5.get("base_level_distribution", {}),
+            "levels": level_distribution.get("levels", l0_l5.get("levels", ["L0", "L1", "L2", "L3", "L4", "L5"])),
+            "final_level_counts": level_distribution.get("final_level_counts", l0_l5.get("current_level_distribution", {})),
+            "base_level_counts": level_distribution.get("base_level_counts", l0_l5.get("base_level_distribution", {})),
+        },
+        "risk_hit_summary": {
+            "any_special_risk": risk_hit_summary.get("any_special_risk", {
+                "count": special_risk.get("any_special_risk_count", 0),
+            }),
+            "critical_structure_change": risk_hit_summary.get("critical_structure_change", batch_summary.get("critical_structure_change", {})),
+            "special_risk_section_counts": risk_hit_summary.get("special_risk_section_counts", special_risk.get("section_counts", {})),
+            "manual_prerequisite_analysis": batch_summary.get("manual_prerequisite_analysis", {}),
         },
         "key_findings": {
             "deterministic_exact_match": batch_summary.get("deterministic_exact_match", {}),
