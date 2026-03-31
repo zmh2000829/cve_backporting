@@ -5,10 +5,12 @@ import copy
 import json
 import logging
 import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Dict
 
 from core.config import ConfigLoader
+from core.git_manager import GitRepoManager
 from core.models import CveInfo
 from core.output_serializers import (
     aggregate_batch_validate_summary,
@@ -56,6 +58,17 @@ def _coerce_prereqs(payload: Dict[str, Any]) -> list:
     if isinstance(raw, list):
         return cli._coerce_commit_list(raw)
     return []
+
+
+def _coerce_workers(payload: Dict[str, Any], deep: bool = False) -> int:
+    try:
+        workers = int(payload.get("workers", 1) or 1)
+    except Exception:
+        workers = 1
+    workers = max(1, min(workers, 4))
+    if deep and workers > 2:
+        workers = 2
+    return workers
 
 
 def _build_mainline_cve_info(payload: Dict[str, Any], cve_id: str) -> CveInfo:
@@ -160,19 +173,18 @@ def _default_batch_validate_handler(payload: Dict[str, Any], config):
         raise ValueError("missing items")
 
     deep = bool(payload.get("deep", False))
-    git_mgr = cli._make_git_mgr(cfg, target)
+    workers = _coerce_workers(payload, deep=deep)
+    git_mgr = cli._make_git_mgr(cfg, target) if workers == 1 else None
     results = []
     errors = []
 
-    for idx, item in enumerate(items, 1):
+    def _run_item(idx, item):
         if not isinstance(item, dict):
-            errors.append({"index": idx, "reason": "invalid item"})
-            continue
+            return {"index": idx, "error": {"index": idx, "reason": "invalid item"}}
         cve_id = (item.get("cve_id") or "").strip()
         known_fix = (item.get("known_fix") or "").strip()
         if not cve_id or not known_fix:
-            errors.append({"index": idx, "cve_id": cve_id, "reason": "missing cve_id or known_fix"})
-            continue
+            return {"index": idx, "error": {"index": idx, "cve_id": cve_id, "reason": "missing cve_id or known_fix"}}
 
         known_prereqs = cli._coerce_commit_list(item.get("known_prereqs", []))
         cve_info = None
@@ -186,17 +198,47 @@ def _default_batch_validate_handler(payload: Dict[str, Any], config):
                 introduced_commits=[{"commit_id": intro, "subject": ""}] if intro else [],
             )
 
-        try:
-            result = cli._run_single_validate(
-                cfg, cve_id, target, known_fix, known_prereqs,
-                git_mgr=git_mgr, show_stages=False, cve_info=cve_info,
-                deep=deep,
-            )
-            result["l0_l5"] = build_l0_l5_view(result)
-            results.append(result)
-        except Exception as exc:
-            logger.exception("batch validate item failed: %s %s", cve_id, exc)
-            errors.append({"index": idx, "cve_id": cve_id, "reason": str(exc)})
+        local_git_mgr = git_mgr if git_mgr is not None else GitRepoManager(cfg.repositories, use_cache=False)
+        result = cli._run_single_validate(
+            cfg, cve_id, target, known_fix, known_prereqs,
+            git_mgr=local_git_mgr, show_stages=False, cve_info=cve_info,
+            deep=deep,
+        )
+        result["l0_l5"] = build_l0_l5_view(result)
+        return {"index": idx, "result": result}
+
+    if workers == 1:
+        for idx, item in enumerate(items, 1):
+            try:
+                out = _run_item(idx, item)
+                if out.get("error"):
+                    errors.append(out["error"])
+                else:
+                    results.append(out["result"])
+            except Exception as exc:
+                cve_id = item.get("cve_id") if isinstance(item, dict) else ""
+                logger.exception("batch validate item failed: %s %s", cve_id, exc)
+                errors.append({"index": idx, "cve_id": cve_id, "reason": str(exc)})
+    else:
+        ordered = {}
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="api-batch-validate") as executor:
+            future_map = {
+                executor.submit(_run_item, idx, item): (idx, item)
+                for idx, item in enumerate(items, 1)
+            }
+            for future in as_completed(future_map):
+                idx, item = future_map[future]
+                try:
+                    out = future.result()
+                    if out.get("error"):
+                        errors.append(out["error"])
+                    else:
+                        ordered[idx] = out["result"]
+                except Exception as exc:
+                    cve_id = item.get("cve_id") if isinstance(item, dict) else ""
+                    logger.exception("batch validate item failed: %s %s", cve_id, exc)
+                    errors.append({"index": idx, "cve_id": cve_id, "reason": str(exc)})
+        results = [ordered[idx] for idx in sorted(ordered)]
 
     l0_l5_summary = aggregate_l0_l5_levels(results)
     batch_summary = aggregate_batch_validate_summary([
@@ -206,6 +248,8 @@ def _default_batch_validate_handler(payload: Dict[str, Any], config):
         "ok": True,
         "operation": "batch-validate",
         "p2_enabled": bool(getattr(cfg.policy, "special_risk_rules_enabled", True)) if getattr(cfg, "policy", None) else True,
+        "workers": workers,
+        "parallel_mode": workers > 1,
         "results": results,
         "errors": errors,
         "summary": {

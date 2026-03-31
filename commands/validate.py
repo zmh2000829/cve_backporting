@@ -1,5 +1,6 @@
 """`validate` / `benchmark` / `batch-validate` 命令入口。"""
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import copy
 import json
 import os
@@ -48,6 +49,7 @@ def register(subparsers, parent):
     batch.add_argument("--target", dest="target_version", required=True)
     batch.add_argument("--offset", type=int, default=0, help="跳过前 N 个 CVE, 从第 N+1 个开始 (默认 0)")
     batch.add_argument("--limit", type=int, default=0, help="处理的 CVE 数量 (0=全部, 与 --offset 配合使用)")
+    batch.add_argument("--workers", type=int, default=1, help="并行 worker 数 (默认 1，推荐 2，上限 4；--deep 时建议 <=2)")
     batch.add_argument("--deep", action="store_true", help="深度分析模式: 漏洞分析+补丁检视+风险收益+合入建议")
     _add_p2_toggle(batch)
 
@@ -112,6 +114,115 @@ def _flush_live_report(path: str, target: str, total: int, passed: list, failed:
     }
     with open(path, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2, ensure_ascii=False, default=str)
+
+
+def _resolve_batch_workers(requested: int, deep: bool = False) -> int:
+    workers = max(1, int(requested or 1))
+    workers = min(workers, 4)
+    if deep and workers > 2:
+        workers = 2
+    return workers
+
+
+def _make_parallel_git_mgr(config):
+    from core.git_manager import GitRepoManager
+
+    return GitRepoManager(config.repositories, use_cache=False)
+
+
+def _execute_batch_validate_case(runtime, config, tv, cve_id, group, *, deep=False, git_mgr=None, show_stages=False):
+    pass_verdicts = {"identical", "essentially_same"}
+    primary = group["primary_fix"]
+    prereqs = group["prereq_fixes"]
+    cve_info = group.get("cve_info")
+    known_prereq_commits = [p["commit"] for p in prereqs]
+    worker_git_mgr = git_mgr if git_mgr is not None else _make_parallel_git_mgr(config)
+
+    result = None
+    for _attempt in range(1, 4):
+        result = runtime._run_single_validate(
+            config, cve_id, tv, primary["commit"], known_prereq_commits,
+            git_mgr=worker_git_mgr, show_stages=show_stages, cve_info=cve_info,
+            deep=deep,
+        )
+        has_patch = result.get("dryrun_detail", {}).get("has_adapted_patch", False)
+        verdict = result.get("generated_vs_real", {}).get("verdict", "no_data")
+        if has_patch or verdict not in ("no_data", "error"):
+            break
+
+    generated = result.get("generated_vs_real", {})
+    verdict = generated.get("verdict", "no_data")
+    core_sim = generated.get("core_similarity", 0)
+    method = result.get("dryrun_detail", {}).get("apply_method", "-")
+
+    prereq_validation = {}
+    if prereqs and result.get("dryrun_detail"):
+        tool_prereqs = result.get("tool_prereqs", [])
+        tool_prereq_ids = {tp.get("commit_id", "")[:12] for tp in tool_prereqs if tp.get("commit_id")}
+        known_ids = {commit[:12] for commit in known_prereq_commits}
+        matched = tool_prereq_ids & known_ids
+        tool_only = tool_prereq_ids - known_ids
+        known_only = known_ids - tool_prereq_ids
+
+        prereq_validation = {
+            "known_prereqs": len(known_ids),
+            "tool_recommended": len(tool_prereq_ids),
+            "matched": len(matched),
+            "matched_ids": sorted(matched),
+            "tool_only": sorted(tool_only),
+            "known_only": sorted(known_only),
+        }
+        if known_ids:
+            prereq_validation["recall"] = round(len(matched) / len(known_ids), 3)
+
+    result["prereq_cross_validation"] = prereq_validation
+    result["num_hulk_fixes"] = len(group["all_fixes"])
+
+    item = {
+        "cve_id": cve_id,
+        "known_fix": primary["commit"][:12],
+        "verdict": verdict,
+        "core_similarity": round(core_sim, 3),
+        "deterministic_exact_match": bool(generated.get("deterministic_exact_match")),
+        "method": method,
+        "num_fixes": len(group["all_fixes"]),
+        "num_prereqs": len(prereqs),
+        "prereq_recall": prereq_validation.get("recall", None),
+        "summary": result.get("summary", ""),
+    }
+
+    v2 = result.get("deep_analysis")
+    if v2 is not None:
+        rec = getattr(v2, "merge_recommendation", None)
+        if rec and hasattr(rec, "action"):
+            item["deep_action"] = rec.action
+            item["deep_summary"] = getattr(rec, "summary", "")
+            rb = getattr(rec, "risk_benefit", None)
+            if rb:
+                item["deep_overall_score"] = round(rb.overall_score, 2)
+                item["deep_overall_detail"] = rb.overall_detail
+
+    if verdict in pass_verdicts:
+        bucket = "passed"
+    else:
+        reason = result.get("summary", "")
+        if verdict == "no_data":
+            reason = reason or "无补丁数据可比较"
+        elif verdict == "different":
+            reason = reason or f"核心相似度仅 {core_sim:.0%}"
+        elif verdict == "partially_same":
+            reason = reason or f"部分一致 (核心相似度 {core_sim:.0%})"
+        item["reason"] = reason
+        bucket = "failed"
+
+    return {
+        "result": result,
+        "bucket": bucket,
+        "item": item,
+        "verdict": verdict,
+        "core_similarity": core_sim,
+        "method": method,
+    }
 
 
 def run_validate(args, config, runtime):
@@ -322,7 +433,8 @@ def run_batch_validate(args, config, runtime):
         return
 
     tv = args.target_version
-    git_mgr = runtime._make_git_mgr(config, tv)
+    workers = _resolve_batch_workers(getattr(args, "workers", 1), getattr(args, "deep", False))
+    git_mgr = runtime._make_git_mgr(config, tv) if workers == 1 else None
 
     all_cve_groups = OrderedDict()
     skipped = 0
@@ -397,6 +509,7 @@ def run_batch_validate(args, config, runtime):
         f"[bold]数据文件:[/] {args.file}",
         f"[bold]Mainline信息:[/] {has_mainline}/{len(cve_groups)} 个 CVE 使用 JSON 提供的 mainline commit (跳过 MITRE 爬取)",
         f"[bold]统计维度:[/] 每 CVE 一次验证 ({multi_fix_cves} 个含前置补丁, 额外 fix 作为 known_prereqs)",
+        f"[bold]并行:[/] workers={workers}  [dim](推荐 2；--deep 建议 <=2；每个任务使用独立 worktree)[/]",
     ]
     if offset or limit:
         parts = []
@@ -419,7 +532,7 @@ def run_batch_validate(args, config, runtime):
     live_report_path = os.path.join(out_dir, f"batch_validate_{tv}_{ts}.json")
     runtime.console.print(f"[dim]实时报告: {live_report_path} (每完成一个 CVE 自动更新)[/]")
 
-    cve_results = []
+    ordered_results = {}
     passed_list = []
     failed_list = []
     error_list = []
@@ -433,12 +546,13 @@ def run_batch_validate(args, config, runtime):
         "no_data": "[dim]- 无数据[/]",
     }
 
-    for ci, (cve_id, group) in enumerate(cve_groups.items(), 1):
+    entries = list(cve_groups.items())
+
+    def _render_case_header(ci, cve_id, group):
         primary = group["primary_fix"]
         prereqs = group["prereq_fixes"]
         cve_info = group.get("cve_info")
         src = "JSON" if cve_info else "MITRE"
-
         runtime.console.print(f"\n{'━' * 60}")
         fix_desc = f"主修复={primary['commit'][:12]}"
         if prereqs:
@@ -455,125 +569,84 @@ def run_batch_validate(args, config, runtime):
                     + "[/]"
                 )
 
-        known_prereq_commits = [p["commit"] for p in prereqs]
-        try:
-            result = None
-            for attempt in range(1, 4):
-                result = runtime._run_single_validate(
-                    config, cve_id, tv, primary["commit"], known_prereq_commits,
-                    git_mgr=git_mgr, show_stages=True, cve_info=cve_info,
+    def _record_error(ci, cve_id, group, err):
+        primary = group["primary_fix"]
+        ordered_results[ci] = {
+            "cve_id": cve_id, "known_fix": primary["commit"],
+            "target": tv, "worktree_commit": "", "checks": {},
+            "overall_pass": False, "summary": f"执行异常: {err}",
+            "dryrun_detail": {},
+            "generated_vs_real": {
+                "verdict": "error", "core_similarity": 0,
+                "file_coverage": 0,
+            },
+            "num_hulk_fixes": len(group["all_fixes"]),
+        }
+        error_list.append({
+            "cve_id": cve_id,
+            "known_fix": primary["commit"][:12],
+            "reason": str(err),
+        })
+
+    if workers == 1:
+        for ci, (cve_id, group) in enumerate(entries, 1):
+            _render_case_header(ci, cve_id, group)
+            try:
+                case_out = _execute_batch_validate_case(
+                    runtime, config, tv, cve_id, group,
                     deep=getattr(args, "deep", False),
+                    git_mgr=git_mgr,
+                    show_stages=True,
                 )
-                has_patch = result.get("dryrun_detail", {}).get("has_adapted_patch", False)
-                verdict = result.get("generated_vs_real", {}).get("verdict", "no_data")
-                if has_patch or verdict not in ("no_data", "error"):
-                    break
-                if attempt < 3:
-                    runtime.console.print(f"  [yellow]⟳ 未生成补丁 (verdict={verdict}), 重试 {attempt}/3...[/]")
+                ordered_results[ci] = case_out["result"]
+                icon = verdict_icons.get(case_out["verdict"], f"[dim]{case_out['verdict']}[/]")
+                runtime.console.print(
+                    f"  {icon}  核心相似度={case_out['core_similarity']:.0%}  方法={case_out['method']}"
+                )
+                if case_out["bucket"] == "passed":
+                    passed_list.append(case_out["item"])
+                else:
+                    failed_list.append(case_out["item"])
+            except Exception as e:
+                runtime.logger.exception("batch-validate 异常: %s %s", cve_id, e)
+                runtime.console.print(f"  [red]✘ 跳过 (异常: {e})[/]")
+                _record_error(ci, cve_id, group, e)
+            _flush_live_report(live_report_path, tv, len(cve_groups), passed_list, failed_list, error_list)
+    else:
+        runtime.console.print("[dim]并行模式下将关闭单条 Live 阶段面板，避免多 worktree 输出互相覆盖。[/]")
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="batch-validate") as executor:
+            future_map = {}
+            for ci, (cve_id, group) in enumerate(entries, 1):
+                _render_case_header(ci, cve_id, group)
+                future = executor.submit(
+                    _execute_batch_validate_case,
+                    runtime, config, tv, cve_id, group,
+                    deep=getattr(args, "deep", False),
+                    git_mgr=None,
+                    show_stages=False,
+                )
+                future_map[future] = (ci, cve_id, group)
 
-            generated = result.get("generated_vs_real", {})
-            verdict = generated.get("verdict", "no_data")
-            core_sim = generated.get("core_similarity", 0)
-            method = result.get("dryrun_detail", {}).get("apply_method", "-")
-
-            prereq_validation = {}
-            if prereqs and result.get("dryrun_detail"):
-                tool_prereqs = result.get("tool_prereqs", [])
-                tool_prereq_ids = {tp.get("commit_id", "")[:12] for tp in tool_prereqs if tp.get("commit_id")}
-                known_ids = {commit[:12] for commit in known_prereq_commits}
-                matched = tool_prereq_ids & known_ids
-                tool_only = tool_prereq_ids - known_ids
-                known_only = known_ids - tool_prereq_ids
-
-                prereq_validation = {
-                    "known_prereqs": len(known_ids),
-                    "tool_recommended": len(tool_prereq_ids),
-                    "matched": len(matched),
-                    "matched_ids": sorted(matched),
-                    "tool_only": sorted(tool_only),
-                    "known_only": sorted(known_only),
-                }
-                if known_ids:
-                    recall = len(matched) / len(known_ids)
-                    prereq_validation["recall"] = round(recall, 3)
-                    rc = "[green]" if recall >= 0.5 else "[yellow]"
+            for future in as_completed(future_map):
+                ci, cve_id, group = future_map[future]
+                try:
+                    case_out = future.result()
+                    ordered_results[ci] = case_out["result"]
+                    icon = verdict_icons.get(case_out["verdict"], f"[dim]{case_out['verdict']}[/]")
                     runtime.console.print(
-                        f"  [dim]前置补丁:[/] 已知={len(known_ids)} 工具推荐={len(tool_prereq_ids)} 命中={len(matched)}  {rc}recall={recall:.0%}[/]"
+                        f"  [bold cyan]完成[/] [{ci}/{len(cve_groups)}] {cve_id}  {icon}  核心相似度={case_out['core_similarity']:.0%}  方法={case_out['method']}"
                     )
+                    if case_out["bucket"] == "passed":
+                        passed_list.append(case_out["item"])
+                    else:
+                        failed_list.append(case_out["item"])
+                except Exception as e:
+                    runtime.logger.exception("batch-validate 并行异常: %s %s", cve_id, e)
+                    runtime.console.print(f"  [red]✘ 跳过[/] [{ci}/{len(cve_groups)}] {cve_id}  异常: {e}")
+                    _record_error(ci, cve_id, group, e)
+                _flush_live_report(live_report_path, tv, len(cve_groups), passed_list, failed_list, error_list)
 
-            result["prereq_cross_validation"] = prereq_validation
-            result["num_hulk_fixes"] = len(group["all_fixes"])
-            cve_results.append(result)
-
-            icon = verdict_icons.get(verdict, f"[dim]{verdict}[/]")
-            deep_hint = ""
-            v2 = result.get("deep_analysis")
-            if v2 is not None:
-                rec = getattr(v2, "merge_recommendation", None)
-                if rec and hasattr(rec, "action"):
-                    action_cn = {
-                        "merge": "直接合入",
-                        "merge_with_prereqs": "合入(需前置)",
-                        "manual_review": "需人工审查",
-                        "skip": "无需处理",
-                    }
-                    deep_hint = f"  [magenta]建议={action_cn.get(rec.action, rec.action)}[/]"
-            runtime.console.print(f"  {icon}  核心相似度={core_sim:.0%}  方法={method}{deep_hint}")
-
-            item = {
-                "cve_id": cve_id,
-                "known_fix": primary["commit"][:12],
-                "verdict": verdict,
-                "core_similarity": round(core_sim, 3),
-                "deterministic_exact_match": bool(generated.get("deterministic_exact_match")),
-                "method": method,
-                "num_fixes": len(group["all_fixes"]),
-                "num_prereqs": len(prereqs),
-                "prereq_recall": prereq_validation.get("recall", None),
-                "summary": result.get("summary", ""),
-            }
-            if v2 is not None:
-                rec = getattr(v2, "merge_recommendation", None)
-                if rec and hasattr(rec, "action"):
-                    item["deep_action"] = rec.action
-                    item["deep_summary"] = getattr(rec, "summary", "")
-                    rb = getattr(rec, "risk_benefit", None)
-                    if rb:
-                        item["deep_overall_score"] = round(rb.overall_score, 2)
-                        item["deep_overall_detail"] = rb.overall_detail
-            if verdict in pass_verdicts:
-                passed_list.append(item)
-            else:
-                reason = result.get("summary", "")
-                if verdict == "no_data":
-                    reason = reason or "无补丁数据可比较"
-                elif verdict == "different":
-                    reason = reason or f"核心相似度仅 {core_sim:.0%}"
-                elif verdict == "partially_same":
-                    reason = reason or f"部分一致 (核心相似度 {core_sim:.0%})"
-                item["reason"] = reason
-                failed_list.append(item)
-        except Exception as e:
-            runtime.logger.exception("batch-validate 异常: %s %s", cve_id, e)
-            runtime.console.print(f"  [red]✘ 跳过 (异常: {e})[/]")
-            cve_results.append({
-                "cve_id": cve_id, "known_fix": primary["commit"],
-                "target": tv, "worktree_commit": "", "checks": {},
-                "overall_pass": False, "summary": f"执行异常: {e}",
-                "dryrun_detail": {},
-                "generated_vs_real": {
-                    "verdict": "error", "core_similarity": 0,
-                    "file_coverage": 0,
-                },
-                "num_hulk_fixes": len(group["all_fixes"]),
-            })
-            error_list.append({
-                "cve_id": cve_id,
-                "known_fix": primary["commit"][:12],
-                "reason": str(e),
-            })
-
-        _flush_live_report(live_report_path, tv, len(cve_groups), passed_list, failed_list, error_list)
+    cve_results = [ordered_results[idx] for idx in sorted(ordered_results)]
 
     runtime.console.print(f"\n{'━' * 60}\n")
     runtime.render_batch_validate_report(cve_results, tv, policy_config=getattr(config, "policy", None))
@@ -584,6 +657,8 @@ def run_batch_validate(args, config, runtime):
     with open(full_report_path, "w", encoding="utf-8") as f:
         json.dump({
             "target": tv,
+            "workers": workers,
+            "parallel_mode": workers > 1,
             "total_cves": len(cve_groups),
             "total_patches": total_patches,
             "skipped_parse_errors": skipped,

@@ -284,6 +284,9 @@ python cli.py validate --cve CVE-2024-26633 --target 5.10-hulk --known-fix <comm
 # 批量验证
 python cli.py batch-validate --file cve_data.json --target 5.10-hulk
 
+# 单本地仓库的推荐并行方式
+python cli.py batch-validate --file cve_data.json --target 5.10-hulk --workers 2
+
 # 启动 HTTP API 服务（analyze / validate / batch-validate）
 python cli.py server --host 0.0.0.0 --port 8000
 
@@ -292,6 +295,14 @@ python cli.py benchmark --file benchmarks.yaml --target 5.10-hulk
 ```
 
 说明：`/api/analyze` 与 `/api/analyzer` 可互通，均支持 `target_version` 或 `target` 字段；所有返回均以 JSON 形式给出完整过程与规则详情。
+
+并行建议：
+
+- `--workers 1` 是最稳妥的默认值。
+- `--workers 2` 是单本地内核仓库下的推荐值。
+- 不建议一开始就超过 `4`，因为随后瓶颈通常会变成 `git worktree` 元数据、共享对象库和磁盘 I/O。
+- 使用 `--deep` 时，建议 `workers` 保持在 `1` 或 `2`。
+- 单仓也可以并行，因为每个 CVE 都在独立的临时 `git worktree` 中执行，不会共享同一个 checkout 工作树。
 
 ## CLI 代码结构
 
@@ -410,6 +421,7 @@ python cli.py server --host 127.0.0.1 --port 8000 --config config.yaml
 {
   "target": "5.10-hulk",
   "deep": false,
+  "workers": 2,
   "p2_enabled": true,
   "items": [
     {
@@ -443,6 +455,8 @@ python cli.py server --host 127.0.0.1 --port 8000 --config config.yaml
       "error": 0
     },
     "p2_enabled": true,
+    "workers": 2,
+    "parallel_mode": true,
     "batch_summary": {
       "l0_l5": {},
       "deterministic_exact_match": {
@@ -473,6 +487,12 @@ python cli.py server --host 127.0.0.1 --port 8000 --config config.yaml
 - `l0_l5`
 - `level_decision`
 - `validation_details`
+
+`/api/batch-validate` 也支持可选参数 `workers`，推荐值与 CLI 一致：
+
+- `1`：最稳妥
+- `2`：单本地仓库推荐
+- `deep=true` 时建议不超过 `2`
 
 ---
 

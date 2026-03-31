@@ -270,7 +270,18 @@ python cli.py batch-validate --file cve_data.json --target 5.10-hulk
 
 # Validate the first 10 CVEs only
 python cli.py batch-validate --file cve_data.json --target 5.10-hulk --limit 10
+
+# Recommended parallel mode for a single local repo
+python cli.py batch-validate --file cve_data.json --target 5.10-hulk --workers 2
 ```
+
+Recommended usage:
+
+- `--workers 1` is the safest default.
+- `--workers 2` is the recommended setting for one local kernel repository.
+- Do not start above `4`; after that, `git worktree` metadata, shared object storage, and disk I/O usually become the bottleneck.
+- With `--deep`, keep `--workers` at `1` or `2`.
+- Parallel batch validation is safe on a single local repo because each CVE runs in its own temporary `git worktree`; tasks do not share the same checked-out tree.
 
 ## `server` CLI and HTTP API
 
@@ -383,6 +394,7 @@ Key response fields:
 {
   "target": "5.10-hulk",
   "deep": false,
+  "workers": 2,
   "p2_enabled": true,
   "items": [
     {
@@ -416,6 +428,8 @@ Response includes per-item result list and summary:
       "error": 0
     },
     "p2_enabled": true,
+    "workers": 2,
+    "parallel_mode": true,
     "l0_l5_summary": {
       "levels": ["L0", "L1", "L2", "L3", "L4", "L5"],
       "current_level_distribution": {},
@@ -446,6 +460,12 @@ Each item inside `results` also contains:
 - `l0_l5`
 - `level_decision`
 - `validation_details`
+
+`workers` is optional for `/api/batch-validate`. Recommended values are the same as CLI:
+
+- `1` for safest execution
+- `2` recommended on a single local repository
+- `<= 2` when `deep=true`
 
 **JSON input format** — top-level dict keyed by CVE ID:
 
