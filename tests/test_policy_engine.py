@@ -62,6 +62,33 @@ class PolicyEngineRegressionTests(unittest.TestCase):
         self.assertEqual(vd.decision_skeleton["conclusion"]["direct_backport"]["status"], "direct")
         self.assertIn("admission_rules", vd.decision_skeleton["evidence"])
 
+    def test_l0_direct_backport_candidate_requires_no_semantic_markers(self):
+        diff = """diff --git a/x.c b/x.c
+@@ -1,2 +1,2 @@
+- ctx->limit = old;
++ ctx->limit = new;
+"""
+        p = _patch(diff, ["x.c"])
+        dr = DryRunResult(applies_cleanly=True, apply_method="strict")
+        eng = PolicyEngine(
+            PolicyConfig(
+                profile="default",
+                prerequisite_rules_enabled=False,
+                large_change_rules_enabled=False,
+                call_chain_rules_enabled=False,
+                critical_structure_rules_enabled=False,
+                special_risk_rules_enabled=False,
+                l1_api_surface_rules_enabled=False,
+                high_impact_single_line_rules_enabled=False,
+            ),
+            llm_enabled=False,
+        )
+        vd = eng.evaluate(p, dr, _MockGit({}), "any")
+        rule_ids = {hit["rule_id"] for hit in vd.level_decision.rule_hits}
+        self.assertEqual(vd.level_decision.level, "L0")
+        self.assertNotIn("direct_backport_candidate", rule_ids)
+        self.assertEqual(vd.decision_skeleton["conclusion"]["direct_backport"]["status"], "review")
+
     def test_strict_critical_structure_promotes_out_of_l0(self):
         diff = """diff --git a/lock.c b/lock.c
 @@ -1,2 +1,2 @@
@@ -200,6 +227,41 @@ void baz(void) {
         self.assertEqual(vd.level_decision.level, "L2")
         self.assertEqual(vd.level_decision.review_mode, "targeted-review")
         self.assertTrue(any("签名" in w or "入参" in w or "调用点" in w for w in vd.warnings))
+
+    def test_l1_comment_drift_is_sampled_as_light_drift(self):
+        diff = """diff --git a/f.c b/f.c
+@@ -1,2 +1,2 @@ int frob(int x) {
+-    /* old comment */
++    /* updated comment */
+ }
+"""
+        p = _patch(diff, ["f.c"])
+        dr = DryRunResult(applies_cleanly=True, apply_method="context-C1")
+        eng = PolicyEngine(PolicyConfig(profile="default"), llm_enabled=False)
+        vd = eng.evaluate(p, dr, _MockGit({"f.c": "int frob(int x) {\n    return x;\n}\n"}), "any")
+        rule_hits = {hit["rule_id"]: hit for hit in vd.level_decision.rule_hits}
+        self.assertEqual(vd.level_decision.level, "L1")
+        self.assertIn("l1_light_drift_sample", rule_hits)
+        self.assertIn("comment_only", rule_hits["l1_light_drift_sample"]["evidence"]["categories"])
+
+    def test_l1_local_variable_rename_is_sampled_as_light_drift(self):
+        diff = """diff --git a/f.c b/f.c
+@@ -1,4 +1,4 @@ int frob(int x) {
+-    int oldv = x + 1;
+-    return oldv;
++    int newv = x + 1;
++    return newv;
+ }
+"""
+        p = _patch(diff, ["f.c"])
+        dr = DryRunResult(applies_cleanly=True, apply_method="context-C1")
+        eng = PolicyEngine(PolicyConfig(profile="default"), llm_enabled=False)
+        vd = eng.evaluate(p, dr, _MockGit({"f.c": "int frob(int x) {\n    return x;\n}\n"}), "any")
+        rule_hits = {hit["rule_id"]: hit for hit in vd.level_decision.rule_hits}
+        self.assertEqual(vd.level_decision.level, "L1")
+        self.assertIn("l1_light_drift_sample", rule_hits)
+        self.assertIn("local_variable_rename", rule_hits["l1_light_drift_sample"]["evidence"]["categories"])
+        self.assertIn("oldv->newv", rule_hits["l1_light_drift_sample"]["evidence"]["rename_pairs"])
 
     def test_l1_api_surface_disabled(self):
         diff = """diff --git a/f.c b/f.c

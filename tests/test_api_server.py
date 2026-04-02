@@ -2,6 +2,7 @@
 """API server 结构化错误与结果状态回归。"""
 
 import os
+import re
 import sys
 import unittest
 from types import SimpleNamespace
@@ -26,6 +27,8 @@ class APIServerErrorShapeTests(unittest.TestCase):
         self.assertEqual(body["error"]["error_code"], "invalid_request")
         self.assertEqual(body["error"]["user_message"], "missing cve_id")
         self.assertFalse(body["error"]["retryable"])
+        self.assertIn("absolute_date", body["error"])
+        self.assertTrue(re.match(r"\d{4}-\d{2}-\d{2}", body["error"]["absolute_date"]))
 
     def test_validate_handler_keeps_result_status(self):
         config = SimpleNamespace(policy=SimpleNamespace(special_risk_rules_enabled=True))
@@ -64,6 +67,19 @@ class APIServerErrorShapeTests(unittest.TestCase):
 
         self.assertEqual(result["result_status"]["state"], "incomplete")
         self.assertEqual(result["result_status"]["incomplete_reason"], "missing_fix_commit")
+
+    def test_invalid_request_error_contains_actionable_fields(self):
+        body = api_server._build_invalid_request_error(
+            "/api/validate",
+            {"target_version": "5.10-hulk"},
+            "missing cve_id",
+        )
+        self.assertEqual(body["status_code"], 400)
+        self.assertEqual(body["error"]["route"], "/api/validate")
+        self.assertEqual(body["error"]["missing_input"], ["cve_id"])
+        self.assertIn("hint", body["error"])
+        self.assertEqual(body["error"]["suggested_fix"]["target_version"], "5.10-hulk")
+        self.assertEqual(body["error"]["suggested_fix"]["cve_id"], "CVE-2024-26633")
 
 
 if __name__ == "__main__":

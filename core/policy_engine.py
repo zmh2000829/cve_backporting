@@ -146,15 +146,26 @@ class PolicyEngine:
 
     def _summarize_prerequisites(self, prerequisite_patches, dependency_details) -> str:
         prereqs = list(prerequisite_patches or [])
+        semantic_labels = []
+        if any(getattr(p, "shared_lock_domains", None) for p in prereqs):
+            semantic_labels.append("共享锁域")
+        if any(getattr(p, "shared_fields", None) for p in prereqs):
+            semantic_labels.append("共享字段")
+        if any(getattr(p, "shared_state_points", None) for p in prereqs):
+            semantic_labels.append("状态迁移点")
+        semantic_suffix = f"；证据集中在{' / '.join(semantic_labels)}" if semantic_labels else ""
         if prereqs:
             strong = sum(1 for p in prereqs if getattr(p, "grade", "") == "strong")
             medium = sum(1 for p in prereqs if getattr(p, "grade", "") == "medium")
             if strong:
-                return f"存在 {strong} 个强依赖前置补丁，不能忽略关联补丁"
+                return f"存在 {strong} 个强依赖前置补丁，不能忽略关联补丁{semantic_suffix}"
             if medium:
-                return f"存在 {medium} 个中等依赖，建议一并核对关联补丁"
-            return f"仅发现 {len(prereqs)} 个弱关联补丁，可按需复核"
+                return f"存在 {medium} 个中等依赖，建议一并核对关联补丁{semantic_suffix}"
+            return f"仅发现 {len(prereqs)} 个弱关联补丁，可按需复核{semantic_suffix}"
         if dependency_details is not None:
+            reason = getattr(dependency_details, "no_prerequisite_reason", "")
+            if reason:
+                return f"未发现强/中依赖，可不优先考虑关联补丁；{reason}"
             return "未发现强/中依赖，可不优先考虑关联补丁"
         return "暂无依赖分析证据"
 
@@ -163,6 +174,8 @@ class PolicyEngine:
         rule_ids = {hit.get("rule_id") for hit in (rule_hits or [])}
         if "direct_backport_candidate" in rule_ids and not prereqs and level_decision.level == "L0":
             return "满足直接回合条件"
+        if "l1_light_drift_sample" in rule_ids and not prereqs and level_decision.level == "L1":
+            return "补丁主体接近可直回，当前漂移主要是注释/日志/等价宏/局部变量命名这类轻微样本"
         if "prerequisite_required" in rule_ids:
             return "不能直接回合，需先处理强依赖补丁"
         if level_decision.level in ("L0", "L1") and not prereqs:
@@ -382,6 +395,10 @@ class PolicyEngine:
                         "subject": p.subject,
                         "grade": getattr(p, "grade", ""),
                         "score": getattr(p, "score", 0.0),
+                        "shared_fields": list(getattr(p, "shared_fields", []) or [])[:6],
+                        "shared_lock_domains": list(getattr(p, "shared_lock_domains", []) or [])[:6],
+                        "shared_state_points": list(getattr(p, "shared_state_points", []) or [])[:6],
+                        "evidence_lines": list(getattr(p, "evidence_lines", []) or [])[:4],
                     }
                     for p in prereqs[:8]
                 ],

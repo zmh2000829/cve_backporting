@@ -226,7 +226,7 @@ Patch Input
 也就是说，`strict` 不再天然等于最终 `L0`。如果命中关键结构、调用链牵连或大改动规则，场景会被抬升：
 
 - `L0`：严格命中且无风险规则，才允许 `harmless=true`
-- `L1`：轻微上下文漂移，进入 LLM/人工“是否无害”复核路径
+- `L1`：轻微上下文漂移，进入 LLM/人工“是否无害”复核路径；当前会补注释/日志/等价宏/局部变量 rename 等正向样本证据
 - `L2`：中等风险，需人工对照 hunk / 调用面
 - `L3`：关键结构或语义敏感变更，需聚焦 review + 回归测试
 - `L4`：关键变更已沿调用/被调用链扩散，或冲突适配，需人工审批
@@ -266,6 +266,21 @@ Patch Input
 - 普通 `struct` 指针修改不会触发 `critical_structures`
 - `ops->helper()` 不会生成到 `helper` 的调用链边
 - 纯错误码返回变化不会触发 `p2_state_machine_control_flow`
+
+### 本轮新增：低级别准入与关联补丁证据继续收紧
+
+- **L0 正向准入条件更硬了。**
+  `strict` 不再天然等于“可直接回移候选”。现在还要求没有前置依赖、没有传播、没有 `special_risk` 命中、没有字段/状态/错误路径语义标记，才会命中 `direct_backport_candidate`。
+- **L1 不再只说“轻微漂移”，而是给出样本证据。**
+  新增 `l1_light_drift_sample`，会把注释漂移、日志文本漂移、等价宏替换、局部变量重命名这类边界样本显式写进证据。
+- **关联补丁开始输出语义域证据。**
+  `PrerequisitePatch` 现在会带上 `shared_fields / shared_lock_domains / shared_state_points / evidence_lines`，让“为什么建议先看关联补丁”可以落到共享字段、锁域和状态点，而不只是 hunk/function overlap。
+
+这意味着：
+
+- `L0` 只会留给真正缺少语义扰动的样本
+- `L1` 的“低风险”开始有正向证据支撑，不再只是模糊复核建议
+- 关联补丁判断开始从“位置接近”升级到“语义域重叠”
 
 后续业务规则可直接放到 `rules/*.py`，并通过 `policy.extra_rule_modules` 以插件方式加载。
 
@@ -364,12 +379,23 @@ python cli.py server --host 127.0.0.1 --port 8000 --config config.yaml
 }
 ```
 
-失败响应返回 HTTP `400/404/500`，例如：
+失败响应返回 HTTP `400/404/500`，并会补充“怎么改请求”的执行提示，例如：
 
 ```json
 {
   "ok": false,
-  "error": "错误信息"
+  "error": {
+    "error_code": "invalid_request",
+    "user_message": "缺少 CVE 标识。",
+    "route": "/api/validate",
+    "missing_input": ["cve_id"],
+    "hint": "请求体中补充 `cve_id`。",
+    "suggested_fix": {
+      "target_version": "5.10-hulk",
+      "cve_id": "CVE-2024-26633"
+    },
+    "absolute_date": "2026-04-02"
+  }
 }
 ```
 

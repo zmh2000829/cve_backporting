@@ -2376,7 +2376,7 @@ final_level = max(base_level, 所有命中规则给出的 level_floor)
 
 | 规则 | 触发条件 | 当前输出 |
 |------|----------|----------|
-| `direct_backport_candidate` | strict 命中、无强依赖、改动小、无明显传播 | admission，支持 `可直接回移` |
+| `direct_backport_candidate` | strict 命中、无强依赖、改动小、无明显传播、且无字段/状态/错误路径语义标记 | admission，支持 `可直接回移` |
 | `independent_patch` | 无强/中依赖，依赖分析结论可独立成立 | admission，支持 `可不优先考虑关联补丁` |
 | `large_change` | 改动行数 / hunk 数超阈值 | warning，至少抬升到 `L2` |
 | `critical_structures` | 锁/RCU/refcount，或布局敏感的 `struct` 场景命中 | high risk，至少抬升到 `L3` |
@@ -2390,6 +2390,7 @@ final_level = max(base_level, 所有命中规则给出的 level_floor)
 | `call_chain_propagation` | 修改函数存在调用/被调用牵连；已过滤伪调用与成员访问伪 callee | warning / high，关键变更时可抬升到 `L4` |
 | `call_chain_fanout` | callers + callees 扇出超阈值 | warning，至少抬升到 `L2` |
 | `l1_api_surface` | 签名变化 / return 路径变化 | low_level_veto，阻止误入 `L0/L1` |
+| `l1_light_drift_sample` | 注释漂移、日志文本漂移、等价宏替换、局部变量重命名 | admission，给 L1 “轻微漂移”提供正向样本证据 |
 | `single_line_high_impact` | 变更行数很少但命中锁/生命周期/布局/控制流敏感语义 | risk_profile，避免“单行=低风险”误判 |
 
 ### 规则意图收敛
@@ -2429,6 +2430,24 @@ final_level = max(base_level, 所有命中规则给出的 level_floor)
 - 普通 `struct` 指针修改不会触发 `critical_structures`
 - `ops->helper()` 不会生成到 `helper` 的调用链边
 - 纯错误码返回变化不会触发 `p2_state_machine_control_flow`
+
+---
+
+# 本轮新增：继续收紧 L0/L1 与关联补丁证据
+
+### L0 不是“strict 就放行”，L1 也不再只是模糊描述
+
+| 项目 | 现在新增的约束/证据 | 作用 |
+|------|--------------------|------|
+| L0 正向准入 | `direct_backport_candidate` 还要求无 `special_risk`、无字段/状态/错误路径标记、无传播、无前置依赖 | 让 “可直接回移” 只留给真正稳定的样本 |
+| L1 边界样本 | `l1_light_drift_sample` 显式记录注释漂移、日志文本漂移、等价宏替换、局部变量重命名 | 让 “轻微漂移” 变成可复核样本，而不是口头判断 |
+| 关联补丁证据 | `PrerequisitePatch` 输出 `shared_fields / shared_lock_domains / shared_state_points / evidence_lines` | 让“建议先看关联补丁”能落到共享字段、锁域、状态迁移证据 |
+
+### 这轮的实际效果
+
+- `L0` 准入更硬，不再把“strict 但有语义标记”的样本直接当成可直回
+- `L1` 解释更强，能告诉用户这是注释/日志/宏别名/局部变量 rename 这类轻微漂移
+- 依赖分析不再只讲 overlap，而是开始显式讲共享字段、共享锁域、共享状态点
 
 ---
 
@@ -2528,6 +2547,12 @@ final_level = max(base_level, 所有命中规则给出的 level_floor)
 - fixed / not-applicable / incomplete 不再返回空字段，而是显式给 `result_status`
 - 再看 `level_decision`
 - `L0-L5` 仍然保留，但不再是唯一理解入口
+
+### API 错误现在也可执行
+
+- `400/404/500` 不再只返回错误字符串
+- 现在统一补 `route / hint / missing_input / suggested_fix / absolute_date`
+- 平台调用方可以直接按返回的 `suggested_fix` 修请求，而不是二次猜参数
 
 ### `/api/batch-validate` 关键汇总字段
 

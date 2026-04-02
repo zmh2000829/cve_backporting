@@ -81,6 +81,26 @@ def _normalize_rule_messages(items) -> list:
     return dedupe_strings(out)[:6]
 
 
+def _summarize_prereq_evidence(items) -> list:
+    out = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        labels = []
+        if item.get("shared_lock_domains"):
+            labels.append("锁域")
+        if item.get("shared_fields"):
+            labels.append("字段")
+        if item.get("shared_state_points"):
+            labels.append("状态点")
+        if not labels:
+            continue
+        commit_id = str(item.get("commit_id", ""))[:12]
+        subject = str(item.get("subject", ""))
+        out.append(f"{commit_id} {subject}（共享{'/'.join(labels)}）".strip())
+    return dedupe_strings(out)[:6]
+
+
 def build_human_friendly_summary(data: dict, mode: str) -> dict:
     data = enrich_result_payload(data, mode)
     framework = data.get("analysis_framework") or {}
@@ -139,6 +159,7 @@ def build_human_friendly_summary(data: dict, mode: str) -> dict:
             "低级别否决命中": _normalize_rule_messages(evidence.get("low_level_veto_rules")),
             "直接回移否决命中": _normalize_rule_messages(evidence.get("direct_backport_veto_rules")),
             "高风险画像命中": _normalize_rule_messages(evidence.get("risk_profile_rules")),
+            "关联补丁证据": _summarize_prereq_evidence(evidence.get("prerequisite_patches")),
             "锁对象": (evidence.get("lock_objects") or [])[:8],
             "关键字段": (evidence.get("fields") or [])[:8],
             "状态点": (evidence.get("state_points") or [])[:8],

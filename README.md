@@ -181,8 +181,8 @@ This means the baseline says "how the patch applied", while the final level says
 
 | Level | What it really means | Typical baseline | What must be true to stay here | Typical reasons to be here | Maintainer action |
 |------|-----------------------|------------------|--------------------------------|----------------------------|-------------------|
-| **L0** | Deterministic safe lane | `strict` | No warning/high-risk promotion, no strong/medium prerequisite evidence, no critical structure hit, no meaningful propagation | Exact context match and stable semantics | Can be directly backported; keep only minimal regression validation |
-| **L1** | Low-risk drift lane, not auto-safe | `ignore-ws` / `context-C1` / `C1-ignore-ws` | Drift is limited to nearby context/whitespace/minor textual movement; no hard veto rules | Small context drift, formatting drift, nearby unrelated insertions | Run lightweight LLM/manual review before treating as harmless |
+| **L0** | Deterministic safe lane | `strict` | No warning/high-risk promotion, no strong/medium prerequisite evidence, no critical structure hit, no meaningful propagation, and no field/state/error-path semantic markers | Exact context match and stable semantics | Can be directly backported; keep only minimal regression validation |
+| **L1** | Low-risk drift lane, not auto-safe | `ignore-ws` / `context-C1` / `C1-ignore-ws` | Drift is limited to nearby context/whitespace/minor textual movement; no hard veto rules | Small context drift, formatting drift, comment-only drift, logging text drift, equivalent macro alias, local variable rename | Run lightweight LLM/manual review before treating as harmless |
 | **L2** | Caution lane for medium adaptation or medium warnings | `3way`, or L0/L1 promoted by rules | Core patch still looks structurally close, but evidence is no longer strong enough for low-level handling | Large diff warning, API-surface drift, error-path drift, fanout warning, medium prerequisite evidence | Do targeted hunk review and compare affected call sites / return paths |
 | **L3** | Semantic-sensitive lane | `regenerated`, or lower baseline promoted upward | A critical semantic dimension is touched, or prerequisite certainty becomes blocking | Locking/lifetime/state-machine/struct-field changes, strong prerequisite requirement, regenerated context | Do focused code review plus subsystem-specific regression tests |
 | **L4** | High-risk propagated lane | `conflict-adapted`, or critical changes promoted again | Critical semantic change is no longer local; it propagates or combines with hard veto signals | Critical structures plus caller/callee spread, conflict adaptation, stacked high-risk evidence | Require senior maintainer approval and explicit propagation review |
@@ -238,6 +238,7 @@ Rule engine highlights:
 - **Critical structure warning**: lock/RCU/refcount/struct-sensitive changes, promotes to at least `L3`
 - **Critical propagation**: critical changes that also spread along call chains promote to `L4`
 - **L1 API surface** (`l1_api_surface`): signature-line add/remove mismatch, return-statement delta
+- **L1 light drift samples** (`l1_light_drift_sample`): positive evidence for comment-only drift, logging text drift, equivalent macro aliases, and local-variable renames
 - **Pluggable extension** via `policy.extra_rule_modules` with `register_rules(registry, config=None)`, `RULES`, `register_level_policies(...)`, or `LEVEL_POLICIES`
 
 #### False-Positive Suppression For Level Inflation
@@ -266,6 +267,27 @@ Regression now covers the three representative negative cases:
 - plain `struct` pointer change should stay out of `critical_structures`
 - `ops->helper()` should not create a call-chain edge to `helper`
 - syntax-only error return changes should not trigger `p2_state_machine_control_flow`
+
+#### Low-Level Admission And Dependency Evidence Tightening
+
+This round also tightened the positive side of the policy:
+
+- **`direct_backport_candidate` for L0 is stricter now.**
+  A `strict` baseline is no longer enough by itself. The engine now also expects
+  no prerequisite evidence, no propagation, no `special_risk` hit, and no field/state/error-path semantic markers before it says "direct backport candidate".
+- **L1 now has positive low-drift samples instead of only vague review language.**
+  `l1_light_drift_sample` records when the observed drift looks like comment-only changes,
+  logging text changes, equivalent macro aliases, or local variable renames.
+- **Prerequisite patches now carry semantic overlap evidence.**
+  Dependency results expose shared fields, shared lock domains, shared state points,
+  and supporting evidence lines, so "consider prerequisite patches" is no longer based
+  only on hunk overlap and function overlap.
+
+This improves all three user-facing questions:
+
+- "Can this be directly backported?" now has a tighter L0 admission gate
+- "Do prerequisite patches matter?" now has concrete field/lock/state evidence
+- "Why is L1 still low-risk?" now has sample-based positive explanations
 
 Validate output (`validation_details.rule_version` **v3**) includes:
 - `level_decision` (`level`, `base_level`, `base_method`, `review_mode`, `next_action`, `harmless`, `confidence`, `reason`, `rule_hits`)
@@ -622,6 +644,14 @@ Available routes:
 - `POST /api/analyze` (alias: `POST /api/analyzer`)
 - `POST /api/validate`
 - `POST /api/batch-validate`
+
+Error responses are also actionable now. For `400/404/500`, the body includes:
+
+- `route` — which endpoint failed
+- `hint` — what the caller should fix next
+- `missing_input` — required fields that were missing
+- `suggested_fix` — a minimal request shape to retry with
+- `absolute_date` — the concrete response date for easier audit/debug correlation
 
 ---
 

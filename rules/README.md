@@ -22,8 +22,14 @@
 当前 Python 模块：
 
 - `base.py`：`RuleContext` / `PolicyRule` / `RuleRegistry` / `LevelPolicyRegistry`
-- `default_rules.py`：默认大改动、关键结构、调用链、L1 API surface、P2 专项高风险规则
+- `default_rules.py`：默认大改动、关键结构、调用链、L0 直接回移准入、L1 API surface、L1 轻微漂移样本、P2 专项高风险规则
 - `level_policies.py`：L0-L5 默认场景策略与 `level_floor` 抬升逻辑
+
+当前默认规则的文档口径要求：
+
+- `direct_backport_candidate` 代表“真正满足 L0 正向准入”，不能再把 `strict` 命中直接等同于可直接回移。
+- `l1_light_drift_sample` 负责给 L1 的“轻微漂移”提供正向样本证据，至少覆盖注释、日志、等价宏、局部变量 rename 这类边界场景。
+- 与关联补丁相关的证据，不应只停留在 hunk/function overlap；若代码中已有共享字段、锁域、状态点证据，应在结构化结果里显式输出。
 
 插件约定：
 

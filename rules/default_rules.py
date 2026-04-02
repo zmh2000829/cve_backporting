@@ -31,6 +31,116 @@ def _special_section(ctx: RuleContext, section: str) -> Dict:
     return ((report.get("sections") or {}).get(section) or {})
 
 
+_COMMENT_ONLY_RE = re.compile(r"^\s*(?://|/\*|\*|\*/)")
+_LOG_CALL_RE = re.compile(
+    r"\b(?:printk|pr_(?:debug|info|notice|warn|err)|"
+    r"dev_(?:dbg|info|warn|err)|netdev_(?:dbg|info|warn|err)|trace_[A-Za-z0-9_]+)\s*\("
+)
+_UPPER_TOKEN_RE = re.compile(r"\b[A-Z][A-Z0-9_]{2,}\b")
+_LOWER_IDENT_RE = re.compile(r"^[a-z_][a-z0-9_]*$")
+_C_KEYWORDS = {
+    "if", "else", "for", "while", "switch", "case", "break", "continue",
+    "return", "goto", "sizeof", "struct", "const", "unsigned", "signed",
+    "int", "long", "short", "char", "void", "static", "inline", "enum",
+}
+
+
+def _diff_pairs(diff_text: str, max_pairs: int = 6) -> List[tuple]:
+    minus_lines = []
+    plus_lines = []
+    for raw in (diff_text or "").splitlines():
+        if raw.startswith(("+++", "---")):
+            continue
+        if len(raw) < 2 or raw[0] not in "+-":
+            continue
+        body = raw[1:].strip()
+        if raw[0] == "-":
+            minus_lines.append(body)
+        else:
+            plus_lines.append(body)
+    if not minus_lines or len(minus_lines) != len(plus_lines) or len(minus_lines) > max_pairs:
+        return []
+    return list(zip(minus_lines, plus_lines))
+
+
+def _tokenize_for_rename(text: str) -> List[str]:
+    return re.findall(r"[A-Za-z_]\w*|->|==|!=|<=|>=|\|\||&&|[^\s]", text or "")
+
+
+def _is_local_identifier(tokens: List[str], idx: int) -> bool:
+    if idx < 0 or idx >= len(tokens):
+        return False
+    token = tokens[idx]
+    if not _LOWER_IDENT_RE.match(token):
+        return False
+    if token in _C_KEYWORDS:
+        return False
+    if idx + 1 < len(tokens) and tokens[idx + 1] == "(":
+        return False
+    if idx > 0 and tokens[idx - 1] in (".", "->"):
+        return False
+    return True
+
+
+def _scan_l1_light_drift(diff_text: str) -> Dict[str, List[str]]:
+    changed = _changed_bodies(diff_text)
+    pairs = _diff_pairs(diff_text)
+    categories: List[str] = []
+    rename_pairs: List[str] = []
+
+    if changed and all(_COMMENT_ONLY_RE.match(line) for line in changed):
+        categories.append("comment_only")
+
+    if changed and all(_LOG_CALL_RE.search(line) for line in changed):
+        categories.append("logging_only")
+
+    if pairs:
+        macro_alias = True
+        saw_macro_delta = False
+        local_rename = True
+        local_map = {}
+        reverse_map = {}
+
+        for minus_body, plus_body in pairs:
+            minus_norm = _UPPER_TOKEN_RE.sub("MACRO", minus_body)
+            plus_norm = _UPPER_TOKEN_RE.sub("MACRO", plus_body)
+            if minus_norm != plus_norm:
+                macro_alias = False
+            if minus_body != plus_body and re.search(_UPPER_TOKEN_RE, minus_body) and re.search(_UPPER_TOKEN_RE, plus_body):
+                saw_macro_delta = True
+
+            minus_tokens = _tokenize_for_rename(minus_body)
+            plus_tokens = _tokenize_for_rename(plus_body)
+            if len(minus_tokens) != len(plus_tokens):
+                local_rename = False
+                continue
+            for idx, (minus_tok, plus_tok) in enumerate(zip(minus_tokens, plus_tokens)):
+                if minus_tok == plus_tok:
+                    continue
+                if not (_is_local_identifier(minus_tokens, idx) and _is_local_identifier(plus_tokens, idx)):
+                    local_rename = False
+                    break
+                if local_map.get(minus_tok, plus_tok) != plus_tok or reverse_map.get(plus_tok, minus_tok) != minus_tok:
+                    local_rename = False
+                    break
+                local_map[minus_tok] = plus_tok
+                reverse_map[plus_tok] = minus_tok
+            if not local_rename:
+                break
+
+        if macro_alias and saw_macro_delta:
+            categories.append("equivalent_macro_alias")
+        if local_rename and local_map:
+            categories.append("local_variable_rename")
+            rename_pairs = [f"{src}->{dst}" for src, dst in sorted(local_map.items())[:4]]
+
+    return {
+        "categories": categories,
+        "rename_pairs": rename_pairs,
+        "sample_lines": changed[:4],
+    }
+
+
 class LargeChangeRule(PolicyRule):
     rule_id = "large_change"
     name = "Large Change Warning"
@@ -313,6 +423,15 @@ class DirectBackportRule(PolicyRule):
         max_fanout = max(
             [len(fi.callers) + len(fi.callees) for fi in ctx.function_impacts] or [0]
         )
+        risk_markers = getattr(ctx, "risk_markers", {}) or {}
+        special_summary = (getattr(ctx, "special_risk_report", {}) or {}).get("summary") or {}
+        semantic_marker_counts = {
+            "lock_objects": len(risk_markers.get("lock_objects", []) or []),
+            "fields": len(risk_markers.get("fields", []) or []),
+            "state_points": len(risk_markers.get("state_points", []) or []),
+            "error_path_nodes": len(risk_markers.get("error_path_nodes", []) or []),
+        }
+        dependency_confidence = getattr(ctx.dependency_details, "confidence_level", "") if ctx.dependency_details else ""
         if ctx.base_level != "L0":
             return None
         if ctx.prerequisite_patches:
@@ -321,12 +440,18 @@ class DirectBackportRule(PolicyRule):
             return None
         if ctx.critical_structure_hits or max_fanout > 0:
             return None
+        if any(semantic_marker_counts.values()):
+            return None
+        if special_summary.get("triggered_sections"):
+            return None
+        if dependency_confidence == "low":
+            return None
         return {
             "rule_id": self.rule_id,
             "name": self.name,
             "severity": self.severity,
             "level_floor": "L0",
-            "message": "满足直接回合候选条件：strict 命中、无前置依赖、改动规模小、无明显调用链牵连",
+            "message": "满足直接回合候选条件：strict 命中、无前置依赖、改动规模小、无明显传播且未观察到语义敏感信号",
             "evidence": {
                 "base_level": ctx.base_level,
                 "changed_lines": ctx.changed_lines,
@@ -334,6 +459,53 @@ class DirectBackportRule(PolicyRule):
                 "max_fanout": max_fanout,
                 "line_threshold": self.line_threshold,
                 "hunk_threshold": self.hunk_threshold,
+                "semantic_marker_counts": semantic_marker_counts,
+                "special_risk_sections": list(special_summary.get("triggered_sections") or []),
+                "dependency_confidence": dependency_confidence,
+            },
+        }
+
+
+class L1LightDriftSampleRule(PolicyRule):
+    rule_id = "l1_light_drift_sample"
+    name = "L1 Light Drift Sample"
+    severity = "info"
+    rule_class = "admission"
+    rule_scope = "low_level"
+
+    def evaluate(self, ctx: RuleContext) -> Optional[Dict]:
+        if ctx.base_level != "L1":
+            return None
+        if ctx.prerequisite_patches or ctx.critical_structure_hits:
+            return None
+        if any((len(fi.callers) + len(fi.callees)) > 0 for fi in (ctx.function_impacts or [])):
+            return None
+        summary = (ctx.special_risk_report or {}).get("summary") or {}
+        if summary.get("triggered_sections"):
+            return None
+
+        scan = _scan_l1_light_drift(ctx.patch.diff_code or "")
+        categories = scan.get("categories") or []
+        if not categories:
+            return None
+
+        labels = {
+            "comment_only": "注释漂移",
+            "logging_only": "日志文本漂移",
+            "equivalent_macro_alias": "等价宏替换",
+            "local_variable_rename": "局部变量重命名",
+        }
+        cn_categories = [labels.get(item, item) for item in categories]
+        return {
+            "rule_id": self.rule_id,
+            "name": self.name,
+            "severity": self.severity,
+            "level_floor": "L1",
+            "message": "当前 L1 漂移主要表现为轻微样本: " + " / ".join(cn_categories[:4]),
+            "evidence": {
+                "categories": categories,
+                "rename_pairs": scan.get("rename_pairs", []),
+                "sample_lines": scan.get("sample_lines", []),
             },
         }
 
@@ -506,7 +678,7 @@ class SingleLineHighImpactRule(PolicyRule):
     CATEGORY_PATTERNS = {
         "locking": re.compile(r"\b(spin_lock|spin_unlock|mutex_lock|mutex_unlock|read_lock|write_lock|rcu_|rwlock|down_write|up_write)\b"),
         "lifetime": re.compile(r"\b(refcount|kref|atomic_|kfree|kvfree|kmalloc|kzalloc|list_del|list_add)\b"),
-        "control_flow": re.compile(r"\b(if|else|goto|return|break|continue)\b"),
+        "control_flow": re.compile(r"\b(if|else|switch|goto|break|continue)\b"),
         "error_path": re.compile(r"\b(NULL|ERR_|IS_ERR|PTR_ERR|WARN_ON|BUG_ON)\b"),
         "layout": re.compile(r"\b(sizeof|offsetof|container_of)\b"),
     }
@@ -566,6 +738,7 @@ def register_rules(registry: RuleRegistry, config=None):
 
     if not config or getattr(config, "direct_backport_rules_enabled", True):
         registry.register(DirectBackportRule(direct_line_threshold, direct_hunk_threshold))
+        registry.register(L1LightDriftSampleRule())
 
     if not config or getattr(config, "large_change_rules_enabled", True):
         registry.register(LargeChangeRule(line_threshold, hunk_threshold))

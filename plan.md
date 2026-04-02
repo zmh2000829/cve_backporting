@@ -51,9 +51,9 @@
 
 | 编号 | 事项 | 状态 | 落地情况 |
 |---|---|---|---|
-| P1-1 | L0 正向准入条件继续收紧 | ⏳ | 已有 `direct_backport_candidate`，但仍需把“语义稳定、无传播、无关键结构、无前置依赖”做得更硬 |
-| P1-2 | L0/L1 负向否决条件继续补齐 | ⏳ | 已有 `large_change / l1_api_surface / single_line_high_impact / critical_structures`，但覆盖仍不均衡 |
-| P1-3 | L1 “轻微漂移”边界样本化 | ⏳ | 需要把注释、日志、等价宏替换、局部变量重命名等场景沉淀成白名单样本 |
+| P1-1 | L0 正向准入条件继续收紧 | ✅ | `direct_backport_candidate` 已要求同时满足：无前置依赖、无传播、无关键结构、无 `special_risk`、无字段/状态/错误路径语义标记；不再因“strict 命中”自动视为可直接回移 |
+| P1-2 | L0/L1 负向否决条件继续补齐 | ⏳ | 已进一步收紧 `single_line_high_impact` 的 `control_flow` 命中，纯 `return var` 这类 rename-only 场景不再误抬升；但仍需补更多 L0/L1 负例样本 |
+| P1-3 | L1 “轻微漂移”边界样本化 | ✅ | 已新增 `l1_light_drift_sample`，可对注释漂移、日志文本漂移、等价宏替换、局部变量重命名给出正向样本证据，避免 L1 只剩模糊描述 |
 | P1-4 | 固定“可直接回移”的准入说明 | ⏳ | 需要让 L0/L1 输出明确的“为什么可直回”，而不是只输出“为什么不能直回” |
 | P1-5 | 低级别准确率回归集 | ⏳ | 现有单测更偏规则逻辑，需要补真实 patch 样本回归，特别是 L0/L1 正负例 |
 
@@ -76,7 +76,7 @@
 | 编号 | 事项 | 状态 | 落地情况 |
 |---|---|---|---|
 | P3-1 | 关联补丁三档分类 | ✅ | 已落 `required / recommended / independent / weak_only` 分桶 |
-| P3-2 | 关联补丁证据化 | ⏳ | 当前仍主要依赖 hunk/function overlap，需要补 shared field / lock domain / state transition |
+| P3-2 | 关联补丁证据化 | ✅ | `PrerequisitePatch` 已补 `shared_fields / shared_lock_domains / shared_state_points / evidence_lines`，依赖评分和结论开始显式使用“共享字段/锁域/状态点”证据，而不只看 hunk/function overlap |
 | P3-3 | “为什么不需要关联补丁”正向说明 | ⏳ | 已有 `independent_patch` 规则，但证据还不够面向用户 |
 | P3-4 | 关联补丁可执行建议 | ⏳ | 需要把 `required` 场景收敛成“先带哪些补丁、为什么先带” |
 | P3-5 | validate 与 batch 的 prereq 召回统计 | ⏳ | 已有 `prereq_cross_validation`，但还没有沉淀成长期趋势视图 |
@@ -118,7 +118,7 @@
 | P6-4 | 批量结果做成工作清单 | ⏳ | `batch-validate` 需要直接给出 `可直接处理 / 需补前置 / 高风险需审批 / 情报不足待补` 四类分组，而不只是分布数字 |
 | P6-5 | 证据摘要去技术黑话 | ⏳ | 当前部分 warning 仍偏规则名视角，建议增加用户可读摘要，如“字段访问路径变化导致状态判断风险上升” |
 | P6-6 | TUI 阶段可见性增强 | ⏳ | 建议在阶段面板中增加耗时、候选数、命中依据摘要，减少“卡住了但不知道在做什么”的感受 |
-| P6-7 | API 错误返回可执行化 | ⏳ | 当前部分 400/500 只有错误字符串，建议补 `hint / missing_input / suggested_fix / absolute_date` 等字段 |
+| P6-7 | API 错误返回可执行化 | ✅ | `_error_body` 与 invalid request builder 已输出 `route / hint / missing_input / suggested_fix / absolute_date`，400/404/500 不再只有错误字符串，调用方可直接修请求 |
 | P6-8 | 批量统计加样本链接 | ⏳ | 批量 summary 应直接附典型样本列表，例如“哪些 CVE 导致 L4 上升、哪些命中 prerequisite_required” |
 | P6-9 | 人工审查清单模板 | ⏳ | 对 `L2/L3/L4/L5` 自动附带审查 checklist，例如“先看字段/锁对象/调用链/错误路径”，减少用户二次组织成本 |
 | P6-10 | 输出文件命名和目录整理 | ⏳ | 当前 `analysis_results` 中 analyze / validate / patch 文件并存，建议按 `run-id / mode / cve` 归档，降低人工查找成本 |

@@ -6,6 +6,7 @@ import json
 import logging
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Dict
 
@@ -288,20 +289,99 @@ def _json_response(status_code: int, body: Dict[str, Any]) -> bytes:
     return payload.encode("utf-8")
 
 
-def _error_body(error_code: str, user_message: str, *, technical_detail: str = "", retryable: bool = False, status_code: int = None) -> Dict[str, Any]:
+def _error_body(
+    error_code: str,
+    user_message: str,
+    *,
+    technical_detail: str = "",
+    retryable: bool = False,
+    status_code: int = None,
+    route: str = "",
+    hint: str = "",
+    missing_input: list = None,
+    suggested_fix: Dict[str, Any] = None,
+) -> Dict[str, Any]:
+    error = make_result_status(
+        state="error",
+        error_code=error_code,
+        user_message=user_message,
+        technical_detail=technical_detail or user_message,
+        retryable=retryable,
+    )
+    error.update({
+        "route": route or "",
+        "hint": hint or "",
+        "missing_input": list(missing_input or []),
+        "suggested_fix": suggested_fix or {},
+        "absolute_date": date.today().isoformat(),
+    })
     body = {
         "ok": False,
-        "error": make_result_status(
-            state="error",
-            error_code=error_code,
-            user_message=user_message,
-            technical_detail=technical_detail or user_message,
-            retryable=retryable,
-        ),
+        "error": error,
     }
     if status_code is not None:
         body["status_code"] = status_code
     return body
+
+
+def _build_invalid_request_error(route: str, payload: Dict[str, Any], detail: str) -> Dict[str, Any]:
+    missing_input = []
+    user_message = "请求参数不完整。"
+    hint = "请补齐必填字段后重试。"
+    suggested_fix: Dict[str, Any] = {}
+    route = route or ""
+    payload = payload or {}
+
+    if "missing target_version" in detail:
+        missing_input = ["target_version"]
+        user_message = "缺少目标分支标识。"
+        hint = "请求体中提供 `target_version`，也可兼容使用 `target` 或 `repo`。"
+        suggested_fix = {"target_version": payload.get("target_version") or payload.get("target") or "5.10-hulk"}
+    elif "missing known_fix" in detail:
+        missing_input = ["known_fix"]
+        user_message = "缺少已知真实修复 commit。"
+        hint = "`/api/validate` 需要 `known_fix`，用于和工具分析结果做对照验证。"
+        suggested_fix = {
+            "target_version": payload.get("target_version") or payload.get("target") or "5.10-hulk",
+            "cve_id": payload.get("cve_id") or "CVE-2024-26633",
+            "known_fix": "deadbeefdead",
+        }
+    elif "missing items" in detail:
+        missing_input = ["items"]
+        user_message = "缺少批量验证条目。"
+        hint = "`/api/batch-validate` 需要 `items` 数组，每项至少包含 `cve_id` 和 `known_fix`。"
+        suggested_fix = {
+            "target_version": payload.get("target_version") or payload.get("target") or "5.10-hulk",
+            "items": [{"cve_id": "CVE-2024-26633", "known_fix": "deadbeefdead"}],
+        }
+    elif "missing cve_id / cves / cve_ids" in detail:
+        missing_input = ["cve_id"]
+        user_message = "缺少 CVE 标识。"
+        hint = "`/api/analyze` 至少提供 `cve_id`、`cves` 或 `cve_ids` 之一。"
+        suggested_fix = {
+            "target_version": payload.get("target_version") or payload.get("target") or "5.10-hulk",
+            "cve_id": "CVE-2024-26633",
+        }
+    elif "missing cve_id" in detail:
+        missing_input = ["cve_id"]
+        user_message = "缺少 CVE 标识。"
+        hint = "请求体中补充 `cve_id`。"
+        suggested_fix = {
+            "target_version": payload.get("target_version") or payload.get("target") or "5.10-hulk",
+            "cve_id": "CVE-2024-26633",
+        }
+
+    return _error_body(
+        "invalid_request",
+        user_message,
+        technical_detail=detail,
+        retryable=False,
+        status_code=400,
+        route=route,
+        hint=hint,
+        missing_input=missing_input,
+        suggested_fix=suggested_fix,
+    )
 
 
 class APIRequestHandler(BaseHTTPRequestHandler):
@@ -338,18 +418,42 @@ class APIRequestHandler(BaseHTTPRequestHandler):
                 "routes": sorted(POST_ROUTES | {"GET /health"}),
             })
             return
-        self._send_json(404, _error_body("not_found", "路由不存在。", technical_detail=self.path, status_code=404))
+        self._send_json(404, _error_body(
+            "not_found",
+            "路由不存在。",
+            technical_detail=self.path,
+            status_code=404,
+            route=self.path,
+            hint="请检查 URL 是否为已支持的路由。",
+            suggested_fix={"available_routes": sorted(POST_ROUTES | {"GET /health"})},
+        ))
 
     def do_POST(self):
         route = self.path.split("?", 1)[0]
         if route not in POST_ROUTES:
-            self._send_json(404, _error_body("not_found", "路由不存在。", technical_detail=route, status_code=404))
+            self._send_json(404, _error_body(
+                "not_found",
+                "路由不存在。",
+                technical_detail=route,
+                status_code=404,
+                route=route,
+                hint="请使用 `/api/analyze`、`/api/validate` 或 `/api/batch-validate`。",
+                suggested_fix={"available_routes": sorted(POST_ROUTES)},
+            ))
             return
 
         try:
             payload = self._read_json()
         except ValueError as exc:
-            self._send_json(400, _error_body("invalid_json", "请求体不是合法 JSON。", technical_detail=str(exc), status_code=400))
+            self._send_json(400, _error_body(
+                "invalid_json",
+                "请求体不是合法 JSON。",
+                technical_detail=str(exc),
+                status_code=400,
+                route=route,
+                hint="请确认请求体是 UTF-8 编码的标准 JSON，且字段名使用双引号。",
+                suggested_fix={"example": {"target_version": "5.10-hulk", "cve_id": "CVE-2024-26633"}},
+            ))
             return
 
         try:
@@ -363,7 +467,7 @@ class APIRequestHandler(BaseHTTPRequestHandler):
             else:
                 result = BATCH_VALIDATE_HANDLER(payload, cfg)
         except ValueError as exc:
-            self._send_json(400, _error_body("invalid_request", str(exc), technical_detail=str(exc), status_code=400))
+            self._send_json(400, _build_invalid_request_error(route, payload, str(exc)))
             return
         except Exception as exc:
             logger.exception("request failed route=%s", route)
@@ -373,6 +477,8 @@ class APIRequestHandler(BaseHTTPRequestHandler):
                 technical_detail=f"{exc}\n{traceback.format_exc()}",
                 retryable=True,
                 status_code=500,
+                route=route,
+                hint="请保留 technical_detail，并结合 route、absolute_date 和请求参数重试或排查。",
             ))
             return
 

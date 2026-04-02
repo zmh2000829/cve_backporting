@@ -150,6 +150,10 @@ class PrerequisitePatch:
     overlap_funcs: List[str] = field(default_factory=list)
     overlap_hunks: int = 0      # 重叠 hunk 数量
     adjacent_hunks: int = 0     # 相邻 hunk 数量
+    shared_fields: List[str] = field(default_factory=list)
+    shared_lock_domains: List[str] = field(default_factory=list)
+    shared_state_points: List[str] = field(default_factory=list)
+    evidence_lines: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -210,6 +214,8 @@ class DependencyAnalysisDetails:
     dryrun_method: str = ""                     # DryRun 通过的方法 (strict/fuzz/3way/etc)
     analysis_narrative: List[str] = field(default_factory=list)  # 拟人化分析过程 (5-6 条)
     manual_review_checklist: List[str] = field(default_factory=list)  # 人工审查清单
+    semantic_overlap_summary: Dict[str, int] = field(default_factory=dict)
+    prerequisite_evidence_samples: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
