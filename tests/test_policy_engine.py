@@ -9,6 +9,7 @@ from types import SimpleNamespace
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import api_server
+import cli
 from core.config import PolicyConfig, POLICY_PROFILE_PRESETS
 from core.models import DependencyAnalysisDetails, DryRunResult, PatchInfo, PrerequisitePatch
 from core.output_serializers import aggregate_batch_validate_summary
@@ -404,6 +405,30 @@ int foo(void) {
         ])
         self.assertEqual(summary["l0_l5"]["current_level_distribution"]["L0"], 1)
         self.assertEqual(summary["l0_l5"]["current_level_distribution"]["L3"], 1)
+        self.assertEqual(summary["deterministic_exact_match"]["count"], 1)
+        self.assertEqual(summary["critical_structure_change"]["count"], 1)
+        self.assertEqual(summary["manual_prerequisite_analysis"]["count"], 1)
+
+    def test_batch_summary_accepts_friendly_validate_json(self):
+        friendly = cli._prepare_validate_json({
+            "cve_id": "CVE-1",
+            "target_version": "5.10-hulk",
+            "level_decision": {"level": "L4", "base_level": "L0", "base_method": "strict"},
+            "l0_l5": {"current_level": "L4", "base_level": "L0"},
+            "generated_vs_real": {"verdict": "identical", "deterministic_exact_match": True},
+            "validation_details": {
+                "strategy_buckets": {"dependency_bucket": "required"},
+                "special_risk_report": {
+                    "summary": {
+                        "triggered_sections": ["state_machine_control_flow"],
+                        "has_critical_structure_change": True,
+                    }
+                },
+            },
+        })
+        summary = aggregate_batch_validate_summary([friendly])
+        self.assertEqual(summary["l0_l5"]["current_level_distribution"]["L4"], 1)
+        self.assertEqual(summary["l0_l5"]["base_level_distribution"]["L0"], 1)
         self.assertEqual(summary["deterministic_exact_match"]["count"], 1)
         self.assertEqual(summary["critical_structure_change"]["count"], 1)
         self.assertEqual(summary["manual_prerequisite_analysis"]["count"], 1)

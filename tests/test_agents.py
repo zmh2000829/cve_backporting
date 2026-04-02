@@ -16,6 +16,8 @@ import sys
 import os
 import json
 import logging
+import unittest
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -26,11 +28,13 @@ from agents.analysis import AnalysisAgent
 from agents.dependency import DependencyAgent
 from agents.dryrun import DryRunAgent
 from pipeline import Pipeline
+from services.history_loader import detect_report_mode
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
 _config = None
+_FIXTURE_ROOT = Path(__file__).parent / "fixtures"
 
 
 def _cfg():
@@ -59,6 +63,21 @@ def _save(name: str, data):
     with open(p, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False, default=str)
     print(f"  保存: {p}")
+
+
+class AgentSmokeDiscoveryTests(unittest.TestCase):
+    def test_history_fixtures_are_present(self):
+        self.assertTrue((_FIXTURE_ROOT / "history" / "analyze_fixed_legacy.json").exists())
+        self.assertTrue((_FIXTURE_ROOT / "history" / "validate_legacy.json").exists())
+
+    def test_detect_report_mode_for_legacy_examples(self):
+        with (_FIXTURE_ROOT / "history" / "analyze_fixed_legacy.json").open("r", encoding="utf-8") as handle:
+            analyze_payload = json.load(handle)
+        with (_FIXTURE_ROOT / "history" / "validate_legacy.json").open("r", encoding="utf-8") as handle:
+            validate_payload = json.load(handle)
+
+        self.assertEqual(detect_report_mode(analyze_payload), "analyze")
+        self.assertEqual(detect_report_mode(validate_payload), "validate")
 
 
 # ─── Tests ───────────────────────────────────────────────────────────

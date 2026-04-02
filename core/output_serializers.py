@@ -265,8 +265,47 @@ def aggregate_strategy_buckets(results: list) -> dict:
     }
 
 
-def build_l0_l5_view(result: dict) -> dict:
+def _normalize_aggregatable_result(result: dict) -> dict:
+    """兼容 raw validate result 与 friendly-json validate report 两种形态。"""
     if not isinstance(result, dict):
+        return {}
+
+    technical = result.get("technical_details")
+    if not isinstance(technical, dict):
+        return result
+
+    summary = result.get("summary") or {}
+    overview = summary.get("overview") or {}
+    normalized = dict(result)
+    normalized["cve_id"] = normalized.get("cve_id") or overview.get("cve_id", "")
+
+    for key in (
+        "checks",
+        "issues",
+        "result_status",
+        "analysis_framework",
+        "l0_l5",
+        "level_decision",
+        "validation_details",
+        "dryrun_detail",
+        "function_impacts",
+        "generated_vs_real",
+        "diff_comparison",
+        "tool_prereqs",
+        "known_prereqs_detail",
+        "analysis_stages",
+        "analysis_narrative",
+        "rules",
+    ):
+        if key not in normalized and key in technical:
+            normalized[key] = technical.get(key)
+
+    return normalized
+
+
+def build_l0_l5_view(result: dict) -> dict:
+    result = _normalize_aggregatable_result(result)
+    if not result:
         return {}
 
     level_decision = serialize_level_decision(result.get("level_decision"))
@@ -337,10 +376,11 @@ def aggregate_special_risk_metrics(results: list) -> dict:
     }
 
     for result in results or []:
-        if not isinstance(result, dict):
+        normalized = _normalize_aggregatable_result(result)
+        if not normalized:
             continue
-        cve_id = result.get("cve_id", "")
-        validation_details = serialize_validation_details(result.get("validation_details"))
+        cve_id = normalized.get("cve_id", "")
+        validation_details = serialize_validation_details(normalized.get("validation_details"))
         report = validation_details.get("special_risk_report") or {}
         summary = report.get("summary") or {}
         triggered_sections = summary.get("triggered_sections") or []
@@ -353,7 +393,7 @@ def aggregate_special_risk_metrics(results: list) -> dict:
             if cve_id and len(samples["critical_structure_change_cves"]) < 20:
                 samples["critical_structure_change_cves"].append(cve_id)
 
-        generated = result.get("generated_vs_real") or {}
+        generated = normalized.get("generated_vs_real") or {}
         if generated.get("deterministic_exact_match") and cve_id:
             if len(samples["deterministic_exact_match_cves"]) < 20:
                 samples["deterministic_exact_match_cves"].append(cve_id)
@@ -376,19 +416,30 @@ def aggregate_batch_validate_summary(results: list) -> dict:
     special_risk_summary = aggregate_special_risk_metrics(results)
     dependency_bucket_counter = Counter()
     verdict_counter = Counter()
+    result_state_counter = Counter()
+    incomplete_reason_counter = Counter()
     deterministic_exact_match_count = 0
     manual_prereq_analysis_count = 0
 
     for result in results or []:
-        if not isinstance(result, dict):
+        normalized = _normalize_aggregatable_result(result)
+        if not normalized:
             continue
-        generated = result.get("generated_vs_real") or {}
+        generated = normalized.get("generated_vs_real") or {}
         verdict = generated.get("verdict", "no_data")
         verdict_counter[verdict] += 1
         if generated.get("deterministic_exact_match"):
             deterministic_exact_match_count += 1
 
-        validation_details = serialize_validation_details(result.get("validation_details"))
+        status = normalized.get("result_status") or {}
+        state = status.get("state", "")
+        if state:
+            result_state_counter[state] += 1
+        incomplete_reason = status.get("incomplete_reason", "")
+        if incomplete_reason:
+            incomplete_reason_counter[incomplete_reason] += 1
+
+        validation_details = serialize_validation_details(normalized.get("validation_details"))
         strategy_buckets = validation_details.get("strategy_buckets") or {}
         dep_bucket = strategy_buckets.get("dependency_bucket", "")
         if dep_bucket:
@@ -408,6 +459,8 @@ def aggregate_batch_validate_summary(results: list) -> dict:
             "base_level_counts": level_summary.get("base_level_distribution", {}),
         },
         "verdict_distribution": dict(sorted(verdict_counter.items())),
+        "result_state_distribution": dict(sorted(result_state_counter.items())),
+        "incomplete_reason_distribution": dict(sorted(incomplete_reason_counter.items())),
         "deterministic_exact_match": {
             "count": deterministic_exact_match_count,
             "rate": round(deterministic_exact_match_count / total, 4) if total else 0.0,
@@ -443,6 +496,8 @@ def aggregate_batch_validate_summary(results: list) -> dict:
             "any_special_risk_count": any_special_risk_count,
             "manual_prerequisite_analysis_count": manual_prereq_analysis_count,
             "special_risk_section_counts": dict(sorted(special_risk_summary.get("section_counts", {}).items())),
+            "result_state_distribution": dict(sorted(result_state_counter.items())),
+            "incomplete_reason_distribution": dict(sorted(incomplete_reason_counter.items())),
         },
         "special_risk": special_risk_summary,
     }

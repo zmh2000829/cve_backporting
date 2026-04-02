@@ -38,163 +38,18 @@ import difflib
 from collections import Counter
 from typing import List, Optional, Tuple
 
+from agents.dryrun_helpers import (
+    clean_hunk_lines as _clean_hunk_lines,
+    is_trivial_anchor as _is_trivial_anchor,
+    split_hunk_segments as _split_hunk_segments,
+    split_to_sub_hunks as _split_to_sub_hunks,
+)
 from core.models import PatchInfo, DryRunResult
 from core.git_manager import GitRepoManager
 from core.code_matcher import CodeMatcher, PatchContextExtractor
 from core.search_report import HunkSearchReport, StrategyResult, DetailedSearchReport
 
 logger = logging.getLogger(__name__)
-
-_NOISE_PREFIXES = ("\\",)
-
-
-def _clean_hunk_lines(lines: List[str]) -> List[str]:
-    return [l for l in lines
-            if not any(l.startswith(p) for p in _NOISE_PREFIXES)]
-
-
-_TRIVIAL_ANCHORS = frozenset({
-    "return 0;", "return ret;", "return;", "return -1;",
-    "return err;", "return rc;", "return result;",
-    "return NULL;", "return false;", "return true;",
-    "return -EINVAL;", "return -ENOMEM;", "return -EIO;",
-    "break;", "continue;", "default:",
-    "{", "}", "} else {", "else {",
-    "out:", "err:", "error:", "unlock:", "fail:",
-})
-
-
-def _is_trivial_anchor(line: str) -> bool:
-    s = line.strip()
-    if not s or len(s) < 4:
-        return True
-    if s in _TRIVIAL_ANCHORS:
-        return True
-    if s.startswith("//") or s.startswith("/*") or s.startswith("*"):
-        return True
-    return False
-
-
-def _split_hunk_segments(hunk_lines: List[str]):
-    """
-    拆分 hunk → (ctx_before, removed, added, ctx_after)
-    ctx_before: 第一个变更行之前的 context
-    ctx_after:  最后一个变更行之后的 context
-    """
-    clean = _clean_hunk_lines(hunk_lines)
-    ctx_before, removed, added, ctx_after = [], [], [], []
-    first_change, last_change = len(clean), -1
-
-    for i, l in enumerate(clean):
-        if l.startswith("-") or l.startswith("+"):
-            first_change = min(first_change, i)
-            last_change = max(last_change, i)
-
-    for i, l in enumerate(clean):
-        if l.startswith("-"):
-            removed.append(l[1:])
-        elif l.startswith("+"):
-            added.append(l[1:])
-        else:
-            line = l[1:] if l.startswith(" ") else l
-            if i < first_change:
-                ctx_before.append(line)
-            elif i > last_change:
-                ctx_after.append(line)
-
-    return ctx_before, removed, added, ctx_after
-
-
-def _parse_hunk_regions(hunk_lines: List[str]):
-    """
-    将 hunk 解析为有序的区域列表，正确保留多变更区域之间的 context。
-    返回: [{"type": "context", "lines": [...]},
-           {"type": "change",  "removed": [...], "added": [...]},
-           ...]
-    """
-    clean = _clean_hunk_lines(hunk_lines)
-    regions = []
-    current_ctx = []
-    current_removed = []
-    current_added = []
-    in_change = False
-
-    for line in clean:
-        if line.startswith("-"):
-            if not in_change and current_ctx:
-                regions.append({"type": "context", "lines": current_ctx})
-                current_ctx = []
-            in_change = True
-            current_removed.append(line[1:])
-        elif line.startswith("+"):
-            if not in_change and current_ctx:
-                regions.append({"type": "context", "lines": current_ctx})
-                current_ctx = []
-            in_change = True
-            current_added.append(line[1:])
-        else:
-            text = line[1:] if line.startswith(" ") else line
-            if in_change:
-                regions.append({
-                    "type": "change",
-                    "removed": current_removed,
-                    "added": current_added,
-                })
-                current_removed = []
-                current_added = []
-                in_change = False
-            current_ctx.append(text)
-
-    if in_change:
-        regions.append({
-            "type": "change",
-            "removed": current_removed,
-            "added": current_added,
-        })
-    elif current_ctx:
-        regions.append({"type": "context", "lines": current_ctx})
-
-    return regions
-
-
-def _split_to_sub_hunks(hunk_header: str, hunk_lines: List[str]):
-    """
-    将包含多个变更区域的 hunk 拆分为独立的 sub-hunk。
-    每个 sub-hunk 只有一个连续的变更区域和各自的 context。
-    单区域 hunk 原样返回。
-    """
-    regions = _parse_hunk_regions(hunk_lines)
-    change_indices = [i for i, r in enumerate(regions)
-                      if r["type"] == "change"]
-
-    if len(change_indices) <= 1:
-        return [(hunk_header, hunk_lines)]
-
-    sub_hunks = []
-    for ci in change_indices:
-        change = regions[ci]
-
-        ctx_before = []
-        if ci > 0 and regions[ci - 1]["type"] == "context":
-            ctx_before = regions[ci - 1]["lines"][-3:]
-
-        ctx_after = []
-        if ci + 1 < len(regions) and regions[ci + 1]["type"] == "context":
-            ctx_after = regions[ci + 1]["lines"][:3]
-
-        sub_lines = []
-        for l in ctx_before:
-            sub_lines.append(" " + l)
-        for l in change["removed"]:
-            sub_lines.append("-" + l)
-        for l in change["added"]:
-            sub_lines.append("+" + l)
-        for l in ctx_after:
-            sub_lines.append(" " + l)
-
-        sub_hunks.append((hunk_header, sub_lines))
-
-    return sub_hunks
 
 
 class DryRunAgent:

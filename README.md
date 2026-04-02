@@ -153,6 +153,76 @@ Default scenario meanings:
 - **L4**: high-risk propagation, conflict adaptation, or critical changes spread along caller/callee chains; manual approval required
 - **L5**: verified-direct / unknown fallback path; lowest confidence
 
+#### How To Read L0-L5 Correctly
+
+`L0-L5` is not a raw patch-difficulty score and not a pure semantic-risk score.
+It is an **operational review tier** derived from three signals together:
+
+- **Applicability confidence**: how deterministic the DryRun baseline was
+- **Prerequisite certainty**: whether related patches must be considered first
+- **Semantic blast radius**: whether the change touches critical structures, state transitions, error paths, or caller/callee propagation
+
+In other words:
+
+- `strict != always L0`
+- `verified-direct != always semantically worst`
+- `single-line != low risk`
+
+The final level should be read with:
+
+```text
+final_level = max(base_level, all rule-driven level_floor promotions)
+```
+
+This means the baseline says "how the patch applied", while the final level says
+"how cautiously a maintainer should treat this backport result".
+
+#### Deep Scenario Semantics
+
+| Level | What it really means | Typical baseline | What must be true to stay here | Typical reasons to be here | Maintainer action |
+|------|-----------------------|------------------|--------------------------------|----------------------------|-------------------|
+| **L0** | Deterministic safe lane | `strict` | No warning/high-risk promotion, no strong/medium prerequisite evidence, no critical structure hit, no meaningful propagation | Exact context match and stable semantics | Can be directly backported; keep only minimal regression validation |
+| **L1** | Low-risk drift lane, not auto-safe | `ignore-ws` / `context-C1` / `C1-ignore-ws` | Drift is limited to nearby context/whitespace/minor textual movement; no hard veto rules | Small context drift, formatting drift, nearby unrelated insertions | Run lightweight LLM/manual review before treating as harmless |
+| **L2** | Caution lane for medium adaptation or medium warnings | `3way`, or L0/L1 promoted by rules | Core patch still looks structurally close, but evidence is no longer strong enough for low-level handling | Large diff warning, API-surface drift, error-path drift, fanout warning, medium prerequisite evidence | Do targeted hunk review and compare affected call sites / return paths |
+| **L3** | Semantic-sensitive lane | `regenerated`, or lower baseline promoted upward | A critical semantic dimension is touched, or prerequisite certainty becomes blocking | Locking/lifetime/state-machine/struct-field changes, strong prerequisite requirement, regenerated context | Do focused code review plus subsystem-specific regression tests |
+| **L4** | High-risk propagated lane | `conflict-adapted`, or critical changes promoted again | Critical semantic change is no longer local; it propagates or combines with hard veto signals | Critical structures plus caller/callee spread, conflict adaptation, stacked high-risk evidence | Require senior maintainer approval and explicit propagation review |
+| **L5** | Fallback / weakest-proof lane | `verified-direct`, unknown, or missing baseline | The engine could preserve intent, but the proof chain is weakest or bypasses normal apply semantics | In-memory verified adaptation, unknown baseline, fallback path | Preserve evidence, compare with upstream patch manually, and do stronger validation before merge |
+
+Two important nuances:
+
+- **L5 is the lowest-confidence lane, not always the highest semantic-risk lane.**
+  A patch may be `prerequisite=independent` and still be `L5` because the engine had
+  to rely on `verified-direct` rather than a normal `git apply` proof path.
+- **L3.5 is an internal DryRun technique, not a user-facing final level.**
+  Zero-context regeneration is folded into the `regenerated` family and therefore
+  typically surfaces as final `L3` unless stronger promotions push it higher.
+
+#### How This Connects To The Three User Questions
+
+`L0-L5` should not replace the three user-facing answers. It synthesizes them.
+
+- **Can this patch be directly backported?**
+  Primarily answered by `analysis_framework.conclusion.direct_backport`
+- **Do prerequisite patches need to be considered?**
+  Primarily answered by `analysis_framework.conclusion.prerequisite`
+- **Is there a large-impact semantic risk?**
+  Primarily answered by `analysis_framework.conclusion.risk`
+
+The level is the execution lane that results from combining those answers with the
+DryRun proof quality. Real examples therefore look like:
+
+- `base=L0`, `final=L4`: patch applies cleanly, but evidence shows prerequisite or propagation risk
+- `prerequisite=independent`, `final=L5`: no related patch is required, but proof quality is still weak because the engine used a fallback applicability path
+- `single-line change`, `final=L3`: the textual change is small, but it touches state/locking/layout semantics
+
+#### Reading Level Distributions
+
+When evaluating `L0-L5` ratios in batch mode:
+
+- A rise in `L3/L4` often means the engine is surfacing more semantic evidence, not that `git apply` got worse
+- A rise in `L5` often means more patches are surviving through `verified-direct` or other fallback proof paths, not automatically that those patches are wrong
+- The healthiest low-level distribution is not "maximum L0/L1", but "L0/L1 only when positive admission evidence is strong enough"
+
 **Profiles** (`policy.profile`): `conservative` / `balanced` / `aggressive` / `default` — preset thresholds for large-change and call-chain fanout; explicit YAML values override presets.
 
 Rule engine highlights:

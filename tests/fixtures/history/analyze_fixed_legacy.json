@@ -1,0 +1,12 @@
+{
+  "cve_id": "CVE-2024-26633",
+  "target_version": "5.10-hulk",
+  "is_vulnerable": true,
+  "is_fixed": true,
+  "dry_run_clean": null,
+  "prerequisite_patches": [],
+  "recommendations": [
+    "目标仓库包含漏洞引入commit (fbfa743a9d2a)",
+    "修复补丁已合入 (da23bd709b46), 置信度 100%"
+  ]
+}

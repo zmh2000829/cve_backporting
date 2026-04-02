@@ -17,6 +17,7 @@ from core.output_serializers import (
     aggregate_l0_l5_levels,
     build_l0_l5_view,
 )
+from core.report_schema import make_result_status
 
 import cli
 
@@ -287,6 +288,22 @@ def _json_response(status_code: int, body: Dict[str, Any]) -> bytes:
     return payload.encode("utf-8")
 
 
+def _error_body(error_code: str, user_message: str, *, technical_detail: str = "", retryable: bool = False, status_code: int = None) -> Dict[str, Any]:
+    body = {
+        "ok": False,
+        "error": make_result_status(
+            state="error",
+            error_code=error_code,
+            user_message=user_message,
+            technical_detail=technical_detail or user_message,
+            retryable=retryable,
+        ),
+    }
+    if status_code is not None:
+        body["status_code"] = status_code
+    return body
+
+
 class APIRequestHandler(BaseHTTPRequestHandler):
     server_version = "cve-api/1.0"
 
@@ -321,18 +338,18 @@ class APIRequestHandler(BaseHTTPRequestHandler):
                 "routes": sorted(POST_ROUTES | {"GET /health"}),
             })
             return
-        self._send_json(404, {"ok": False, "error": "not found"})
+        self._send_json(404, _error_body("not_found", "路由不存在。", technical_detail=self.path, status_code=404))
 
     def do_POST(self):
         route = self.path.split("?", 1)[0]
         if route not in POST_ROUTES:
-            self._send_json(404, {"ok": False, "error": "not found"})
+            self._send_json(404, _error_body("not_found", "路由不存在。", technical_detail=route, status_code=404))
             return
 
         try:
             payload = self._read_json()
         except ValueError as exc:
-            self._send_json(400, {"ok": False, "error": str(exc)})
+            self._send_json(400, _error_body("invalid_json", "请求体不是合法 JSON。", technical_detail=str(exc), status_code=400))
             return
 
         try:
@@ -346,11 +363,17 @@ class APIRequestHandler(BaseHTTPRequestHandler):
             else:
                 result = BATCH_VALIDATE_HANDLER(payload, cfg)
         except ValueError as exc:
-            self._send_json(400, {"ok": False, "error": str(exc)})
+            self._send_json(400, _error_body("invalid_request", str(exc), technical_detail=str(exc), status_code=400))
             return
         except Exception as exc:
             logger.exception("request failed route=%s", route)
-            self._send_json(500, {"ok": False, "error": str(exc), "trace": traceback.format_exc()})
+            self._send_json(500, _error_body(
+                "internal_error",
+                "请求处理失败。",
+                technical_detail=f"{exc}\n{traceback.format_exc()}",
+                retryable=True,
+                status_code=500,
+            ))
             return
 
         self._send_json(200, {"ok": True, "data": result})

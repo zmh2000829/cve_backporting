@@ -1,0 +1,103 @@
+{
+  "cve_id": "CVE-2024-26633",
+  "target_version": "5.10-hulk",
+  "known_fix": "da23bd709b46",
+  "overall_pass": true,
+  "summary": "验证通过",
+  "dryrun_detail": {
+    "applies_cleanly": true,
+    "apply_method": "strict",
+    "conflicting_files": [],
+    "has_adapted_patch": false
+  },
+  "generated_vs_real": {
+    "verdict": "identical",
+    "core_similarity": 1.0,
+    "compare_source": "community_patch",
+    "deterministic_exact_match": true
+  },
+  "level_decision": {
+    "level": "L4",
+    "base_level": "L0",
+    "base_method": "strict",
+    "review_mode": "manual-approval",
+    "next_action": "需要人工审批并逐项核对关键字段/状态机变化。",
+    "harmless": false,
+    "confidence": "medium",
+    "reason": "DryRun 基线为 L0，但被前置补丁、关键字段和状态机规则抬升到 L4。",
+    "rule_hits": [
+      {
+        "rule_id": "prerequisite_required",
+        "rule_class": "direct_backport_veto",
+        "severity": "warn",
+        "message": "存在强/中依赖前置补丁"
+      }
+    ]
+  },
+  "validation_details": {
+    "rule_profile": "default",
+    "rule_version": "v2",
+    "strategy_buckets": {
+      "dependency_bucket": "required",
+      "level": "L4",
+      "base_level": "L0",
+      "base_method": "strict"
+    },
+    "special_risk_report": {
+      "summary": {
+        "triggered_sections": [
+          "state_machine_control_flow",
+          "struct_field_data_path"
+        ],
+        "has_critical_structure_change": true
+      }
+    },
+    "decision_skeleton": {
+      "process": {
+        "workflow_steps": [
+          "DryRun 基线: L0 (strict)",
+          "最终场景: L4 (manual-approval)"
+        ],
+        "base_level": "L0",
+        "base_method": "strict",
+        "final_level": "L4"
+      },
+      "evidence": {
+        "admission_rules": [],
+        "low_level_veto_rules": [],
+        "direct_backport_veto_rules": [],
+        "risk_profile_rules": [],
+        "lock_objects": [],
+        "fields": [
+          "ipv6h->nexthdr"
+        ],
+        "state_points": [
+          "NEXTHDR_FRAGMENT"
+        ],
+        "error_path_nodes": []
+      },
+      "conclusion": {
+        "direct_backport": {
+          "status": "blocked",
+          "summary": "不能直接回移，需先处理强依赖补丁。"
+        },
+        "prerequisite": {
+          "status": "required",
+          "summary": "存在 1 个强依赖前置补丁，不能忽略关联补丁。"
+        },
+        "risk": {
+          "status": "high",
+          "summary": "命中状态机/结构体字段等高风险画像。"
+        },
+        "final": {
+          "level": "L4",
+          "base_level": "L0",
+          "review_mode": "manual-approval",
+          "next_action": "需要人工审批并逐项核对关键字段/状态机变化。",
+          "harmless": false,
+          "reason": "DryRun 基线为 L0，但被前置补丁、关键字段和状态机规则抬升到 L4。"
+        }
+      }
+    }
+  }
+}

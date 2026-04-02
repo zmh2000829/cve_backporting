@@ -29,7 +29,7 @@ style: |
 <br>
 
 汇报人：XXX
-日期：2026年3月
+日期：2026年4月
 
 ---
 
@@ -2291,6 +2291,87 @@ DryRun 成功方法
 
 ---
 
+# 深层定级：L0-L5 不是“补丁难度分”
+
+### 本质定义
+
+`L0-L5` 不是单纯的“能不能 apply”，也不是单纯的“语义风险分数”。
+
+它是三个维度叠加后的**执行 / 审查分流层级**：
+
+1. **补丁可应用性的证明强度**
+   - baseline 是 `strict`、`context-C1`、`3way` 还是 `verified-direct`
+2. **关联补丁判断的确定性**
+   - 是否存在 `required / recommended / independent`
+3. **语义影响面的扩散程度**
+   - 是否命中锁、生命周期、状态机、结构体字段、错误路径、调用链传播
+
+### 一条公式
+
+```text
+final_level = max(base_level, 所有命中规则给出的 level_floor)
+```
+
+### 三个最容易误解的点
+
+- `strict` 成功 **不等于** 最终一定是 `L0`
+- `verified-direct` **不等于** 一定语义最危险，但一定代表证明链更弱
+- “只改一行” **不等于** 低风险，单行也可能直接改状态迁移、锁语义或字段路径
+
+---
+
+# 深层定级矩阵：每一级到底在表达什么？
+
+| 级别 | 本质含义 | 典型基线 | 想留在这一层必须满足什么 | 常见落入原因 | 建议动作 |
+|---|---|---|---|---|---|
+| **L0** | 确定性安全通道 | `strict` | 无 warn/high 抬升、无强/中依赖、无关键结构、无明显传播 | 原始补丁上下文完全一致，语义边界清晰 | 可直接回移，只保留最小回归验证 |
+| **L1** | 低风险漂移通道，但不自动无害 | `ignore-ws` / `context-C1` | 漂移仅限 context/空白/邻近无关插入，且没有硬否决证据 | 注释、格式、微小上下文偏移 | 进入 LLM/人工轻审查，确认只是轻微漂移 |
+| **L2** | 中等谨慎通道 | `3way`，或低级别被规则抬升 | 核心改动仍接近原补丁，但证据已不足以留在低级别 | 大改动、API surface 变化、错误路径变化、调用扇出、`recommended` 前置 | 逐 hunk 审查，核对调用点、返回路径和依赖 |
+| **L3** | 语义敏感通道 | `regenerated`，或更低基线被继续抬升 | 已触及关键语义，不再适合低风险处理 | 锁/生命周期/状态机/字段变化，或 `required` 前置 | 做聚焦代码审查和子系统回归测试 |
+| **L4** | 高风险传播通道 | `conflict-adapted`，或关键变更继续传播后抬升 | 风险已不是局部 patch 问题，而是沿调用关系或冲突适配扩散 | 关键结构变化叠加调用链传播、多条 hard veto 同时命中 | 需要资深维护者审批，显式审查传播链 |
+| **L5** | 兜底 / 最弱证明通道 | `verified-direct` / unknown | 引擎可能仍保住了修复意图，但证明方式最弱 | 绕过常规 `git apply` 的内存级验证、未知基线、fallback 路径 | 保留证据做人工确认，并做更强验证后再考虑合入 |
+
+### 两个重要补充
+
+- **L5 是“证明链最弱”，不是“语义一定最危险”**
+  - 例如某个补丁没有前置依赖，也没有明显高风险点，但如果只能靠 `verified-direct` 证明可适配，仍然应该留在 `L5`
+- **L3.5 不是最终用户层级**
+  - `zero-context` 是内部 DryRun 技术，外部仍归入 `regenerated` 家族，通常按 `L3` 理解，除非规则继续把它抬高
+
+---
+
+# 这一级别如何回答用户真正关心的三件事？
+
+### 先看三件事，再看 L0-L5
+
+- **能不能直接回移**
+  - 看 `analysis_framework.conclusion.direct_backport`
+- **需不需要考虑关联补丁**
+  - 看 `analysis_framework.conclusion.prerequisite`
+- **是不是有较大影响风险**
+  - 看 `analysis_framework.conclusion.risk`
+
+### L0-L5 是对三件事的综合执行结论
+
+它不是替代这三件事，而是把这三件事和 baseline 证明强度合并后给出的执行通道。
+
+所以真实样本里经常出现：
+
+- `base=L0, final=L4`
+  - 补丁本身能 strict 通过，但因为强依赖前置、关键结构、传播风险，被提升到人工审批通道
+- `prerequisite=independent, final=L5`
+  - 没有依赖问题，但证明方式只能靠 `verified-direct`，所以仍然不能当成低风险直回
+- `单行修改, final=L3`
+  - 文本很小，但命中条件分支、状态字段、锁/字段路径等高敏感语义
+
+### 看比例时不要只看级别数字
+
+- `L3/L4` 占比上升，很多时候代表“风险证据被显式暴露出来了”，不一定是 apply 能力退化
+- `L5` 占比上升，很多时候代表 fallback 适配能力增强了，不一定说明补丁更差
+- 真正健康的目标不是“把样本都压进 L0/L1”，而是“只有正向准入证据足够强时，才允许样本停在 L0/L1”
+
+---
+
 # 当前默认规则与迁移结果
 
 | 规则 | 触发条件 | 当前输出 |
@@ -2374,14 +2455,23 @@ DryRun 成功方法
 
 ### 统一原则
 
-- `analyze` / `validate` / `batch-validate` 三条链路都输出同一套 `validation_details`
+- `analyze` / `validate` / `batch-validate` 三条链路都输出同一套 `result_status + analysis_framework + level_decision`
 - API 不再只是“精简版摘要”，而是返回与 CLI JSON 报告同口径的数据
 - 批量接口额外输出最终聚合统计，便于平台直接消费
+- 历史 `analysis_results` raw JSON 也可以迁移到同一套 schema
 
 ### 新的统一解释骨架
 
 ```json
 {
+  "report_version": "friendly-json-v2",
+  "schema_version": "result-schema-v2",
+  "result_status": {
+    "state": "complete",
+    "error_code": "",
+    "user_message": "验证通过",
+    "incomplete_reason": ""
+  },
   "analysis_framework": {
     "process": {
       "workflow_steps": ["fix 搜索", "依赖分析", "dryrun", "高风险扫描", "最终结论"],
@@ -2411,6 +2501,7 @@ DryRun 成功方法
 ### 这意味着什么
 
 - 用户先看 `analysis_framework`
+- fixed / not-applicable / incomplete 不再返回空字段，而是显式给 `result_status`
 - 再看 `level_decision`
 - `L0-L5` 仍然保留，但不再是唯一理解入口
 
@@ -2425,6 +2516,8 @@ DryRun 成功方法
     "deterministic_exact_match": { "count": 12 },
     "critical_structure_change": { "count": 7 },
     "manual_prerequisite_analysis": { "count": 9 },
+    "result_state_distribution": { "complete": 17, "incomplete": 3 },
+    "incomplete_reason_distribution": { "missing_fix_commit": 2 },
     "special_risk": { "...": "P2 五类命中统计" }
   }
 }
@@ -2435,6 +2528,66 @@ DryRun 成功方法
 - 平台侧可以直接统计 L0~L5 占比
 - 可以直接统计“100% 确定性正确补丁”数量
 - 可以直接统计关键结构变更与需人工分析的关联补丁数量
+- 可以直接统计“哪些结果是情报不足、为什么不足”，而不是把它们都混成 `no_data`
+
+---
+
+# 本轮工程化收口
+
+### P0 / P5-1~P5-9 已落地的结构变化
+
+| 目标 | 本轮落地 |
+|------|----------|
+| P0 稳定解释层 | 新增 `core/report_schema.py`，统一 `result_status -> analysis_framework -> friendly JSON` |
+| P5-1 CLI 巨石拆分 | 新增 `services/reporting.py`，抽离 `analyze / validate` 报告组装 |
+| P5-2 UI 拆分 | 新增 `core/ui_batch.py`，切出 `benchmark / batch-validate` 渲染 |
+| P5-3 DryRun 分层 | 新增 `agents/dryrun_helpers.py`，抽离 hunk 清洗/锚点/拆分纯函数 |
+| P5-5 异常模型统一 | API 400/404/500 与 CLI 早返回都统一成结构化错误 |
+| P5-7 历史兼容 | 新增 `services/history_loader.py`，旧报告可迁移到 `friendly-json-v2` |
+| P5-8/P5-9 测试与样本 | 新增 golden fixtures、API 回归、history fixtures、discoverable tests |
+
+### 结果
+
+- 工具现在先回答“当前结果是什么状态”，再回答“为什么这么判”
+- fixed / incomplete 场景不再出现 `analysis_framework / level_decision` 留空
+- batch 统计从“只有分布数字”推进到“可解释的问题统计”
+
+---
+
+# 真实验证口径（2026-04-02）
+
+### 为什么不再依赖公司自维护仓 fix id 一致
+
+- 企业自维护仓经常 cherry-pick、squash、改 subject，`known_fix` 和上游 `mainline_fix` 大概率不会一一对应
+- 本轮验证不要求“社区 fix commit id == 企业 fix commit id”
+- 改为验证三件事：
+  1. 社区 mainline fix / intro 是否能稳定定位到目标仓的语义等价修复与引入点
+  2. 回退到 `known_fix~1` 后，工具能否重新得出合理的 L0-L5、依赖与风险判断
+  3. 生成补丁与真实修复是否在语义上相同或足够接近
+
+### 具体做法
+
+- 使用本地 `linux-5.10.y` 仓作为目标仓
+- `validate` / `batch-validate` 用 `known_fix` 回退 worktree，保证“真实未修复窗口”存在
+- 对公开可验证样本，通过 `mainline_fix / mainline_intro` 覆盖 MITRE，不依赖公司内部修复 commit 映射
+- 对上游情报不完整样本，显式验证 `result_status=incomplete` 和 `incomplete_reason`
+
+---
+
+# 真实 API 回归结果（2026-04-02）
+
+| 接口 | 输入 | 结果 |
+|------|------|------|
+| `/api/analyze` | `CVE-2024-26633` | 18.59 秒，返回 `result_status=not_applicable`，fixed 场景已有完整 `analysis_framework` |
+| `/api/validate` | `CVE-2024-26633` + `known_fix=da23bd709b46` + `mainline_fix=d375b98e0248` + `mainline_intro=fbfa743a9d2a` | 43.63 秒，`base=L0`，`final=L4`，结论为 `blocked / required / high` |
+| `/api/batch-validate` | `CVE-2024-26633` + `CVE-2023-46838` | 44.37 秒，`complete=1 / incomplete=1`，并输出 `missing_fix_commit=1` |
+| `/api/validate` 非法请求 | 缺少 `cve_id` | HTTP 400，返回统一 `error_code=user_message=technical_detail` 结构 |
+
+### 自动化回归
+
+- `python -m unittest discover -s tests -v`
+- 29 项全部通过
+- 覆盖 `policy_engine / api_server / report schema / history compatibility / test discovery`
 
 ---
 

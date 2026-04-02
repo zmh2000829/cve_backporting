@@ -10,6 +10,7 @@ from datetime import datetime
 from rich.panel import Panel
 
 from core.output_serializers import aggregate_batch_validate_summary, build_l0_l5_view
+from core.report_schema import build_report_envelope
 
 
 def _status_to_cn(kind: str, status: str) -> str:
@@ -46,6 +47,7 @@ def _build_batch_case_summary(item: dict, result: dict) -> dict:
     framework = (result.get("analysis_framework") or {})
     process = framework.get("process") or {}
     conclusion = framework.get("conclusion") or {}
+    result_status = result.get("result_status") or {}
     current_level = item.get("current_level") or "未知"
     base_level = item.get("base_level") or "未知"
     dependency_bucket = item.get("dependency_bucket") or ""
@@ -54,6 +56,7 @@ def _build_batch_case_summary(item: dict, result: dict) -> dict:
     risk_status = _status_to_cn("risk", item.get("risk_status", ""))
     special_risk_sections = item.get("special_risk_sections") or []
     critical_structure_change = bool(item.get("critical_structure_change"))
+    incomplete_reason = item.get("incomplete_reason") or result_status.get("incomplete_reason", "")
 
     key_hits = []
     if critical_structure_change:
@@ -63,25 +66,36 @@ def _build_batch_case_summary(item: dict, result: dict) -> dict:
     if not key_hits:
         key_hits.append("未命中显著专项高风险")
 
+    one_liner = f"最终级别 {current_level}，{direct_status}，{prereq_status}，风险判断为“{risk_status}”。"
+    if result_status.get("state") == "incomplete":
+        one_liner = f"当前结论不完整：{result_status.get('user_message', one_liner)}"
+    elif result_status.get("state") == "error":
+        one_liner = f"当前验证失败：{result_status.get('user_message', one_liner)}"
+
     return {
-        "一句话结论": f"最终级别 {current_level}，{direct_status}，{prereq_status}，风险判断为“{risk_status}”。",
+        "一句话结论": one_liner,
         "结论": {
             "最终级别": current_level,
             "基线级别": base_level,
             "是否可直接回移": direct_status,
             "是否需要关联补丁": prereq_status,
             "风险判断": risk_status,
+            "结果状态": result_status.get("state", "complete"),
+            "情报不足原因": incomplete_reason,
         },
         "为什么这样判": [
             f"DryRun 基线先给出 {base_level} 级。",
             _describe_dependency_bucket(dependency_bucket),
             "涉及锁/生命周期/状态机/结构体字段等关键结构变化。" if critical_structure_change else "未发现明显的关键结构变更信号。",
             ("专项高风险命中: " + "、".join(special_risk_sections[:4])) if special_risk_sections else "未命中专项高风险分项。",
+            result_status.get("user_message", ""),
         ],
         "关键命中": {
             "关键结构变更": critical_structure_change,
             "专项高风险": special_risk_sections,
             "关联补丁分桶": dependency_bucket or "unknown",
+            "结果状态": result_status.get("state", "complete"),
+            "情报不足原因": incomplete_reason,
         },
         "下一步建议": ((conclusion.get("final") or {}).get("next_action", "")),
         "过程步骤": (process.get("workflow_steps") or [])[:6],
@@ -294,6 +308,7 @@ def _execute_batch_validate_case(runtime, config, tv, cve_id, group, *, deep=Fal
     level_view = build_l0_l5_view(result)
     special_risk_summary = ((result.get("validation_details") or {}).get("special_risk_report") or {}).get("summary", {})
     conclusion = ((result.get("analysis_framework") or {}).get("conclusion") or {})
+    result_status = result.get("result_status") or {}
 
     item = {
         "cve_id": cve_id,
@@ -311,6 +326,8 @@ def _execute_batch_validate_case(runtime, config, tv, cve_id, group, *, deep=Fal
         "direct_backport_status": ((conclusion.get("direct_backport") or {}).get("status", "")),
         "prerequisite_status": ((conclusion.get("prerequisite") or {}).get("status", "")),
         "risk_status": ((conclusion.get("risk") or {}).get("status", "")),
+        "result_state": result_status.get("state", "complete"),
+        "incomplete_reason": result_status.get("incomplete_reason", ""),
         "num_fixes": len(group["all_fixes"]),
         "num_prereqs": len(prereqs),
         "prereq_recall": prereq_validation.get("recall", None),
@@ -390,6 +407,8 @@ def _build_batch_summary_view(tv: str, total_cves: int, total_patches: int, skip
             "p2_enabled": p2_enabled,
         },
         "statistics": batch_summary.get("statistics", {}),
+        "result_states": batch_summary.get("result_state_distribution", {}),
+        "incomplete_reasons": batch_summary.get("incomplete_reason_distribution", {}),
         "level_distribution": {
             "levels": level_distribution.get("levels", l0_l5.get("levels", ["L0", "L1", "L2", "L3", "L4", "L5"])),
             "final_level_counts": level_distribution.get("final_level_counts", l0_l5.get("current_level_distribution", {})),
@@ -417,24 +436,25 @@ def _build_batch_summary_view(tv: str, total_cves: int, total_patches: int, skip
 def _prepare_batch_validate_json(tv: str, *, workers: int, total_cves: int, total_patches: int, skipped: int,
                                  p2_enabled: bool, batch_summary: dict, strategy_summary: dict,
                                  passed_list: list, failed_list: list, error_list: list, cve_results: list) -> dict:
-    return {
-        "report_version": "friendly-json-v1",
-        "mode": "batch-validate",
-        "reading_guide": _build_batch_reading_guide(),
-        "summary": _build_batch_summary_view(
+    return build_report_envelope(
+        "batch-validate",
+        reading_guide=_build_batch_reading_guide(),
+        summary=_build_batch_summary_view(
             tv, total_cves, total_patches, skipped, workers, p2_enabled, batch_summary
         ),
-        "result_groups": {
-            "passed": passed_list,
-            "failed": failed_list,
-            "errors": error_list,
-        },
-        "technical_details": {
+        technical_details={
             "batch_summary": batch_summary,
             "strategy_summary": strategy_summary,
             "cve_results": cve_results,
         },
-    }
+        extra={
+            "result_groups": {
+                "passed": passed_list,
+                "failed": failed_list,
+                "errors": error_list,
+            },
+        },
+    )
 
 
 def run_validate(args, config, runtime):

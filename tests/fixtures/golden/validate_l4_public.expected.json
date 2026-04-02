@@ -1,0 +1,42 @@
+{
+  "report_version": "friendly-json-v2",
+  "schema_version": "result-schema-v2",
+  "mode": "validate",
+  "summary": {
+    "overview": {
+      "cve_id": "CVE-2024-26633",
+      "target_version": "5.10-hulk",
+      "结果状态": "complete",
+      "最终级别": "L4",
+      "基线级别": "L0"
+    },
+    "status": {
+      "state": "complete"
+    },
+    "conclusion": {
+      "是否可直接回移": {
+        "状态": "不建议直接回移"
+      },
+      "是否需要关联补丁": {
+        "状态": "必须考虑关联补丁"
+      },
+      "风险判断": {
+        "状态": "高风险"
+      }
+    }
+  },
+  "technical_details": {
+    "result_status": {
+      "state": "complete"
+    },
+    "level_decision": {
+      "level": "L4",
+      "base_level": "L0"
+    },
+    "validation_details": {
+      "strategy_buckets": {
+        "dependency_bucket": "required"
+      }
+    }
+  }
+}

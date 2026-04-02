@@ -1,0 +1,36 @@
+{
+  "cve_id": "CVE-2024-26633",
+  "known_fix": "da23bd709b46",
+  "target": "5.10-hulk",
+  "worktree_commit": "311633b604063a8a",
+  "checks": {
+    "fix_correctly_absent": true,
+    "intro_detected": true,
+    "dryrun_accurate": false
+  },
+  "overall_pass": false,
+  "summary": "DryRun预测不准",
+  "issues": [
+    "DryRun预测不准"
+  ],
+  "dryrun_detail": {
+    "applies_cleanly": true,
+    "apply_method": "3way",
+    "conflicting_files": [],
+    "has_adapted_patch": false
+  },
+  "tool_prereqs": [
+    {
+      "commit_id": "383c1f88759b",
+      "subject": "ip6_tunnel: add the process for redirect in ip6_tnl_err",
+      "grade": "medium",
+      "score": 0.2
+    }
+  ],
+  "recommendations": [
+    "修复补丁 d375b98e0248 未合入",
+    "目标仓库包含漏洞引入commit (fbfa743a9d2a)",
+    "发现前置依赖: 3 个中依赖, 建议按顺序 review",
+    "Dry-run: 3-way merge成功"
+  ]
+}

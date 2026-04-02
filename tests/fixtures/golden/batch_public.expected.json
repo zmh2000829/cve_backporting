@@ -1,0 +1,26 @@
+{
+  "report_version": "friendly-json-v2",
+  "schema_version": "result-schema-v2",
+  "mode": "batch-validate",
+  "summary": {
+    "statistics": {
+      "final_level_counts": {
+        "L4": 1
+      },
+      "result_state_distribution": {
+        "complete": 1,
+        "incomplete": 1
+      },
+      "incomplete_reason_distribution": {
+        "missing_fix_commit": 1
+      }
+    },
+    "result_states": {
+      "complete": 1,
+      "incomplete": 1
+    },
+    "incomplete_reasons": {
+      "missing_fix_commit": 1
+    }
+  }
+}

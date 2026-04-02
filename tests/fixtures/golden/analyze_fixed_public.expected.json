@@ -1,0 +1,33 @@
+{
+  "report_version": "friendly-json-v2",
+  "schema_version": "result-schema-v2",
+  "mode": "analyze",
+  "summary": {
+    "overview": {
+      "cve_id": "CVE-2024-26633",
+      "target_version": "5.10-hulk",
+      "结果状态": "not_applicable"
+    },
+    "status": {
+      "state": "not_applicable",
+      "error_code": "already_fixed"
+    },
+    "conclusion": {
+      "是否可直接回移": {
+        "状态": "当前不适用"
+      },
+      "是否需要关联补丁": {
+        "状态": "当前不适用"
+      },
+      "风险判断": {
+        "状态": "当前不适用"
+      }
+    }
+  },
+  "technical_details": {
+    "result_status": {
+      "state": "not_applicable",
+      "error_code": "already_fixed"
+    }
+  }
+}

@@ -49,7 +49,9 @@ from core.ui import (
     render_validate_report, render_benchmark_report,
     render_batch_validate_report,
 )
+from core.report_schema import enrich_result_payload, make_result_status
 from pipeline import Pipeline, STAGES
+from services import reporting
 
 logger = logging.getLogger("cve_backporting")
 
@@ -119,98 +121,21 @@ def _make_stage_trace_tracker(stage_callback=None):
 def _build_analyze_payload(result, pipe: Pipeline, config, target: str,
                           stage_events: list = None,
                           policy_config=None, deep_analysis=None):
-    prereqs = collect_prereq_patches(
-        result.prerequisite_patches, config, pipe.git_mgr, target)
-
-    cve_commit_urls = {}
-    if result.cve_info and result.cve_info.version_commit_mapping:
-        for ver, cid in result.cve_info.version_commit_mapping.items():
-            cve_commit_urls[ver] = serialize_commit_reference(
-                config, pipe.git_mgr, target, cid, extra={"version": ver}
-            )
-
-    dr_detail = {}
-    if result.dry_run:
-        dr = result.dry_run
-        dr_detail = {
-            "applies_cleanly": dr.applies_cleanly,
-            "apply_method": dr.apply_method,
-            "conflicting_files": dr.conflicting_files,
-            "error_output": dr.error_output[:500] if dr.error_output else "",
-            "has_adapted_patch": bool(dr.adapted_patch),
-            "apply_attempts": dr.apply_attempts,
-        }
-
-    fix_patch_detail = {}
-    if result.fix_patch:
-        fp = result.fix_patch
-        fix_patch_detail = serialize_commit_reference(
-            config, pipe.git_mgr, target, fp.commit_id,
-            extra={
-                "subject": fp.subject,
-                "author": fp.author,
-                "modified_files": fp.modified_files,
-                "diff_lines": len((fp.diff_code or "").splitlines()),
-            }
-        )
-
-    try:
-        narrative = _build_analysis_narrative(
-            result, dr_detail, {}, {}, is_validate=False)
-    except Exception:
-        narrative = {}
-
-    valid_details = serialize_validation_details(result.validation_details)
-    analysis_framework = valid_details.get("decision_skeleton", {}) if isinstance(valid_details, dict) else {}
-
-    payload = {
-        "cve_id": result.cve_id,
-        "target_version": target,
-        "is_vulnerable": result.is_vulnerable,
-        "is_fixed": result.is_fixed,
-        "dry_run_clean": result.dry_run.applies_cleanly if result.dry_run else None,
-        "dryrun_detail": dr_detail,
-        "prerequisite_patches": prereqs,
-        "version_commit_mapping_urls": cve_commit_urls,
-        "rules": collect_rules_metadata(
-            policy_config,
-            level_decision=result.level_decision,
-            validation_details=valid_details,
-        ),
-        "analysis_narrative": narrative,
-        "analysis_framework": analysis_framework,
-        "recommendations": result.recommendations,
-        "analysis_stages": stage_events or [],
-        "fix_patch_detail": fix_patch_detail,
-        "level_decision": serialize_level_decision(result.level_decision),
-        "validation_details": valid_details,
-        "function_impacts": serialize_function_impacts(result.function_impacts),
-    }
-    if deep_analysis is not None:
-        payload["deep_analysis"] = _v2_to_json(deep_analysis)
-
-    return payload
+    return reporting.build_analyze_payload(
+        result,
+        pipe,
+        config,
+        target,
+        stage_events=stage_events,
+        policy_config=policy_config,
+        deep_analysis=deep_analysis,
+        narrative_builder=_build_analysis_narrative,
+        deep_serializer=_v2_to_json,
+    )
 
 
 def _build_json_reading_guide(mode: str) -> dict:
-    common = {
-        "purpose": "本文件已按“先看结论、再看证据、最后看技术细节”的顺序重组，优先阅读 summary。",
-        "recommended_order": [
-            "1. summary.overview：先看漏洞、目标分支、最终结论",
-            "2. summary.conclusion：看是否可直接回移、是否要考虑关联补丁、风险是否偏高",
-            "3. summary.key_evidence：看锁对象、字段、状态点、错误路径等关键证据",
-            "4. technical_details：需要深挖时再看完整技术明细",
-        ],
-        "field_explanations": {
-            "analysis_framework": "统一的过程 + 证据 + 结论骨架，用于快速理解工具为什么这么判。",
-            "l0_l5": "最终 L0-L5 级别与 DryRun 基线级别。L0/L1 更偏低风险，L3/L4/L5 更需要人工关注。",
-            "special_risk_report": "P2 专项高风险分析，重点看锁、生命周期、状态机、结构体字段、错误路径。",
-            "level_decision": "最终级别、下一步动作和规则抬升原因。",
-        },
-    }
-    if mode == "validate":
-        common["field_explanations"]["generated_vs_real"] = "工具生成补丁与真实修复补丁的本质对比结果。"
-    return common
+    return reporting.build_json_reading_guide(mode)
 
 
 def _normalize_rule_messages(items) -> list:
@@ -225,119 +150,15 @@ def _normalize_rule_messages(items) -> list:
 
 
 def _status_to_cn(kind: str, status: str) -> str:
-    mapping = {
-        "direct_backport": {
-            "direct": "可直接回移",
-            "review": "接近可直接回移，但建议复核",
-            "blocked": "不建议直接回移",
-        },
-        "prerequisite": {
-            "required": "必须考虑关联补丁",
-            "recommended": "建议考虑关联补丁",
-            "weak_only": "仅弱关联，可按需复核",
-            "independent": "可不优先考虑关联补丁",
-        },
-        "risk": {
-            "high": "高风险",
-            "attention": "需要重点关注",
-            "low": "未发现显著额外风险",
-        },
-    }
-    return mapping.get(kind, {}).get(status or "", status or "未知")
+    return reporting.status_to_cn(kind, status)
 
 
 def _build_human_friendly_summary(data: dict, mode: str) -> dict:
-    framework = data.get("analysis_framework") or {}
-    process = framework.get("process") or {}
-    evidence = framework.get("evidence") or {}
-    conclusion = framework.get("conclusion") or {}
-    level = (data.get("l0_l5") or {}).get("current_level") or (data.get("level_decision") or {}).get("level") or "未知"
-    base_level = (data.get("l0_l5") or {}).get("base_level") or (data.get("level_decision") or {}).get("base_level") or "未知"
-
-    overview = {
-        "cve_id": data.get("cve_id", ""),
-        "target_version": data.get("target_version") or data.get("target", ""),
-        "最终级别": level,
-        "基线级别": base_level,
-    }
-    if mode == "analyze":
-        overview.update({
-            "漏洞是否已引入": "是" if data.get("is_vulnerable") else "否/未确认",
-            "修复是否已存在": "是" if data.get("is_fixed") else "否",
-            "DryRun是否通过": "是" if data.get("dry_run_clean") else "否/未执行",
-        })
-    else:
-        overview.update({
-            "验证是否通过": "是" if data.get("overall_pass") else "否",
-            "真实修复commit": data.get("known_fix", ""),
-            "结论摘要": data.get("summary", ""),
-        })
-
-    summary = {
-        "overview": overview,
-        "conclusion": {
-            "是否可直接回移": {
-                "状态": _status_to_cn("direct_backport", (conclusion.get("direct_backport") or {}).get("status", "")),
-                "说明": (conclusion.get("direct_backport") or {}).get("summary", ""),
-            },
-            "是否需要关联补丁": {
-                "状态": _status_to_cn("prerequisite", (conclusion.get("prerequisite") or {}).get("status", "")),
-                "说明": (conclusion.get("prerequisite") or {}).get("summary", ""),
-            },
-            "风险判断": {
-                "状态": _status_to_cn("risk", (conclusion.get("risk") or {}).get("status", "")),
-                "说明": (conclusion.get("risk") or {}).get("summary", ""),
-            },
-            "下一步建议": (conclusion.get("final") or {}).get("next_action", ""),
-        },
-        "process": {
-            "说明": "下面是工具实际走过的分析步骤，建议从上到下阅读。",
-            "workflow_steps": process.get("workflow_steps") or [],
-        },
-        "key_evidence": {
-            "准入规则命中": _normalize_rule_messages(evidence.get("admission_rules")),
-            "低级别否决命中": _normalize_rule_messages(evidence.get("low_level_veto_rules")),
-            "直接回移否决命中": _normalize_rule_messages(evidence.get("direct_backport_veto_rules")),
-            "高风险画像命中": _normalize_rule_messages(evidence.get("risk_profile_rules")),
-            "锁对象": evidence.get("lock_objects", [])[:8],
-            "关键字段": evidence.get("fields", [])[:8],
-            "状态点": evidence.get("state_points", [])[:8],
-            "错误路径节点": evidence.get("error_path_nodes", [])[:8],
-        },
-    }
-
-    if mode == "validate":
-        generated = data.get("generated_vs_real") or {}
-        summary["patch_quality"] = {
-            "工具补丁与真实修复关系": generated.get("verdict", ""),
-            "核心相似度": generated.get("core_similarity", 0),
-            "比较来源": generated.get("compare_source", ""),
-        }
-
-    return summary
+    return reporting.build_human_friendly_summary(data, mode)
 
 
 def _prepare_analyze_json(payload: dict) -> dict:
-    return {
-        "report_version": "friendly-json-v1",
-        "mode": "analyze",
-        "reading_guide": _build_json_reading_guide("analyze"),
-        "summary": _build_human_friendly_summary(payload, "analyze"),
-        "technical_details": {
-            "analysis_framework": payload.get("analysis_framework", {}),
-            "level_decision": payload.get("level_decision", {}),
-            "validation_details": payload.get("validation_details", {}),
-            "dryrun_detail": payload.get("dryrun_detail", {}),
-            "function_impacts": payload.get("function_impacts", []),
-            "prerequisite_patches": payload.get("prerequisite_patches", []),
-            "fix_patch_detail": payload.get("fix_patch_detail", {}),
-            "analysis_stages": payload.get("analysis_stages", []),
-            "rules": payload.get("rules", {}),
-            "analysis_narrative": payload.get("analysis_narrative", {}),
-            "recommendations": payload.get("recommendations", []),
-            "deep_analysis": payload.get("deep_analysis"),
-        },
-    }
+    return reporting.prepare_analyze_json(payload)
 
 
 def run_analyze_payload(cve_id: str, target_version: str, config, *,
@@ -823,37 +644,7 @@ def _v2_to_json(v2) -> dict:
 
 def _prepare_validate_json(result: dict) -> dict:
     """准备 validate 结果供 JSON 序列化 — 输出更适合用户阅读的结构。"""
-    raw = {}
-    for k, v in result.items():
-        if k == "deep_analysis" and v is not None:
-            raw["deep_analysis"] = _v2_to_json(v)
-        else:
-            raw[k] = v
-
-    return {
-        "report_version": "friendly-json-v1",
-        "mode": "validate",
-        "reading_guide": _build_json_reading_guide("validate"),
-        "summary": _build_human_friendly_summary(raw, "validate"),
-        "technical_details": {
-            "checks": raw.get("checks", {}),
-            "issues": raw.get("issues", []),
-            "analysis_framework": raw.get("analysis_framework", {}),
-            "l0_l5": raw.get("l0_l5", {}),
-            "level_decision": raw.get("level_decision", {}),
-            "validation_details": raw.get("validation_details", {}),
-            "dryrun_detail": raw.get("dryrun_detail", {}),
-            "function_impacts": raw.get("function_impacts", []),
-            "generated_vs_real": raw.get("generated_vs_real", {}),
-            "diff_comparison": raw.get("diff_comparison", {}),
-            "tool_prereqs": raw.get("tool_prereqs", []),
-            "known_prereqs_detail": raw.get("known_prereqs_detail", []),
-            "analysis_stages": raw.get("analysis_stages", []),
-            "analysis_narrative": raw.get("analysis_narrative", {}),
-            "rules": raw.get("rules", {}),
-            "deep_analysis": raw.get("deep_analysis"),
-        },
-    }
+    return reporting.prepare_validate_json(result, deep_serializer=_v2_to_json)
 
 
 # ─── validate / benchmark ────────────────────────────────────────────
@@ -1743,9 +1534,19 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
     if status != "on_branch":
         msg = f"known_fix {known_fix[:12]} 不在目标分支 (status={status})"
         console.print(f"[red]{msg}[/]")
-        return {"cve_id": cve_id, "known_fix": known_fix, "target": tv,
-                "worktree_commit": "", "checks": {},
-                "overall_pass": False, "summary": msg}
+        return enrich_result_payload({
+            "cve_id": cve_id, "known_fix": known_fix, "target": tv,
+            "worktree_commit": "", "checks": {},
+            "overall_pass": False, "summary": msg,
+            "result_status": make_result_status(
+                state="error",
+                error_code="known_fix_not_on_branch",
+                user_message=msg,
+                technical_detail=msg,
+                retryable=False,
+                evidence_refs=[cve_id, known_fix[:12]],
+            ),
+        }, "validate")
 
     rollback = _find_rollback_commit(git_mgr, tv, known_fix, known_prereqs)
     resolved = git_mgr.run_git(["git", "rev-parse", rollback], tv, timeout=10)
@@ -1754,9 +1555,19 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
     wt_dir = tempfile.mkdtemp(prefix="cve_validate_")
     if not git_mgr.create_worktree(tv, rollback, wt_dir):
         console.print(f"[red]创建 worktree 失败 @ {rollback}[/]")
-        return {"cve_id": cve_id, "known_fix": known_fix, "target": tv,
-                "worktree_commit": rollback, "checks": {},
-                "overall_pass": False, "summary": "创建worktree失败"}
+        return enrich_result_payload({
+            "cve_id": cve_id, "known_fix": known_fix, "target": tv,
+            "worktree_commit": rollback, "checks": {},
+            "overall_pass": False, "summary": "创建worktree失败",
+            "result_status": make_result_status(
+                state="error",
+                error_code="worktree_create_failed",
+                user_message="创建验证 worktree 失败。",
+                technical_detail=f"rollback={rollback}",
+                retryable=True,
+                evidence_refs=[cve_id, rollback[:12]],
+            ),
+        }, "validate")
 
     stage_events, record_stage = _make_stage_trace_tracker(stage_callback=stage_callback)
 
@@ -1800,12 +1611,21 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
                                   on_stage=record_stage)
 
         if result.cve_info is None or not result.cve_info.fix_commit_id:
-            return {
+            return enrich_result_payload({
                 "cve_id": cve_id, "known_fix": known_fix, "target": tv,
                 "worktree_commit": rollback_hash[:16] if rollback_hash else rollback,
                 "checks": {}, "overall_pass": False,
                 "summary": "CVE上游数据不完整(MITRE无fix commit), 无法验证",
-            }
+                "result_status": make_result_status(
+                    state="incomplete",
+                    error_code="missing_upstream_fix",
+                    user_message="上游 CVE 情报缺少稳定的 fix commit，当前无法完成验证。",
+                    technical_detail="result.cve_info 为 None 或 fix_commit_id 为空。",
+                    retryable=True,
+                    incomplete_reason="missing_fix_commit",
+                    evidence_refs=[cve_id],
+                ),
+            }, "validate")
 
         checks = {}
 
@@ -2086,7 +1906,7 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
         }
         if deep_analysis is not None:
             out["deep_analysis"] = deep_analysis
-        return out
+        return enrich_result_payload(out, "validate")
 
     finally:
         git_mgr.remove_worktree(tv, wt_dir)
