@@ -33,7 +33,6 @@ env/
 *~
 
 # Output files
-output/*
 analysis_results/*
 !output/.gitkeep
 
