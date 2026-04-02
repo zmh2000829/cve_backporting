@@ -244,6 +244,29 @@ Patch Input
 - `veto`：阻止误入低级别或阻止直接回移的否决规则
 - `risk_profile`：锁、生命周期、状态机、结构体字段、错误路径等高风险画像规则
 
+### 本轮新增：降低级别误抬升
+
+当前规则还补了一层“降误抬升”护栏，目标不是放松标准，而是让证据和结论更稳定地对上：
+
+- **`critical_structures` 不再因为任意 `struct` 文本就触发。**
+  像 `struct foo *ctx` 这种普通指针/引用行，不再被当成布局风险；只有结构体定义变化，或 `sizeof`、`offsetof`、`container_of` 这类布局敏感操作才会命中。
+- **调用链传播会过滤伪调用和成员访问伪 callee。**
+  `sizeof`、`likely`、`ARRAY_SIZE`、`__builtin_*` 这类伪调用不再进入 caller/callee 关系；`ops->helper()`、`obj.cb()` 也不会被当成普通符号调用。跨文件传播只连接“唯一符号”，减少伪牵连把样本从 `L0` 抬到 `L3/L4`。
+- **`p2_state_machine_control_flow` 现在必须看到状态语义。**
+  仅有 `if (ret) return -E...` 这类通用控制流变化时，会停留在 `error_path`，不会再因为“有 if / return”就误判为状态机变化。只有同时出现状态字段、状态常量或真实状态迁移语义，才会进入状态机专项。
+
+这意味着：
+
+- `L3/L4` 更接近真正的语义风险暴露，而不是宽匹配副作用
+- `L0/L1` 的保留条件更清晰，不会因为普通文本模式被误杀
+- “单行修改”仍然不会自动被判低风险，但也不会因为错误规则命中被虚高抬升
+
+当前回归已覆盖 3 类典型反例：
+
+- 普通 `struct` 指针修改不会触发 `critical_structures`
+- `ops->helper()` 不会生成到 `helper` 的调用链边
+- 纯错误码返回变化不会触发 `p2_state_machine_control_flow`
+
 后续业务规则可直接放到 `rules/*.py`，并通过 `policy.extra_rule_modules` 以插件方式加载。
 
 ---

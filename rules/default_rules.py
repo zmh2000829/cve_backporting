@@ -508,7 +508,7 @@ class SingleLineHighImpactRule(PolicyRule):
         "lifetime": re.compile(r"\b(refcount|kref|atomic_|kfree|kvfree|kmalloc|kzalloc|list_del|list_add)\b"),
         "control_flow": re.compile(r"\b(if|else|goto|return|break|continue)\b"),
         "error_path": re.compile(r"\b(NULL|ERR_|IS_ERR|PTR_ERR|WARN_ON|BUG_ON)\b"),
-        "layout": re.compile(r"\b(sizeof|offsetof|container_of|struct)\b"),
+        "layout": re.compile(r"\b(sizeof|offsetof|container_of)\b"),
     }
 
     def __init__(self, max_changed_lines: int):

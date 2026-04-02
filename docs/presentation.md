@@ -2379,15 +2379,15 @@ final_level = max(base_level, 所有命中规则给出的 level_floor)
 | `direct_backport_candidate` | strict 命中、无强依赖、改动小、无明显传播 | admission，支持 `可直接回移` |
 | `independent_patch` | 无强/中依赖，依赖分析结论可独立成立 | admission，支持 `可不优先考虑关联补丁` |
 | `large_change` | 改动行数 / hunk 数超阈值 | warning，至少抬升到 `L2` |
-| `critical_structures` | 锁/RCU/refcount/struct 等关键结构命中 | high risk，至少抬升到 `L3` |
+| `critical_structures` | 锁/RCU/refcount，或布局敏感的 `struct` 场景命中 | high risk，至少抬升到 `L3` |
 | `p2_locking_sync` | 锁对象、加解锁位置、保护区间、同步顺序变化 | high risk，至少抬升到 `L3` |
 | `p2_lifecycle_resource` | alloc/free、get/put、refcount、回滚路径变化 | high risk，至少抬升到 `L3` |
-| `p2_state_machine_control_flow` | 条件分支、返回路径、状态字段、ops 行为变化 | warning/high，至少抬升到 `L2/L3` |
+| `p2_state_machine_control_flow` | 条件分支、返回路径、状态字段、ops 行为变化，且必须有状态语义 | warning/high，至少抬升到 `L2/L3` |
 | `p2_struct_field_data_path` | struct 字段定义、访问路径、读写位置变化 | warning/high，至少抬升到 `L2/L3` |
 | `p2_error_path` | `goto err`、cleanup、错误码、恢复逻辑变化 | warning，至少抬升到 `L2` |
 | `prerequisite_required` | 存在强依赖前置补丁 | direct_backport_veto，阻止“可直接回移” |
 | `prerequisite_recommended` | 存在中等依赖前置补丁 | direct_backport_veto，提示优先评估关联补丁 |
-| `call_chain_propagation` | 修改函数存在调用/被调用牵连 | warning / high，关键变更时可抬升到 `L4` |
+| `call_chain_propagation` | 修改函数存在调用/被调用牵连；已过滤伪调用与成员访问伪 callee | warning / high，关键变更时可抬升到 `L4` |
 | `call_chain_fanout` | callers + callees 扇出超阈值 | warning，至少抬升到 `L2` |
 | `l1_api_surface` | 签名变化 / return 路径变化 | low_level_veto，阻止误入 `L0/L1` |
 | `single_line_high_impact` | 变更行数很少但命中锁/生命周期/布局/控制流敏感语义 | risk_profile，避免“单行=低风险”误判 |
@@ -2405,6 +2405,30 @@ final_level = max(base_level, 所有命中规则给出的 level_floor)
 - 默认策略：`rules/level_policies.py`
 - 配置样例：`rules/policy.example.yaml`
 - 目录说明：`rules/README.md`
+
+---
+
+# 本轮新增：降低级别误抬升
+
+### 不是放宽标准，而是修正“证据 -> 结论”映射
+
+| 误抬升来源 | 过去的问题 | 现在的收紧方式 | 结果 |
+|-----------|-----------|---------------|------|
+| `critical_structures` | 任意 `struct` 文本都可能触发，普通 `struct foo *ctx` 也会被抬高 | 仅在 `struct {...}` 定义变化，或 `sizeof / offsetof / container_of` 这类布局敏感场景命中 | 普通结构体指针/引用修改不再误抬升 |
+| 调用链传播 | `sizeof`、`likely`、`ARRAY_SIZE`、`ops->helper()` 之类伪调用会制造 caller/callee 牵连 | 过滤 builtin/pseudo call，跳过成员访问伪 callee，跨文件只连接唯一符号 | L0 不再因为伪传播被误抬到 `L3/L4` |
+| `p2_state_machine_control_flow` | 看到 `if/return/break` 就容易触发，纯错误码返回变化会误入状态机专项 | 必须同时看到状态字段、状态常量或真实状态迁移语义；纯 `if (ret) return -E...` 只归入 `error_path` | 状态机命中更接近真实状态迁移风险 |
+
+### 对 L0-L5 分布的影响应该这样解读
+
+- 如果 `L3/L4` 因此下降，通常代表误报减少了，不代表标准放松了
+- 如果 `L0/L1` 略有回升，代表低风险准入边界更干净，不代表工具更激进了
+- 真正的目标不是把样本都压低，而是让高等级只由真实语义风险驱动
+
+### 本轮回归固定了 3 类典型反例
+
+- 普通 `struct` 指针修改不会触发 `critical_structures`
+- `ops->helper()` 不会生成到 `helper` 的调用链边
+- 纯错误码返回变化不会触发 `p2_state_machine_control_flow`
 
 ---
 

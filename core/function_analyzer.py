@@ -38,6 +38,12 @@ class FunctionAnalyzer:
             'return', 'if', 'else', 'for', 'while', 'do', 'switch',
             'case', 'break', 'continue', 'goto', 'typedef'
         }
+        self.c_pseudo_calls = {
+            "sizeof", "typeof", "__typeof__", "__builtin_types_compatible_p",
+            "__builtin_expect", "__builtin_choose_expr", "__builtin_offsetof",
+            "likely", "unlikely", "min", "max", "clamp", "roundup",
+            "rounddown", "ARRAY_SIZE", "BUILD_BUG_ON", "IS_ENABLED",
+        }
 
     def extract_functions(self, file_content: str,
                          file_path: str) -> List[FunctionInfo]:
@@ -223,6 +229,18 @@ class FunctionAnalyzer:
         callees = set()
         for m in re.finditer(r'\b([a-zA-Z_]\w*)\s*\(', func_body):
             name = m.group(1)
+            if name in self.c_keywords or name in self.c_pseudo_calls or name.isupper():
+                continue
+
+            # 跳过成员访问/函数指针字段等“看起来像调用、实际上不是符号调用”的场景。
+            prefix = func_body[max(0, m.start() - 4):m.start()].rstrip()
+            if prefix.endswith(("->", ".")):
+                continue
+
+            # 跳过 GCC/Clang builtin 与 __ 开头的伪调用。
+            if name.startswith("__builtin_"):
+                continue
+
             if name not in self.c_keywords and not name.isupper():
                 callees.add(name)
         return sorted(callees)
@@ -360,17 +378,37 @@ class FunctionAnalyzer:
         if not file_contents:
             return {}, {}
 
+        definition_counts: Dict[str, int] = {}
+        local_names_by_file: Dict[str, Set[str]] = {}
         if global_func_names is None:
             global_func_names = set()
-            for _fp, content in file_contents:
-                for fn in self.extract_functions(content, _fp):
+            for file_path, content in file_contents:
+                local_names = set()
+                for fn in self.extract_functions(content, file_path):
                     global_func_names.add(fn.name)
+                    local_names.add(fn.name)
+                    definition_counts[fn.name] = definition_counts.get(fn.name, 0) + 1
+                local_names_by_file[file_path] = local_names
+        else:
+            for file_path, content in file_contents:
+                local_names = set()
+                for fn in self.extract_functions(content, file_path):
+                    local_names.add(fn.name)
+                    definition_counts[fn.name] = definition_counts.get(fn.name, 0) + 1
+                local_names_by_file[file_path] = local_names
+
+        unique_global_names = {name for name, count in definition_counts.items() if count == 1}
 
         callees_of: Dict[str, Set[str]] = {}
         callers_of: Dict[str, Set[str]] = {}
 
         for fpath, content in file_contents:
-            topo = self.build_call_topology_extended(content, fpath, global_func_names)
+            topo = self.build_call_topology_extended(
+                content,
+                fpath,
+                local_func_names=local_names_by_file.get(fpath, set()),
+                external_func_names=unique_global_names,
+            )
             for fname, info in topo.items():
                 callees_of.setdefault(fname, set()).update(info.get("callees") or [])
                 for c in info.get("callees") or []:
@@ -385,7 +423,8 @@ class FunctionAnalyzer:
         self,
         file_content: str,
         file_path: str,
-        global_func_names: Set[str],
+        local_func_names: Set[str],
+        external_func_names: Set[str],
     ) -> Dict:
         """
         同 build_call_topology，但 callees 可指向其它文件中的符号（只要在 global_func_names 内）。
@@ -401,7 +440,7 @@ class FunctionAnalyzer:
                 {
                     c
                     for c in raw_callees
-                    if c in global_func_names and c != func.name
+                    if c != func.name and (c in local_func_names or c in external_func_names)
                 }
             )
             func.callees = linked

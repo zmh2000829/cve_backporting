@@ -556,9 +556,33 @@ class PolicyEngine:
         hits = []
         for change in changes:
             for keyword in keywords:
-                if keyword in change:
+                if self._match_critical_keyword(change, keyword):
                     hits.append(keyword)
         return hits
+
+    def _match_critical_keyword(self, change: str, keyword: str) -> bool:
+        text = (change or "").strip()
+        if not text:
+            return False
+
+        if keyword == "struct":
+            return bool(
+                re.search(r"^\s*struct\s+[A-Za-z_]\w*\s*\{", text)
+                or re.search(r"\b(sizeof|offsetof|container_of)\s*\(", text)
+            )
+        if keyword == "mutex":
+            return bool(re.search(r"\bmutex(?:_[A-Za-z0-9_]+)?\b", text))
+        if keyword == "spin_lock":
+            return bool(re.search(r"\bspin_lock(?:_[A-Za-z0-9_]+)?\b", text))
+        if keyword == "rcu":
+            return bool(re.search(r"\brcu(?:_[A-Za-z0-9_]+)?\b", text))
+        if keyword == "refcount":
+            return bool(re.search(r"\brefcount(?:_[A-Za-z0-9_]+)?\b", text))
+        if keyword == "kref":
+            return bool(re.search(r"\bkref(?:_[A-Za-z0-9_]+)?\b", text))
+        if keyword == "atomic":
+            return bool(re.search(r"\batomic(?:64|long)?(?:_[A-Za-z0-9_]+)?\b", text))
+        return bool(re.search(rf"\b{re.escape(keyword)}\b", text))
 
     def _extract_risk_markers(self, diff_text: str) -> Dict[str, List[str]]:
         lock_objects = []
@@ -647,7 +671,7 @@ class PolicyEngine:
         sections = {
             "locking_sync": self._analyze_locking_sync(entries, hunk_groups),
             "lifecycle_resource": self._analyze_lifecycle_resource(entries),
-            "state_machine_control_flow": self._analyze_state_machine(entries),
+            "state_machine_control_flow": self._analyze_state_machine(entries, hunk_groups),
             "struct_field_data_path": self._analyze_struct_field_data_path(entries, hunk_groups),
             "error_path": self._analyze_error_path(entries),
         }
@@ -849,34 +873,78 @@ class PolicyEngine:
             "evidence_lines": self._truncate_list(evidence, 6),
         }
 
-    def _analyze_state_machine(self, entries: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def _analyze_state_machine(self, entries: List[Dict[str, Any]], hunk_groups: Dict[str, List[Dict[str, Any]]]) -> Dict[str, Any]:
         condition_changes: List[str] = []
         return_changes: List[str] = []
         error_codes: List[str] = []
         state_fields: List[str] = []
         callback_ops: List[str] = []
+        semantic_hunks: List[str] = []
         evidence: List[str] = []
-        state_re = re.compile(r"\b([A-Za-z_]\w*(?:->|\.)?(?:state|status|mode|flags?|enabled|disabled|phase|step))\b")
+        state_re = re.compile(
+            r"\b([A-Za-z_]\w*(?:(?:->|\.)[A-Za-z_]\w+)*"
+            r"(?:->|\.)?(?:state|status|mode|flags?|enabled|disabled|phase|step))\b",
+            re.IGNORECASE,
+        )
+        state_transition_re = re.compile(
+            r"\b(?:[A-Za-z_]\w*(?:(?:->|\.)[A-Za-z_]\w+)*"
+            r"(?:->|\.)?(?:state|status|mode|flags?|enabled|disabled|phase|step))\b"
+            r"\s*(?:==|!=|=|\+=|-=|\|\||&&)",
+            re.IGNORECASE,
+        )
+        state_const_re = re.compile(r"\b[A-Z][A-Z0-9_]{2,}\b")
 
-        for entry in entries:
-            body = entry["body"]
-            hit = False
-            if re.search(r"^\s*(if|else\s+if|switch)\s*\(", body):
-                condition_changes.append(body)
-                hit = True
-            if re.search(r"\b(return|goto|break|continue)\b", body):
-                return_changes.append(body)
-                hit = True
-            error_codes.extend(re.findall(r"-E[A-Z0-9_]+", body))
-            state_fields.extend(state_re.findall(body))
-            if "ops->" in body or "->ops->" in body or ".ops->" in body:
-                callback_ops.append(body)
-                hit = True
-            if hit:
-                evidence.append(body)
+        for hunk_key, group in hunk_groups.items():
+            hunk_conditions: List[str] = []
+            hunk_returns: List[str] = []
+            hunk_errors: List[str] = []
+            hunk_state_fields: List[str] = []
+            hunk_callbacks: List[str] = []
+            hunk_evidence: List[str] = []
+            has_transition = False
 
-        triggered = bool(condition_changes or return_changes or state_fields or callback_ops or error_codes)
-        high_risk = bool(condition_changes and (state_fields or error_codes))
+            for entry in group:
+                body = entry["body"]
+                state_hits = state_re.findall(body)
+                line_has_transition = bool(state_transition_re.search(body))
+                has_state_hint = bool(state_hits) or bool(state_const_re.search(body))
+                if re.search(r"^\s*(if|else\s+if|switch)\s*\(", body) and has_state_hint:
+                    hunk_conditions.append(body)
+                    hunk_evidence.append(body)
+                if line_has_transition:
+                    has_transition = True
+                    hunk_evidence.append(body)
+                if re.search(r"\b(return|goto|break|continue)\b", body):
+                    if state_hits or line_has_transition or hunk_conditions or hunk_callbacks:
+                        hunk_returns.append(body)
+                        hunk_evidence.append(body)
+                hunk_errors.extend(re.findall(r"-E[A-Z0-9_]+", body))
+                hunk_state_fields.extend(state_hits)
+                if re.search(r"(?:->ops->|\.ops->|\bops->)", body) and (
+                    line_has_transition or has_state_hint or re.search(r"\b(if|switch|return|goto)\b", body)
+                ):
+                    hunk_callbacks.append(body)
+                    hunk_evidence.append(body)
+
+            semantic = bool(
+                has_transition
+                or (hunk_conditions and (hunk_state_fields or hunk_callbacks or hunk_returns))
+                or (hunk_returns and (hunk_state_fields or hunk_conditions or hunk_callbacks or has_transition))
+                or (hunk_callbacks and (hunk_conditions or has_transition or hunk_state_fields))
+            )
+            if not semantic:
+                continue
+
+            semantic_hunks.append(hunk_key)
+            condition_changes.extend(hunk_conditions)
+            return_changes.extend(hunk_returns)
+            error_codes.extend(hunk_errors)
+            state_fields.extend(hunk_state_fields)
+            callback_ops.extend(hunk_callbacks)
+            evidence.extend(hunk_evidence)
+
+        triggered = bool(condition_changes or return_changes or state_fields or callback_ops or semantic_hunks)
+        high_risk = bool(condition_changes and (state_fields or callback_ops or semantic_hunks))
         return {
             "triggered": triggered,
             "risk": "high" if high_risk else ("warn" if triggered else "none"),
@@ -885,6 +953,7 @@ class PolicyEngine:
             "error_codes": self._truncate_list(error_codes, 8),
             "state_fields": self._truncate_list(state_fields, 8),
             "callback_or_ops_changes": self._truncate_list(callback_ops, 6),
+            "semantic_hunks": self._truncate_list(semantic_hunks, 6),
             "summary": (
                 "检测到条件/返回/状态字段变化，可能影响状态迁移与进入退出条件"
                 if triggered else "未检测到明显状态机/控制流专项变化"

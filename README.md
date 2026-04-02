@@ -240,6 +240,33 @@ Rule engine highlights:
 - **L1 API surface** (`l1_api_surface`): signature-line add/remove mismatch, return-statement delta
 - **Pluggable extension** via `policy.extra_rule_modules` with `register_rules(registry, config=None)`, `RULES`, `register_level_policies(...)`, or `LEVEL_POLICIES`
 
+#### False-Positive Suppression For Level Inflation
+
+The current rule set also includes explicit guardrails to reduce accidental `L3/L4`
+promotion when the evidence is syntactic rather than semantic:
+
+- **`critical_structures` is no longer triggered by every `struct` token.**
+  Plain pointer/reference lines such as `struct foo *ctx` are not treated as
+  layout risk. The rule now treats `struct` as critical only for struct-definition
+  changes or layout-sensitive operations such as `sizeof`, `offsetof`, and `container_of`.
+- **Call-chain propagation now filters pseudo-calls and member-access pseudo-calls.**
+  Tokens such as `sizeof`, `likely`, `ARRAY_SIZE`, and `__builtin_*` are ignored, and
+  expressions like `ops->helper()` or `obj.cb()` are not linked as normal symbol calls.
+  Cross-file edges are only created for uniquely defined symbols, reducing false caller/callee spread.
+- **`p2_state_machine_control_flow` now requires state semantics, not generic control flow.**
+  A plain `if (ret) return -E...` change stays in the `error_path` lane unless the hunk
+  also shows state fields, state constants, or real state-transition behavior.
+
+This is not a relaxation of review standards. It is a tighter mapping between
+evidence and conclusion, so `L3/L4` means "semantic risk really surfaced" rather than
+"a broad pattern happened to match".
+
+Regression now covers the three representative negative cases:
+
+- plain `struct` pointer change should stay out of `critical_structures`
+- `ops->helper()` should not create a call-chain edge to `helper`
+- syntax-only error return changes should not trigger `p2_state_machine_control_flow`
+
 Validate output (`validation_details.rule_version` **v3**) includes:
 - `level_decision` (`level`, `base_level`, `base_method`, `review_mode`, `next_action`, `harmless`, `confidence`, `reason`, `rule_hits`)
 - `function_impacts` (callers/callees/impact score)

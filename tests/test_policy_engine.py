@@ -81,6 +81,25 @@ class PolicyEngineRegressionTests(unittest.TestCase):
         self.assertIn("b", vd.decision_skeleton["evidence"]["lock_objects"])
         self.assertEqual(vd.decision_skeleton["conclusion"]["risk"]["status"], "high")
 
+    def test_plain_struct_pointer_change_does_not_trigger_critical_structure_rule(self):
+        diff = """diff --git a/foo.c b/foo.c
+@@ -1,2 +1,2 @@
+-struct foo *ctx = old;
++struct foo *ctx = new;
+"""
+        p = _patch(diff, ["foo.c"])
+        dr = DryRunResult(applies_cleanly=True, apply_method="strict")
+        eng = PolicyEngine(
+            PolicyConfig(profile="default", high_impact_single_line_rules_enabled=False),
+            llm_enabled=False,
+        )
+        vd = eng.evaluate(p, dr, _MockGit({}), "any")
+        rule_ids = {hit["rule_id"] for hit in vd.level_decision.rule_hits}
+        self.assertEqual(vd.level_decision.level, "L0")
+        self.assertNotIn("critical_structures", rule_ids)
+        self.assertNotIn("single_line_high_impact", rule_ids)
+        self.assertFalse(vd.special_risk_report["summary"]["has_critical_structure_change"])
+
     def test_large_change_warning(self):
         body = "\n".join(f"- old{i}\n+ new{i}" for i in range(50))
         diff = f"diff --git a/big.c b/big.c\n@@\n{body}\n"
@@ -132,6 +151,39 @@ void baz(void) {
         self.assertIn("foo", impacts)
         self.assertGreaterEqual(len(impacts["foo"].callers) + len(impacts["foo"].callees), 2)
         self.assertTrue(any("扩散" in w or "调用链" in w for w in vd.warnings))
+
+    def test_member_access_pseudo_call_does_not_create_call_chain_edge(self):
+        a_c = """int changed(struct ops *ops, void *ctx) {
+    ops->helper(ctx);
+    return 0;
+}
+"""
+        b_c = """int helper(void) {
+    return 0;
+}
+"""
+        diff = """diff --git a/a.c b/a.c
+@@ -1,3 +1,3 @@ int changed(struct ops *ops, void *ctx) {
+-    return 0;
++    return 1;
+ }
+"""
+        p = _patch(diff, ["a.c", "b.c"])
+        dr = DryRunResult(applies_cleanly=True, apply_method="strict")
+        git = _MockGit({"a.c": a_c, "b.c": b_c})
+        eng = PolicyEngine(
+            PolicyConfig(profile="default", high_impact_single_line_rules_enabled=False),
+            llm_enabled=False,
+        )
+        vd = eng.evaluate(p, dr, git, "5.10")
+        rule_ids = {hit["rule_id"] for hit in vd.level_decision.rule_hits}
+        self.assertEqual(vd.level_decision.level, "L0")
+        self.assertNotIn("call_chain_propagation", rule_ids)
+        self.assertNotIn("call_chain_fanout", rule_ids)
+        impacts = {fi.function: fi for fi in vd.function_impacts}
+        self.assertIn("changed", impacts)
+        self.assertEqual(impacts["changed"].callers, [])
+        self.assertEqual(impacts["changed"].callees, [])
 
     def test_l1_api_surface_signature_hint(self):
         diff = """diff --git a/f.c b/f.c
@@ -371,6 +423,26 @@ int foo(void) {
         self.assertFalse(vd.special_risk_report["enabled"])
         rule_ids = {hit["rule_id"] for hit in vd.level_decision.rule_hits}
         self.assertFalse(any(rule_id.startswith("p2_") for rule_id in rule_ids))
+
+    def test_p2_state_machine_ignores_syntax_only_error_return_change(self):
+        diff = """diff --git a/foo.c b/foo.c
+@@ -1,3 +1,3 @@
+-if (ret)
+-    return -EINVAL;
++if (ret)
++    return -EAGAIN;
+"""
+        p = _patch(diff, ["foo.c"])
+        dr = DryRunResult(applies_cleanly=True, apply_method="strict")
+        vd = PolicyEngine(
+            PolicyConfig(profile="default", high_impact_single_line_rules_enabled=False),
+            llm_enabled=False,
+        ).evaluate(p, dr, _MockGit({}), "any")
+        rule_ids = {hit["rule_id"] for hit in vd.level_decision.rule_hits}
+        self.assertEqual(vd.level_decision.level, "L2")
+        self.assertNotIn("p2_state_machine_control_flow", rule_ids)
+        self.assertIn("p2_error_path", rule_ids)
+        self.assertFalse(vd.special_risk_report["sections"]["state_machine_control_flow"]["triggered"])
 
     def test_batch_summary_counts(self):
         summary = aggregate_batch_validate_summary([
