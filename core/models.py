@@ -194,6 +194,7 @@ class ValidationDetails:
     rule_version: str = "v2"
     strategy_buckets: Dict[str, Any] = field(default_factory=dict)
     decision_skeleton: Dict[str, Any] = field(default_factory=dict)
+    manual_review_checklist: List[str] = field(default_factory=list)
 
 
 @dataclass

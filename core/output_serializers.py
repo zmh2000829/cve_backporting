@@ -165,11 +165,22 @@ def serialize_validation_details(validation_details) -> dict:
         "rule_version": getattr(validation_details, "rule_version", ""),
         "strategy_buckets": getattr(validation_details, "strategy_buckets", {}),
         "decision_skeleton": getattr(validation_details, "decision_skeleton", {}),
+        "manual_review_checklist": getattr(validation_details, "manual_review_checklist", []),
     }
 
 
 def serialize_function_impacts(function_impacts) -> list:
     return [fi.__dict__ for fi in (function_impacts or [])]
+
+
+def serialize_dependency_details(details) -> dict:
+    if not details:
+        return {}
+    if isinstance(details, dict):
+        return dict(details)
+    if hasattr(details, "__dict__"):
+        return asdict(details)
+    return {}
 
 
 def collect_rules_metadata(policy_config, level_decision=None, validation_details=None):

@@ -3,7 +3,9 @@
 
 import json
 import os
+import shutil
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -13,6 +15,12 @@ from commands.validate import _prepare_batch_validate_json
 from core.output_serializers import aggregate_batch_validate_summary
 from services.history_loader import normalize_report
 from services.reporting import prepare_analyze_json, prepare_validate_json
+from services.output_support import (
+    build_repo_traceability,
+    ensure_case_output_dir,
+    ensure_mode_output_dir,
+    sanitize_path_component,
+)
 
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures"
@@ -104,6 +112,100 @@ class ReportSchemaRegressionTests(unittest.TestCase):
         )
         expected = _load_json("golden", "batch_public.expected.json")
         _assert_subset(self, report, expected)
+
+    def test_prepare_validate_json_includes_checklist_traceability_and_artifacts(self):
+        report = prepare_validate_json({
+            "cve_id": "CVE-2024-99999",
+            "target_version": "5.10-hulk",
+            "known_fix": "deadbeefcafebabe",
+            "overall_pass": True,
+            "summary": "验证通过",
+            "level_decision": {
+                "level": "L4",
+                "base_level": "L1",
+                "review_mode": "manual-approval",
+                "rule_hits": [],
+            },
+            "validation_details": {
+                "rule_profile": "default",
+                "rule_version": "v2",
+                "manual_review_checklist": [
+                    "重点核对字段/数据路径",
+                    "完成关键路径编译与回归验证",
+                ],
+            },
+            "traceability": {
+                "generated_at": "2026-04-03T10:00:00+08:00",
+                "target_repo": {
+                    "head_commit": "abc123",
+                    "head_commit_time": "2026-04-03T09:55:00+08:00",
+                },
+                "policy": {
+                    "profile": "default",
+                    "rule_version": "v2",
+                    "rule_switches": {"special_risk_rules_enabled": True},
+                },
+                "data_sources": ["target_repo", "known_fix_local"],
+            },
+            "artifacts": {
+                "run_id": "20260403_100000",
+                "output_dir": "/tmp/out/20260403_100000/validate/CVE-2024-99999",
+                "report_file": "/tmp/out/20260403_100000/validate/CVE-2024-99999/report.json",
+            },
+        })
+
+        self.assertEqual(report["manual_review_checklist"][0], "重点核对字段/数据路径")
+        self.assertEqual(report["summary"]["manual_review_checklist"][1], "完成关键路径编译与回归验证")
+        self.assertEqual(report["traceability"]["policy"]["profile"], "default")
+        self.assertEqual(report["traceability"]["schema_version"], "result-schema-v2")
+        self.assertEqual(report["artifacts"]["run_id"], "20260403_100000")
+        self.assertEqual(
+            report["technical_details"]["manual_review_checklist"][0],
+            "重点核对字段/数据路径",
+        )
+
+
+class OutputSupportRegressionTests(unittest.TestCase):
+    class _FakeGitMgr:
+        def run_git(self, cmd, target_version, timeout=10):
+            if cmd[:3] == ["git", "rev-parse", "HEAD"]:
+                return "abc1234567890fedcba\n"
+            if cmd[:4] == ["git", "rev-parse", "--abbrev-ref", "HEAD"]:
+                return "stable/5.10\n"
+            if cmd[:4] == ["git", "log", "-1", "--format=%cI"]:
+                return "2026-04-03T09:55:00+08:00\n"
+            if cmd[:4] == ["git", "remote", "get-url", "origin"]:
+                return "git@example.com:kernel/linux.git\n"
+            return ""
+
+    def test_output_layout_helpers_use_run_mode_scope_layout(self):
+        root = tempfile.mkdtemp(prefix="out-layout-")
+        try:
+            case_dir = ensure_case_output_dir(root, "20260403_100000", "validate", "CVE-2024-26633")
+            mode_dir = ensure_mode_output_dir(root, "20260403_100000", "batch-validate", "5.10/hulk")
+            self.assertTrue(os.path.isdir(case_dir))
+            self.assertTrue(os.path.isdir(mode_dir))
+            self.assertTrue(case_dir.endswith("/20260403_100000/validate/CVE-2024-26633"))
+            self.assertTrue(mode_dir.endswith("/20260403_100000/batch-validate/5.10_hulk"))
+            self.assertEqual(sanitize_path_component("  "), "unknown")
+        finally:
+            shutil.rmtree(root)
+
+    def test_build_repo_traceability_collects_head_snapshot(self):
+        config = type("Cfg", (), {
+            "repositories": {
+                "5.10-hulk": {
+                    "path": "/repo/linux",
+                    "branch": "stable/5.10",
+                }
+            }
+        })()
+        trace = build_repo_traceability(config, self._FakeGitMgr(), "5.10-hulk")
+        self.assertEqual(trace["path"], "/repo/linux")
+        self.assertEqual(trace["configured_branch"], "stable/5.10")
+        self.assertEqual(trace["current_branch"], "stable/5.10")
+        self.assertEqual(trace["head_commit_short"], "abc123456789")
+        self.assertEqual(trace["head_commit_time"], "2026-04-03T09:55:00+08:00")
 
 
 if __name__ == "__main__":

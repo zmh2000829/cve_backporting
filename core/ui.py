@@ -244,6 +244,18 @@ def _render_rules_overview_panel(
         padding=(0, 1),
     )
 
+
+def _render_manual_review_panel(items, title: str = "[bold]人工审查清单[/]"):
+    checklist = [str(item or "").strip() for item in (items or []) if str(item or "").strip()]
+    if not checklist:
+        return None
+    checklist_tbl = Table(box=None, show_header=False, padding=(0, 1), expand=True)
+    checklist_tbl.add_column("", width=3)
+    checklist_tbl.add_column("item", ratio=1)
+    for item in checklist[:8]:
+        checklist_tbl.add_row("[yellow]□[/]", item)
+    return Panel(checklist_tbl, title=title, border_style="yellow")
+
 # ─── 阶段状态图标 ───────────────────────────────────────────────────
 
 _ICONS = {
@@ -375,6 +387,13 @@ def render_report(result, policy_config=None) -> Panel:
     if rules_panel is not None:
         report_parts.append(Text(""))
         report_parts.append(rules_panel)
+
+    checklist_panel = _render_manual_review_panel(
+        getattr(validation_details, "manual_review_checklist", None),
+    )
+    if checklist_panel is not None:
+        report_parts.append(Text(""))
+        report_parts.append(checklist_panel)
 
     # 搜索结果 + 步骤
     if r.introduced_search and r.introduced_search.found:
@@ -937,6 +956,14 @@ def render_validate_report(result: dict, policy_config=None):
     )
     if rules_panel is not None:
         sections.append(rules_panel)
+        sections.append(Text(""))
+
+    checklist_panel = _render_manual_review_panel(
+        result.get("manual_review_checklist")
+        or validation_details.get("manual_review_checklist")
+    )
+    if checklist_panel is not None:
+        sections.append(checklist_panel)
         sections.append(Text(""))
 
     # ── 2.6) 函数调用链影响分析 ─────────────────────────────

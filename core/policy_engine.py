@@ -130,6 +130,16 @@ class PolicyEngine:
         decision_skeleton = self._build_decision_skeleton(
             steps, level_decision, rule_hits, prerequisite_patches, impacts, critical_hits, risk_markers, special_risk_report
         )
+        manual_review_checklist = self._build_manual_review_checklist(
+            level_decision,
+            rule_hits,
+            prerequisite_patches,
+            impacts,
+            risk_markers,
+            special_risk_report,
+            dependency_details,
+            base_method,
+        )
         strategy_buckets = self._build_strategy_buckets(level_decision, rule_hits, prerequisite_patches, special_risk_report)
 
         return ValidationDetails(
@@ -142,6 +152,7 @@ class PolicyEngine:
             rule_version="v2",
             strategy_buckets=strategy_buckets,
             decision_skeleton=decision_skeleton,
+            manual_review_checklist=manual_review_checklist,
         )
 
     def _summarize_prerequisites(self, prerequisite_patches, dependency_details) -> str:
@@ -172,8 +183,17 @@ class PolicyEngine:
     def _summarize_direct_backport(self, level_decision: LevelDecision, rule_hits: List[Dict], prerequisite_patches) -> str:
         prereqs = list(prerequisite_patches or [])
         rule_ids = {hit.get("rule_id") for hit in (rule_hits or [])}
+        veto_classes = {
+            self._classify_rule_class(hit)
+            for hit in (rule_hits or [])
+            if self._classify_rule_class(hit) in ("low_level_veto", "direct_backport_veto", "risk_profile")
+        }
         if "direct_backport_candidate" in rule_ids and not prereqs and level_decision.level == "L0":
             return "满足直接回合条件"
+        if level_decision.level == "L1" and level_decision.base_level == "L1" and not prereqs and not veto_classes:
+            if "l1_light_drift_sample" in rule_ids:
+                return "补丁可直接回移，当前仅见轻微漂移样本；建议保留最小编译/回归验证"
+            return "补丁可直接回移，当前仅见上下文/空白漂移，没有额外否决信号"
         if "l1_light_drift_sample" in rule_ids and not prereqs and level_decision.level == "L1":
             return "补丁主体接近可直回，当前漂移主要是注释/日志/等价宏/局部变量命名这类轻微样本"
         if "prerequisite_required" in rule_ids:
@@ -232,6 +252,107 @@ class PolicyEngine:
         }
         cn = [labels.get(item, item) for item in sections]
         return f"命中 {len(sections)} 类: {' / '.join(cn[:5])}"
+
+    def _has_material_impacts(self, impacts: List[FunctionImpact]) -> bool:
+        for impact in impacts or []:
+            if (impact.impact_score or 0) > 0:
+                return True
+            if impact.callers or impact.callees or impact.warnings:
+                return True
+        return False
+
+    def _can_direct_backport_low_drift(
+        self,
+        level_decision: LevelDecision,
+        low_level_veto_hits: List[Dict],
+        direct_backport_veto_hits: List[Dict],
+        risk_hits: List[Dict],
+        prereqs,
+        impacts: List[FunctionImpact],
+        critical_hits: List[str],
+    ) -> bool:
+        if list(prereqs or []):
+            return False
+        if level_decision.level != "L1" or level_decision.base_level != "L1":
+            return False
+        if low_level_veto_hits or direct_backport_veto_hits or risk_hits:
+            return False
+        if critical_hits or self._has_material_impacts(impacts):
+            return False
+        return True
+
+    def _build_manual_review_checklist(
+        self,
+        level_decision: LevelDecision,
+        rule_hits: List[Dict],
+        prerequisite_patches,
+        impacts: List[FunctionImpact],
+        risk_markers: Dict[str, List[str]],
+        special_risk_report: Dict[str, Any],
+        dependency_details,
+        base_method: str,
+    ) -> List[str]:
+        prereqs = list(prerequisite_patches or [])
+        needs_manual = (
+            level_decision.level in ("L2", "L3", "L4", "L5")
+            or bool(prereqs)
+            or any(hit.get("severity") in ("warn", "high") for hit in (rule_hits or []))
+            or base_method in ("regenerated", "conflict-adapted", "verified-direct")
+        )
+        if not needs_manual:
+            return []
+
+        out = []
+        seen = set()
+
+        def _push(text: str):
+            item = str(text or "").strip()
+            if not item or item in seen:
+                return
+            seen.add(item)
+            out.append(item)
+
+        for item in getattr(dependency_details, "manual_review_checklist", []) or []:
+            _push(item)
+
+        _push("先对照上游 hunk 与目标分支代码，确认不是上下文漂移或错误落点导致的误判")
+
+        lock_objects = list((risk_markers or {}).get("lock_objects", []) or [])
+        fields = list((risk_markers or {}).get("fields", []) or [])
+        state_points = list((risk_markers or {}).get("state_points", []) or [])
+        error_path_nodes = list((risk_markers or {}).get("error_path_nodes", []) or [])
+        top_functions = [
+            impact.function
+            for impact in sorted(impacts or [], key=lambda item: item.impact_score, reverse=True)
+            if impact.function and ((impact.impact_score or 0) > 0 or impact.callers or impact.callees or impact.warnings)
+        ]
+
+        if fields:
+            _push("重点核对字段/数据路径: " + " / ".join(fields[:4]))
+        if lock_objects:
+            _push("重点核对锁对象与保护域: " + " / ".join(lock_objects[:4]))
+        if state_points:
+            _push("重点核对状态点与状态迁移: " + " / ".join(state_points[:4]))
+        if error_path_nodes:
+            _push("重点核对错误路径与清理顺序: " + " / ".join(error_path_nodes[:4]))
+        if top_functions:
+            _push("检查调用链影响函数: " + " / ".join(top_functions[:4]))
+
+        sections = ((special_risk_report or {}).get("summary") or {}).get("triggered_sections", [])
+        if sections:
+            _push("锁/生命周期/状态机/字段/错误路径专项已命中，需逐项核对证据与目标分支实现是否一致")
+
+        strong = [p for p in prereqs if getattr(p, "grade", "") == "strong"]
+        medium = [p for p in prereqs if getattr(p, "grade", "") == "medium"]
+        if strong or medium:
+            ordered = [p.commit_id[:12] for p in strong[:3]] + [p.commit_id[:12] for p in medium[:2]]
+            _push("按 strong/medium 顺序复核关联补丁: " + ", ".join(ordered))
+
+        if base_method in ("regenerated", "conflict-adapted", "verified-direct"):
+            _push("当前补丁经过重建/冲突适配/verified-direct 路径，需逐 hunk 复核生成结果与目标分支代码")
+
+        _push("完成关键路径编译、最小功能回归和错误路径回归验证")
+        return out[:8]
 
     def _build_strategy_buckets(
         self,
@@ -353,8 +474,20 @@ class PolicyEngine:
         strong = sum(1 for p in prereqs if getattr(p, "grade", "") == "strong")
         medium = sum(1 for p in prereqs if getattr(p, "grade", "") == "medium")
         weak = sum(1 for p in prereqs if getattr(p, "grade", "") not in ("strong", "medium"))
+        material_impacts = self._has_material_impacts(impacts)
+        l1_direct_ok = self._can_direct_backport_low_drift(
+            level_decision,
+            low_level_veto_hits,
+            direct_backport_veto_hits,
+            risk_hits,
+            prereqs,
+            impacts,
+            critical_hits,
+        )
 
         if level_decision.level == "L0" and admission_hits and not low_level_veto_hits and not direct_backport_veto_hits and not prereqs:
+            direct_status = "direct"
+        elif l1_direct_ok:
             direct_status = "direct"
         elif not prereqs and level_decision.level in ("L0", "L1"):
             direct_status = "review"
@@ -372,7 +505,7 @@ class PolicyEngine:
 
         if critical_hits or any(hit.get("severity") == "high" for hit in risk_hits):
             risk_status = "high"
-        elif risk_hits or low_level_veto_hits or direct_backport_veto_hits or impacts:
+        elif risk_hits or low_level_veto_hits or direct_backport_veto_hits or material_impacts:
             risk_status = "attention"
         else:
             risk_status = "low"

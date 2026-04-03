@@ -1,20 +1,24 @@
 """CLI/API 共用的 analyze/validate 报告组装。"""
 
-from dataclasses import asdict
+from datetime import datetime
 
 from core.output_serializers import (
     collect_prereq_patches,
     collect_rules_metadata,
     serialize_commit_reference,
+    serialize_dependency_details,
     serialize_function_impacts,
     serialize_level_decision,
     serialize_validation_details,
 )
 from core.report_schema import (
+    REPORT_SCHEMA_VERSION,
+    REPORT_VERSION,
     build_report_envelope,
     dedupe_strings,
     enrich_result_payload,
 )
+from services.output_support import build_repo_traceability
 
 
 def status_to_cn(kind: str, status: str) -> str:
@@ -63,6 +67,9 @@ def build_json_reading_guide(mode: str) -> dict:
             "l0_l5": "最终 L0-L5 级别与 DryRun 基线级别。L0/L1 更偏低风险，L3/L4/L5 更需要人工关注。",
             "special_risk_report": "P2 专项高风险分析，重点看锁、生命周期、状态机、结构体字段、错误路径。",
             "level_decision": "最终级别、下一步动作和规则抬升原因。",
+            "manual_review_checklist": "自动生成的人工审查清单。L2-L5、关联补丁或高风险场景会显式给出先看什么。",
+            "traceability": "结果追溯信息，记录规则 profile、开关、目标仓 HEAD、生成时间和 schema 版本。",
+            "artifacts": "本次运行的输出路径索引，包括 run_id、报告文件和补丁文件位置。",
         },
     }
     if mode == "validate":
@@ -101,6 +108,68 @@ def _summarize_prereq_evidence(items) -> list:
     return dedupe_strings(out)[:6]
 
 
+def _resolve_manual_review_checklist(data: dict) -> list:
+    validation_details = data.get("validation_details") or {}
+    if isinstance(validation_details, dict):
+        checklist = validation_details.get("manual_review_checklist") or []
+        if checklist:
+            return dedupe_strings(checklist)[:8]
+
+    dependency_details = data.get("dependency_details") or {}
+    if isinstance(dependency_details, dict):
+        checklist = dependency_details.get("manual_review_checklist") or []
+        if checklist:
+            return dedupe_strings(checklist)[:8]
+
+    checklist = data.get("manual_review_checklist") or []
+    return dedupe_strings(checklist)[:8]
+
+
+def _build_traceability_section(data: dict, mode: str) -> dict:
+    traceability = dict(data.get("traceability") or {})
+    rules = data.get("rules") or {}
+    validation_details = data.get("validation_details") or {}
+    target_repo = dict(traceability.get("target_repo") or {})
+    policy = dict(traceability.get("policy") or {})
+
+    policy.setdefault("profile", validation_details.get("rule_profile") or rules.get("profile") or "default")
+    policy.setdefault("rule_version", validation_details.get("rule_version") or "")
+    policy.setdefault("rule_switches", rules.get("policy_overrides") or {})
+
+    generated_at = traceability.get("generated_at") or ""
+    source_timestamps = dict(traceability.get("source_timestamps") or {})
+    if generated_at:
+        source_timestamps.setdefault("report_generated_at", generated_at)
+    if target_repo.get("head_commit_time"):
+        source_timestamps.setdefault("target_repo_head_at", target_repo.get("head_commit_time"))
+
+    return {
+        "mode": mode,
+        "target_version": data.get("target_version") or data.get("target", ""),
+        "generated_at": generated_at,
+        "report_version": REPORT_VERSION,
+        "schema_version": REPORT_SCHEMA_VERSION,
+        "policy": policy,
+        "target_repo": target_repo,
+        "data_sources": list(traceability.get("data_sources") or []),
+        "source_timestamps": source_timestamps,
+    }
+
+
+def _build_artifacts_section(data: dict) -> dict:
+    artifacts = dict(data.get("artifacts") or {})
+    patch_files = dict(artifacts.get("patch_files") or {})
+    if data.get("patch_file"):
+        patch_files.setdefault("adapted_patch", data.get("patch_file"))
+    if data.get("community_patch_file"):
+        patch_files.setdefault("community_patch", data.get("community_patch_file"))
+    if data.get("real_fix_patch_file"):
+        patch_files.setdefault("real_fix_patch", data.get("real_fix_patch_file"))
+    if patch_files:
+        artifacts["patch_files"] = patch_files
+    return artifacts
+
+
 def build_human_friendly_summary(data: dict, mode: str) -> dict:
     data = enrich_result_payload(data, mode)
     framework = data.get("analysis_framework") or {}
@@ -108,6 +177,7 @@ def build_human_friendly_summary(data: dict, mode: str) -> dict:
     evidence = framework.get("evidence") or {}
     conclusion = framework.get("conclusion") or {}
     result_status = data.get("result_status") or {}
+    manual_review_checklist = _resolve_manual_review_checklist(data)
     level = (data.get("l0_l5") or {}).get("current_level") or (data.get("level_decision") or {}).get("level") or "未知"
     base_level = (data.get("l0_l5") or {}).get("base_level") or (data.get("level_decision") or {}).get("base_level") or "未知"
 
@@ -166,6 +236,7 @@ def build_human_friendly_summary(data: dict, mode: str) -> dict:
             "错误路径节点": (evidence.get("error_path_nodes") or [])[:8],
             "状态证据": result_status.get("evidence_refs", []),
         },
+        "manual_review_checklist": manual_review_checklist,
     }
 
     if mode == "validate":
@@ -235,6 +306,7 @@ def build_analyze_payload(
             narrative = {}
 
     valid_details = serialize_validation_details(result.validation_details)
+    dependency_details = serialize_dependency_details(result.dependency_details)
     payload = {
         "cve_id": result.cve_id,
         "target_version": target,
@@ -256,7 +328,19 @@ def build_analyze_payload(
         "fix_patch_detail": fix_patch_detail,
         "level_decision": serialize_level_decision(result.level_decision),
         "validation_details": valid_details,
+        "dependency_details": dependency_details,
+        "manual_review_checklist": valid_details.get("manual_review_checklist", []),
         "function_impacts": serialize_function_impacts(result.function_impacts),
+        "traceability": {
+            "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "target_repo": build_repo_traceability(config, pipe.git_mgr, target),
+            "policy": {
+                "profile": getattr(policy_config, "profile", "default") if policy_config else "default",
+                "rule_version": valid_details.get("rule_version", ""),
+                "rule_switches": (collect_rules_metadata(policy_config).get("policy_overrides") if policy_config else {}),
+            },
+            "data_sources": ["target_repo", "community_fix_patch", "analysis_pipeline"],
+        },
     }
     if deep_analysis is not None and deep_serializer is not None:
         payload["deep_analysis"] = deep_serializer(deep_analysis)
@@ -275,6 +359,7 @@ def prepare_analyze_json(payload: dict) -> dict:
             "analysis_framework": payload.get("analysis_framework", {}),
             "level_decision": payload.get("level_decision", {}),
             "validation_details": payload.get("validation_details", {}),
+            "dependency_details": payload.get("dependency_details", {}),
             "dryrun_detail": payload.get("dryrun_detail", {}),
             "function_impacts": payload.get("function_impacts", []),
             "prerequisite_patches": payload.get("prerequisite_patches", []),
@@ -283,7 +368,13 @@ def prepare_analyze_json(payload: dict) -> dict:
             "rules": payload.get("rules", {}),
             "analysis_narrative": payload.get("analysis_narrative", {}),
             "recommendations": payload.get("recommendations", []),
+            "manual_review_checklist": _resolve_manual_review_checklist(payload),
             "deep_analysis": payload.get("deep_analysis"),
+        },
+        extra={
+            "manual_review_checklist": _resolve_manual_review_checklist(payload),
+            "traceability": _build_traceability_section(payload, "analyze"),
+            "artifacts": _build_artifacts_section(payload),
         },
     )
 
@@ -313,6 +404,7 @@ def prepare_validate_json(result: dict, *, deep_serializer=None) -> dict:
             "l0_l5": raw.get("l0_l5", {}),
             "level_decision": raw.get("level_decision", {}),
             "validation_details": raw.get("validation_details", {}),
+            "dependency_details": raw.get("dependency_details", {}),
             "dryrun_detail": raw.get("dryrun_detail", {}),
             "function_impacts": raw.get("function_impacts", []),
             "generated_vs_real": raw.get("generated_vs_real", {}),
@@ -322,6 +414,12 @@ def prepare_validate_json(result: dict, *, deep_serializer=None) -> dict:
             "analysis_stages": raw.get("analysis_stages", []),
             "analysis_narrative": raw.get("analysis_narrative", {}),
             "rules": raw.get("rules", {}),
+            "manual_review_checklist": _resolve_manual_review_checklist(raw),
             "deep_analysis": raw.get("deep_analysis"),
+        },
+        extra={
+            "manual_review_checklist": _resolve_manual_review_checklist(raw),
+            "traceability": _build_traceability_section(raw, "validate"),
+            "artifacts": _build_artifacts_section(raw),
         },
     )

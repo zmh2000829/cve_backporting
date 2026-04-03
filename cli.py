@@ -25,6 +25,11 @@ import time
 from datetime import datetime
 from dataclasses import asdict
 import re
+from services.output_support import (
+    build_repo_traceability,
+    ensure_case_output_dir,
+    make_run_id,
+)
 
 from rich.console import Console, Group
 from rich.panel import Panel
@@ -39,6 +44,7 @@ from core.output_serializers import (
     collect_prereq_patches,
     collect_rules_metadata,
     serialize_commit_reference,
+    serialize_dependency_details,
     serialize_function_impacts,
     serialize_level_decision,
     serialize_validation_details,
@@ -190,10 +196,13 @@ def run_analyze_payload(cve_id: str, target_version: str, config, *,
 
 
 def _analyze_one(pipe: Pipeline, cve_id: str, target: str,
-                 enable_dryrun: bool, out_dir: str, config, policy_config=None):
+                 enable_dryrun: bool, out_dir: str, config, policy_config=None,
+                 run_id: str = ""):
     tracker = StageTracker(STAGES)
     header = make_header(cve_id, target)
     stage_events, record_stage = _make_stage_trace_tracker()
+    run_id = run_id or make_run_id()
+    artifact_dir = ensure_case_output_dir(out_dir, run_id, "analyze", cve_id)
 
     def on_stage(key, status, detail=""):
         tracker.start(key) if status == "running" else tracker.done(key, status, detail)
@@ -216,18 +225,28 @@ def _analyze_one(pipe: Pipeline, cve_id: str, target: str,
     console.print(render_recommendations(result))
 
     # 输出生成的 patch 文件
+    patch_file = ""
     if result.dry_run and result.dry_run.adapted_patch:
-        patch_file = os.path.join(out_dir, f"{cve_id}_{target}_adapted.patch")
+        patch_file = os.path.join(artifact_dir, "adapted.patch")
         with open(patch_file, "w") as f:
             f.write(result.dry_run.adapted_patch)
         console.print(f"\n[green]✔ 生成的适配补丁已保存:[/] [cyan]{patch_file}[/]")
 
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    fp = os.path.join(out_dir, f"{cve_id}_{target}_{ts}.json")
+    fp = os.path.join(artifact_dir, "report.json")
     payload = _build_analyze_payload(
         result, pipe, config, target,
         stage_events=stage_events,
         policy_config=policy_config)
+    payload["run_id"] = run_id
+    payload["output_dir"] = artifact_dir
+    payload["report_file"] = fp
+    payload["patch_file"] = patch_file
+    payload["artifacts"] = {
+        "run_id": run_id,
+        "output_dir": artifact_dir,
+        "report_file": fp,
+        "patch_files": {"adapted_patch": patch_file} if patch_file else {},
+    }
 
     with open(fp, "w", encoding="utf-8") as f:
         json.dump(_prepare_analyze_json(payload), f, indent=2, ensure_ascii=False, default=str)
@@ -236,12 +255,14 @@ def _analyze_one(pipe: Pipeline, cve_id: str, target: str,
 
 # ─── analyze --deep ──────────────────────────────────────────────────
 
-def _analyze_deep(pipe, cve_id: str, target: str, out_dir: str, policy_config=None):
+def _analyze_deep(pipe, cve_id: str, target: str, out_dir: str, policy_config=None, run_id: str = ""):
     """深度分析模式: v1 基础 + v2 扩展 (社区/漏洞/检视/风险/建议)"""
     from pipeline import STAGES_DEEP
 
     tracker = StageTracker(STAGES_DEEP)
     header = make_header(cve_id, target, extra="[bold magenta] DEEP[/]")
+    run_id = run_id or make_run_id()
+    artifact_dir = ensure_case_output_dir(out_dir, run_id, "analyze-deep", cve_id)
 
     def on_stage(key, status, detail=""):
         tracker.start(key) if status == "running" else tracker.done(key, status, detail)
@@ -266,13 +287,12 @@ def _analyze_deep(pipe, cve_id: str, target: str, out_dir: str, policy_config=No
     _render_deep_report(v2)
 
     if base and base.dry_run and base.dry_run.adapted_patch:
-        patch_file = os.path.join(out_dir, f"{cve_id}_{target}_adapted.patch")
+        patch_file = os.path.join(artifact_dir, "adapted.patch")
         with open(patch_file, "w") as f:
             f.write(base.dry_run.adapted_patch)
         console.print(f"\n[green]✔ 生成的适配补丁已保存:[/] [cyan]{patch_file}[/]")
 
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    fp = os.path.join(out_dir, f"{cve_id}_{target}_deep_{ts}.json")
+    fp = os.path.join(artifact_dir, "deep_report.json")
     _save_deep_json(v2, fp)
     console.print(f"[dim]深度分析报告已保存: {fp}[/]")
 
@@ -1523,12 +1543,14 @@ def _compare_generated_vs_real(generated_patch: str, real_diff: str) -> dict:
 
 def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
                          git_mgr=None, show_stages=True,
-                         cve_info=None, deep=False, stage_callback=None):
+                         cve_info=None, deep=False, stage_callback=None,
+                         output_dir=None, run_id: str = ""):
     """执行单个 CVE 的回退验证，返回结果 dict。
     cve_info: 可选的预构建 CveInfo，提供后跳过 MITRE 爬取。
     deep: 是否同时执行 v2 深度分析。"""
     if git_mgr is None:
         git_mgr = _make_git_mgr(config, tv)
+    run_id = run_id or make_run_id()
 
     status, _ = git_mgr.check_commit_existence(known_fix, tv)
     if status != "on_branch":
@@ -1773,7 +1795,7 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
         recommendations = result.recommendations if result.recommendations else []
 
         # ── 输出补丁文件到 analysis_results/ ────────────────
-        output_dir = config.output.output_dir
+        output_dir = output_dir or ensure_case_output_dir(config.output.output_dir, run_id, "validate", cve_id)
         os.makedirs(output_dir, exist_ok=True)
 
         adapted_patch = result.dry_run.adapted_patch if result.dry_run else None
@@ -1868,6 +1890,9 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
                 logger.error("深度分析失败: %s", e)
                 deep_analysis = None
 
+        serialized_validation_details = serialize_validation_details(result.validation_details)
+        dependency_details = serialize_dependency_details(result.dependency_details)
+
         out = {
             "cve_id": cve_id, "known_fix": known_fix, "target": tv,
             "target_version": tv,
@@ -1878,13 +1903,15 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
             "issues": issues,
             "analysis_narrative": narrative,
             "analysis_framework": (
-                serialize_validation_details(result.validation_details).get("decision_skeleton", {})
+                serialized_validation_details.get("decision_skeleton", {})
                 if result.validation_details else {}
             ),
             "fix_patch_detail": fix_patch_detail,
             "dryrun_detail": dryrun_detail,
             "level_decision": serialize_level_decision(result.level_decision),
-            "validation_details": serialize_validation_details(result.validation_details),
+            "validation_details": serialized_validation_details,
+            "dependency_details": dependency_details,
+            "manual_review_checklist": serialized_validation_details.get("manual_review_checklist", []),
             "function_impacts": serialize_function_impacts(result.function_impacts),
             "known_fix_detail": known_fix_detail,
             "diff_comparison": diff_comparison,
@@ -1898,11 +1925,34 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
             "real_fix_patch_file": real_fix_patch_file,
             "analysis_stages": stage_events,
             "known_prereqs": known_prereqs,
+            "run_id": run_id,
+            "output_dir": output_dir,
+            "artifacts": {
+                "run_id": run_id,
+                "output_dir": output_dir,
+                "patch_files": {
+                    key: value for key, value in {
+                        "adapted_patch": patch_file,
+                        "community_patch": community_patch_file,
+                        "real_fix_patch": real_fix_patch_file,
+                    }.items() if value
+                },
+            },
             "rules": collect_rules_metadata(
                 getattr(config, "policy", None),
                 level_decision=result.level_decision,
-                validation_details=serialize_validation_details(result.validation_details),
+                validation_details=serialized_validation_details,
             ),
+            "traceability": {
+                "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                "target_repo": build_repo_traceability(config, git_mgr, tv),
+                "policy": {
+                    "profile": getattr(getattr(config, "policy", None), "profile", "default") if getattr(config, "policy", None) else "default",
+                    "rule_version": serialized_validation_details.get("rule_version", ""),
+                    "rule_switches": (collect_rules_metadata(getattr(config, "policy", None)).get("policy_overrides") if getattr(config, "policy", None) else {}),
+                },
+                "data_sources": ["target_repo", "known_fix_local", "community_fix_patch", "validate_pipeline"],
+            },
         }
         if deep_analysis is not None:
             out["deep_analysis"] = deep_analysis

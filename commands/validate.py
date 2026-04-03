@@ -9,26 +9,43 @@ from datetime import datetime
 
 from rich.panel import Panel
 
-from core.output_serializers import aggregate_batch_validate_summary, build_l0_l5_view
+from core.output_serializers import (
+    aggregate_batch_validate_summary,
+    build_l0_l5_view,
+    collect_rules_metadata,
+)
 from core.report_schema import build_report_envelope
+from services.output_support import (
+    build_repo_traceability,
+    ensure_case_output_dir,
+    ensure_mode_output_dir,
+    make_run_id,
+)
 
 
 def _status_to_cn(kind: str, status: str) -> str:
     mapping = {
         "direct_backport": {
-            "allowed": "可直接回移",
+            "direct": "可直接回移",
+            "review": "接近可直接回移，但建议复核",
             "blocked": "不建议直接回移",
-            "needs_review": "需要进一步确认",
+            "not_applicable": "当前不适用",
+            "insufficient_intel": "情报不足",
         },
         "prerequisite": {
             "independent": "可按独立补丁处理",
-            "consider": "建议检查关联补丁",
+            "recommended": "建议检查关联补丁",
             "required": "必须检查关联补丁",
+            "weak_only": "仅弱关联，可按需复核",
+            "not_applicable": "当前不适用",
+            "insufficient_intel": "情报不足",
         },
         "risk": {
             "high": "高风险",
             "attention": "需要重点关注",
             "low": "未发现显著额外风险",
+            "not_applicable": "当前不适用",
+            "insufficient_intel": "情报不足",
         },
     }
     return mapping.get(kind, {}).get(status or "", status or "未知")
@@ -257,7 +274,8 @@ def _make_parallel_git_mgr(config):
     return GitRepoManager(config.repositories, use_cache=False)
 
 
-def _execute_batch_validate_case(runtime, config, tv, cve_id, group, *, deep=False, git_mgr=None, show_stages=False):
+def _execute_batch_validate_case(runtime, config, tv, cve_id, group, *, deep=False, git_mgr=None, show_stages=False,
+                                 run_id: str = ""):
     pass_verdicts = {"identical", "essentially_same"}
     primary = group["primary_fix"]
     prereqs = group["prereq_fixes"]
@@ -266,11 +284,14 @@ def _execute_batch_validate_case(runtime, config, tv, cve_id, group, *, deep=Fal
     worker_git_mgr = git_mgr if git_mgr is not None else _make_parallel_git_mgr(config)
 
     result = None
+    case_output_dir = ensure_case_output_dir(config.output.output_dir, run_id or make_run_id(), "batch-validate-case", cve_id)
     for _attempt in range(1, 4):
         result = runtime._run_single_validate(
             config, cve_id, tv, primary["commit"], known_prereq_commits,
             git_mgr=worker_git_mgr, show_stages=show_stages, cve_info=cve_info,
             deep=deep,
+            output_dir=case_output_dir,
+            run_id=run_id,
         )
         has_patch = result.get("dryrun_detail", {}).get("has_adapted_patch", False)
         verdict = result.get("generated_vs_real", {}).get("verdict", "no_data")
@@ -435,7 +456,8 @@ def _build_batch_summary_view(tv: str, total_cves: int, total_patches: int, skip
 
 def _prepare_batch_validate_json(tv: str, *, workers: int, total_cves: int, total_patches: int, skipped: int,
                                  p2_enabled: bool, batch_summary: dict, strategy_summary: dict,
-                                 passed_list: list, failed_list: list, error_list: list, cve_results: list) -> dict:
+                                 passed_list: list, failed_list: list, error_list: list, cve_results: list,
+                                 traceability: dict = None, artifacts: dict = None) -> dict:
     return build_report_envelope(
         "batch-validate",
         reading_guide=_build_batch_reading_guide(),
@@ -448,6 +470,8 @@ def _prepare_batch_validate_json(tv: str, *, workers: int, total_cves: int, tota
             "cve_results": cve_results,
         },
         extra={
+            "traceability": traceability or {},
+            "artifacts": artifacts or {},
             "result_groups": {
                 "passed": passed_list,
                 "failed": failed_list,
@@ -461,6 +485,7 @@ def run_validate(args, config, runtime):
     config = _apply_p2_override(config, args)
     tv = args.target_version
     git_mgr = runtime._make_git_mgr(config, tv)
+    run_id = make_run_id()
     known_prereqs = [p.strip() for p in args.known_prereqs.split(",") if p.strip()] if args.known_prereqs else []
 
     cve_info = None
@@ -497,6 +522,8 @@ def run_validate(args, config, runtime):
         config, args.cve_id, tv, args.known_fix, known_prereqs,
         git_mgr=git_mgr, show_stages=True, cve_info=cve_info,
         deep=getattr(args, "deep", False),
+        output_dir=ensure_case_output_dir(config.output.output_dir, run_id, "validate", args.cve_id),
+        run_id=run_id,
     )
 
     if not result.get("overall_pass"):
@@ -576,8 +603,16 @@ def run_validate(args, config, runtime):
 
     out_dir = config.output.output_dir
     os.makedirs(out_dir, exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    fp = os.path.join(out_dir, f"validate_{args.cve_id}_{tv}_{ts}.json")
+    report_dir = ensure_case_output_dir(out_dir, run_id, "validate", args.cve_id)
+    fp = os.path.join(report_dir, "report.json")
+    result["report_file"] = fp
+    artifacts = dict(result.get("artifacts") or {})
+    artifacts.update({
+        "run_id": run_id,
+        "output_dir": report_dir,
+        "report_file": fp,
+    })
+    result["artifacts"] = artifacts
     save_data = runtime._prepare_validate_json(result)
     with open(fp, "w", encoding="utf-8") as f:
         json.dump(save_data, f, indent=2, ensure_ascii=False, default=str)
@@ -598,6 +633,7 @@ def run_benchmark(args, config, runtime):
 
     tv = args.target_version
     git_mgr = runtime._make_git_mgr(config, tv)
+    run_id = make_run_id()
 
     runtime.console.print(Panel(
         f"[bold]基准集:[/] {len(entries)} 个 CVE  [bold]目标:[/] {tv}\n"
@@ -632,6 +668,8 @@ def run_benchmark(args, config, runtime):
         result = runtime._run_single_validate(
             config, cve_id, tv, known_fix, known_prereqs,
             git_mgr=git_mgr, show_stages=True,
+            output_dir=ensure_case_output_dir(config.output.output_dir, run_id, "benchmark-case", cve_id),
+            run_id=run_id,
         )
         results.append(result)
 
@@ -643,8 +681,8 @@ def run_benchmark(args, config, runtime):
 
     out_dir = config.output.output_dir
     os.makedirs(out_dir, exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    fp = os.path.join(out_dir, f"benchmark_{tv}_{ts}.json")
+    report_dir = ensure_mode_output_dir(out_dir, run_id, "benchmark", tv)
+    fp = os.path.join(report_dir, "report.json")
     with open(fp, "w", encoding="utf-8") as f:
         json.dump({"target": tv, "total": len(results), "results": results},
                   f, indent=2, ensure_ascii=False, default=str)
@@ -665,6 +703,7 @@ def run_batch_validate(args, config, runtime):
         return
 
     tv = args.target_version
+    run_id = make_run_id()
     workers = _resolve_batch_workers(getattr(args, "workers", 1), getattr(args, "deep", False))
     git_mgr = runtime._make_git_mgr(config, tv) if workers == 1 else None
 
@@ -760,8 +799,8 @@ def run_batch_validate(args, config, runtime):
 
     out_dir = config.output.output_dir
     os.makedirs(out_dir, exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    live_report_path = os.path.join(out_dir, f"batch_validate_{tv}_{ts}.json")
+    batch_report_dir = ensure_mode_output_dir(out_dir, run_id, "batch-validate", tv)
+    live_report_path = os.path.join(batch_report_dir, "live_report.json")
     runtime.console.print(f"[dim]实时报告: {live_report_path} (每完成一个 CVE 自动更新)[/]")
 
     ordered_results = {}
@@ -829,6 +868,7 @@ def run_batch_validate(args, config, runtime):
                     deep=getattr(args, "deep", False),
                     git_mgr=git_mgr,
                     show_stages=True,
+                    run_id=run_id,
                 )
                 ordered_results[ci] = case_out["result"]
                 icon = verdict_icons.get(case_out["verdict"], f"[dim]{case_out['verdict']}[/]")
@@ -856,6 +896,7 @@ def run_batch_validate(args, config, runtime):
                     deep=getattr(args, "deep", False),
                     git_mgr=None,
                     show_stages=False,
+                    run_id=run_id,
                 )
                 future_map[future] = (ci, cve_id, group)
 
@@ -887,7 +928,13 @@ def run_batch_validate(args, config, runtime):
     batch_summary = aggregate_batch_validate_summary(serializable_results)
     strategy_summary = runtime.aggregate_strategy_buckets(serializable_results)
     p2_enabled = bool(getattr(config.policy, "special_risk_rules_enabled", True)) if getattr(config, "policy", None) else True
-    full_report_path = os.path.join(out_dir, f"batch_validate_{tv}_{ts}_full.json")
+    trace_git_mgr = git_mgr or runtime._make_git_mgr(config, tv)
+    generated_at = datetime.now().astimezone().isoformat(timespec="seconds")
+    policy_overrides = (
+        collect_rules_metadata(getattr(config, "policy", None)).get("policy_overrides", {})
+        if getattr(config, "policy", None) else {}
+    )
+    full_report_path = os.path.join(batch_report_dir, "full_report.json")
     with open(full_report_path, "w", encoding="utf-8") as f:
         json.dump(
             _prepare_batch_validate_json(
@@ -903,6 +950,28 @@ def run_batch_validate(args, config, runtime):
                 failed_list=failed_list,
                 error_list=error_list,
                 cve_results=serializable_results,
+                traceability={
+                    "mode": "batch-validate",
+                    "target_version": tv,
+                    "generated_at": generated_at,
+                    "report_version": "friendly-json-v2",
+                    "schema_version": "result-schema-v2",
+                    "target_repo": build_repo_traceability(config, trace_git_mgr, tv),
+                    "policy": {
+                        "profile": getattr(getattr(config, "policy", None), "profile", "default") if getattr(config, "policy", None) else "default",
+                        "rule_switches": policy_overrides,
+                    },
+                    "data_sources": ["target_repo", "batch_validate_input_json", "community_fix_patch", "known_fix_local"],
+                    "source_timestamps": {
+                        "report_generated_at": generated_at,
+                    },
+                },
+                artifacts={
+                    "run_id": run_id,
+                    "output_dir": batch_report_dir,
+                    "report_file": full_report_path,
+                    "live_report_file": live_report_path,
+                },
             ),
             f, indent=2, ensure_ascii=False, default=str
         )

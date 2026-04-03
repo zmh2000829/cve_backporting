@@ -4,6 +4,8 @@ import copy
 import os
 import sys
 
+from services.output_support import make_run_id
+
 
 def _apply_p2_override(config, args):
     cfg = copy.deepcopy(config)
@@ -52,6 +54,7 @@ def run(args, config, runtime):
 
     out_dir = config.output.output_dir
     os.makedirs(out_dir, exist_ok=True)
+    run_id = make_run_id()
 
     deep = getattr(args, "deep", False)
     for cve_id in cves:
@@ -62,6 +65,7 @@ def run(args, config, runtime):
                 args.target_version,
                 out_dir=out_dir,
                 policy_config=getattr(config, "policy", None),
+                run_id=run_id,
             )
         else:
             runtime._analyze_one(
@@ -72,4 +76,5 @@ def run(args, config, runtime):
                 enable_dryrun=not args.no_dryrun,
                 out_dir=out_dir,
                 policy_config=getattr(config, "policy", None),
+                run_id=run_id,
             )

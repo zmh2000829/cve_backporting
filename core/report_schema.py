@@ -245,6 +245,17 @@ def _fallback_conclusion(payload: Dict[str, Any], mode: str, result_status: Dict
     dryrun = payload.get("dryrun_detail") or {}
     apply_method = str(dryrun.get("apply_method", "") or "")
     issues = dedupe_strings(payload.get("issues", []))
+    level_decision = payload.get("level_decision") or {}
+    rule_hits = list(level_decision.get("rule_hits") or [])
+    rule_classes = {hit.get("rule_class", "") for hit in rule_hits if isinstance(hit, dict)}
+    low_drift_direct = (
+        level_decision.get("level") == "L1"
+        and level_decision.get("base_level") == "L1"
+        and prereq_counts["total"] == 0
+        and not issues
+        and apply_method in _ATTENTION_APPLY_METHODS
+        and not (rule_classes & {"low_level_veto", "direct_backport_veto", "risk_profile"})
+    )
 
     if result_status["state"] == "not_applicable":
         return {
@@ -311,6 +322,11 @@ def _fallback_conclusion(payload: Dict[str, Any], mode: str, result_status: Dict
         prereq_summary = f"仅发现 {prereq_counts['weak']} 个弱关联补丁，可按需复核。"
         direct_status = "review"
         direct_summary = "没有明显强依赖，但仍建议结合上下文做一次快速复核。"
+    elif low_drift_direct:
+        prereq_status = "independent"
+        prereq_summary = "未发现必须优先处理的关联补丁。"
+        direct_status = "direct"
+        direct_summary = "当前仅见上下文/空白级别漂移，补丁可直接回移，建议保留最小编译与回归验证。"
     else:
         prereq_status = "independent"
         prereq_summary = "未发现必须优先处理的关联补丁。"

@@ -263,6 +263,32 @@ void baz(void) {
         self.assertIn("local_variable_rename", rule_hits["l1_light_drift_sample"]["evidence"]["categories"])
         self.assertIn("oldv->newv", rule_hits["l1_light_drift_sample"]["evidence"]["rename_pairs"])
 
+    def test_l1_clean_context_drift_allows_direct_backport(self):
+        diff = """diff --git a/f.c b/f.c
+@@ -1,2 +1,2 @@
+- value = old;
++ value = new;
+"""
+        p = _patch(diff, ["f.c"])
+        dr = DryRunResult(applies_cleanly=True, apply_method="context-C1")
+        eng = PolicyEngine(
+            PolicyConfig(
+                profile="default",
+                large_change_rules_enabled=False,
+                call_chain_rules_enabled=False,
+                critical_structure_rules_enabled=False,
+                special_risk_rules_enabled=False,
+                l1_api_surface_rules_enabled=False,
+                high_impact_single_line_rules_enabled=False,
+            ),
+            llm_enabled=False,
+        )
+        vd = eng.evaluate(p, dr, _MockGit({"f.c": "int f(void) {\n    return 0;\n}\n"}), "any")
+        self.assertEqual(vd.level_decision.level, "L1")
+        self.assertEqual(vd.decision_skeleton["conclusion"]["direct_backport"]["status"], "direct")
+        self.assertEqual(vd.decision_skeleton["conclusion"]["risk"]["status"], "low")
+        self.assertEqual(vd.manual_review_checklist, [])
+
     def test_l1_api_surface_disabled(self):
         diff = """diff --git a/f.c b/f.c
 @@ -1,2 +1,2 @@
@@ -307,6 +333,7 @@ int foo(void) {
         self.assertEqual(vd.level_decision.base_level, "L0")
         self.assertEqual(vd.level_decision.level, "L4")
         self.assertTrue(any(h.get("rule_id") == "call_chain_propagation" for h in vd.level_decision.rule_hits))
+        self.assertTrue(vd.manual_review_checklist)
 
     def test_prerequisite_required_promotes_to_l3(self):
         diff = """diff --git a/a.c b/a.c
