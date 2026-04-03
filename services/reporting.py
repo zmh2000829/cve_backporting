@@ -251,6 +251,14 @@ def build_human_friendly_summary(data: dict, mode: str) -> dict:
             "核心相似度": generated.get("core_similarity", 0),
             "比较来源": generated.get("compare_source", ""),
         }
+        recalibration = data.get("accuracy_recalibration") or {}
+        if recalibration.get("applied"):
+            summary["level_recalibration"] = {
+                "状态": "已校正",
+                "说明": recalibration.get("reason", ""),
+                "原级别": recalibration.get("original_level", ""),
+                "校正后级别": recalibration.get("adjusted_level", ""),
+            }
 
     return summary
 
@@ -414,6 +422,7 @@ def prepare_validate_json(result: dict, *, deep_serializer=None) -> dict:
             "function_impacts": raw.get("function_impacts", []),
             "generated_vs_real": raw.get("generated_vs_real", {}),
             "generated_patch_vs_primary_fix": raw.get("generated_patch_vs_primary_fix", {}),
+            "accuracy_recalibration": raw.get("accuracy_recalibration", {}),
             "diff_comparison": raw.get("diff_comparison", {}),
             "tool_prereqs": raw.get("tool_prereqs", []),
             "tool_prereqs_for_compare": raw.get("tool_prereqs_for_compare", []),

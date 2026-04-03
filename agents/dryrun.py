@@ -5,7 +5,7 @@ Dry-Run Agent — 多级补丁试应用 + 逐 hunk 冲突分析
   Level 0 - strict:           git apply --check
   Level 1 - context-C1:       git apply --check -C1
   Level 2 - 3way:             git apply --check --3way
-  Level 5 - verified-direct:  完全绕过 git apply, Python 内存中
+  Direct-verify:              完全绕过 git apply, Python 内存中
                               定位 → 验证 → 修改 → difflib 生成 diff
   Level 3 - regenerated:      从目标文件重建 context (核心 +/- 不变)
   Level 3.5 - zero-context:   零上下文重建, 消除 context 行匹配问题
@@ -115,7 +115,7 @@ class DryRunAgent:
         r0 = first_err or DryRunResult()
         r0.apply_attempts = apply_attempts
 
-        # ── L5: 直接验证重建 — 完全绕过 git apply ───────────────
+        # ── Direct-verify: 直接验证重建 — 完全绕过 git apply ───────
         # 在 Python 内存中定位+验证+修改+difflib 生成 diff,
         # 不依赖 git apply, 是最健壮的策略。
         direct_diff, verified = self._regenerate_verified(
@@ -126,7 +126,7 @@ class DryRunAgent:
             r5.apply_method = "verified-direct"
             r5.adapted_patch = direct_diff
             r5.error_output = (
-                "(L5 直接验证成功: 变更点已在目标文件中精确定位"
+                "(直接验证成功: 变更点已在目标文件中精确定位"
                 "并验证, 绕过 git apply)")
             r5.apply_attempts = apply_attempts + [{
                 "method": "verified-direct",
@@ -135,7 +135,7 @@ class DryRunAgent:
             }]
             r5.stat_output = self._get_stat(
                 mapped_diff, target_version) or ""
-            logger.info("[DryRun] L5 直接验证成功: %s",
+            logger.info("[DryRun] 直接验证成功: %s",
                         patch.commit_id[:12])
             return r5
 
@@ -231,12 +231,12 @@ class DryRunAgent:
                     return r4
 
         # ── 全部失败: 按优先级保留最佳可用补丁 ────────────────────
-        # L5 direct > L3.5 零上下文 > L3 重建 > L4 适配 > 社区原始
+        # direct-verify > L3.5 零上下文 > L3 重建 > L4 适配 > 社区原始
         if direct_diff:
             r0.adapted_patch = direct_diff
             logger.info(
                 "[DryRun] git apply 全失败, "
-                "保留 L5 直接验证结果用于对比: %s",
+                "保留直接验证结果用于对比: %s",
                 patch.commit_id[:12])
         elif zero_ctx:
             r0.adapted_patch = zero_ctx
@@ -265,7 +265,7 @@ class DryRunAgent:
     def _ensure_adapted_patch(self, result: DryRunResult,
                               diff_text: str, repo_path: str):
         """L0/L1/L2 成功后，仍生成 adapted_patch (行号对齐目标文件)。
-        优先用 L5 直接验证, 其次 L3 重建, 最后回退社区原始补丁。"""
+        优先用直接验证, 其次 L3 重建, 最后回退社区原始补丁。"""
         try:
             direct, ok = self._regenerate_verified(
                 diff_text, repo_path)
@@ -273,7 +273,7 @@ class DryRunAgent:
                 result.adapted_patch = direct
                 return
         except Exception as e:
-            logger.debug("[DryRun] _ensure L5 异常: %s", e)
+            logger.debug("[DryRun] _ensure direct-verify 异常: %s", e)
         try:
             adapted = self._regenerate_patch(diff_text, repo_path)
             if adapted:

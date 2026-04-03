@@ -164,6 +164,49 @@ class ReportSchemaRegressionTests(unittest.TestCase):
             "重点核对字段/数据路径",
         )
 
+    def test_prepare_validate_json_includes_accuracy_recalibration(self):
+        report = prepare_validate_json({
+            "cve_id": "CVE-2024-88888",
+            "target_version": "5.10-hulk",
+            "known_fix": "deadbeefcafebabe",
+            "overall_pass": True,
+            "summary": "验证通过",
+            "level_decision": {
+                "level": "L1",
+                "base_level": "L1",
+                "base_method": "verified-direct-exact",
+                "review_mode": "llm-review",
+                "rule_hits": [],
+            },
+            "validation_details": {
+                "rule_profile": "default",
+                "rule_version": "v2",
+                "decision_skeleton": {
+                    "conclusion": {
+                        "direct_backport": {"status": "direct", "summary": "补丁可直接回移"},
+                        "prerequisite": {"status": "independent", "summary": "无关联补丁"},
+                        "risk": {"status": "low", "summary": "低风险"},
+                        "final": {"level": "L1", "base_level": "L1"},
+                    }
+                },
+            },
+            "generated_vs_real": {
+                "verdict": "identical",
+                "core_similarity": 1.0,
+                "compare_source": "adapted_patch",
+            },
+            "accuracy_recalibration": {
+                "applied": True,
+                "reason": "Validate 准确度校正: generated_vs_real 为 deterministic exact match，按 verified-direct-exact 重新评估级别。",
+                "original_level": "L3",
+                "adjusted_level": "L1",
+            },
+        })
+
+        self.assertEqual(report["summary"]["level_recalibration"]["状态"], "已校正")
+        self.assertEqual(report["summary"]["level_recalibration"]["原级别"], "L3")
+        self.assertEqual(report["technical_details"]["accuracy_recalibration"]["adjusted_level"], "L1")
+
 
 class OutputSupportRegressionTests(unittest.TestCase):
     class _FakeGitMgr:

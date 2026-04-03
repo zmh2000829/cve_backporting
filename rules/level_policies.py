@@ -26,7 +26,7 @@ LEVEL_POLICIES = [
     ),
     LevelPolicy(
         level="L1",
-        methods=["ignore-ws", "context-C1", "C1-ignore-ws"],
+        methods=["ignore-ws", "context-C1", "C1-ignore-ws", "verified-direct-exact"],
         strategy="L1 轻微上下文漂移：补丁本体接近原样，优先进入 LLM/人工核对‘是否仅为入参、格式、上下文微调’的低风险审查路径。",
         review_mode="llm-review",
         next_action="结合 LLM 与人工确认是否仅为上下文/入参调整；未明确前不自动标记 harmless。",
@@ -46,7 +46,7 @@ LEVEL_POLICIES = [
     ),
     LevelPolicy(
         level="L3",
-        methods=["regenerated"],
+        methods=["regenerated", "verified-direct"],
         strategy="L3 语义敏感变更：涉及关键结构、上下文重生成或更强规则抬升，必须做聚焦代码审查与回归测试。",
         review_mode="focused-review",
         next_action="重点审查关键数据结构、锁、返回路径和回归测试覆盖。",
@@ -66,8 +66,8 @@ LEVEL_POLICIES = [
     ),
     LevelPolicy(
         level="L5",
-        methods=["verified-direct"],
-        strategy="L5 回退/未知路径：绕过常规 apply 或方法未识别，按最高谨慎度处理。",
+        methods=[],
+        strategy="L5 回退/未知路径：DryRun 缺失、方法未识别或证据链断裂时，按最高谨慎度处理。",
         review_mode="fallback-review",
         next_action="保留证据，走人工确认或补充样本验证。",
         harmless_allowed=False,

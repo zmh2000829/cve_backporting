@@ -429,6 +429,53 @@ int foo(void) {
         self.assertEqual(vd.level_decision.level, "L5")
         self.assertEqual(vd.level_decision.confidence, "low")
 
+    def test_verified_direct_defaults_to_l3_not_l5(self):
+        p = _patch("- x\n+ y\n", ["z.c"])
+        dr = DryRunResult(applies_cleanly=True, apply_method="verified-direct")
+        eng = PolicyEngine(PolicyConfig(), llm_enabled=False)
+        vd = eng.evaluate(p, dr, _MockGit({}), "any")
+        self.assertEqual(vd.level_decision.base_level, "L3")
+        self.assertEqual(vd.level_decision.level, "L3")
+        self.assertEqual(vd.level_decision.review_mode, "focused-review")
+
+    def test_validate_exact_match_recalibrates_verified_direct_to_l1(self):
+        p = _patch("- x\n+ y\n", ["z.c"])
+        dr = DryRunResult(applies_cleanly=True, apply_method="verified-direct")
+        eng = PolicyEngine(PolicyConfig(), llm_enabled=False)
+        vd = eng.evaluate(p, dr, _MockGit({}), "any")
+        result = SimpleNamespace(
+            fix_patch=p,
+            dry_run=dr,
+            level_decision=vd.level_decision,
+            prerequisite_patches=[],
+            dependency_details=DependencyAnalysisDetails(),
+            validation_details=vd,
+            function_impacts=vd.function_impacts,
+        )
+        recalibration = cli._maybe_recalibrate_validate_level_from_accuracy(
+            result,
+            {
+                "verdict": "identical",
+                "deterministic_exact_match": True,
+                "compare_scope": "single_fix",
+            },
+            eng,
+            _MockGit({}),
+            "any",
+        )
+        self.assertTrue(recalibration.get("applied"))
+        self.assertEqual(recalibration.get("original_level"), "L3")
+        self.assertEqual(recalibration.get("adjusted_level"), "L1")
+        self.assertEqual(result.level_decision.base_method, "verified-direct-exact")
+        self.assertEqual(result.level_decision.level, "L1")
+        self.assertEqual(
+            result.validation_details.decision_skeleton["conclusion"]["direct_backport"]["status"],
+            "direct",
+        )
+        self.assertTrue(
+            any("Validate 准确度校正" in step for step in result.validation_details.workflow_steps)
+        )
+
     def test_l5_when_dryrun_missing(self):
         p = _patch("- x\n+ y\n", ["z.c"])
         eng = PolicyEngine(PolicyConfig(profile="balanced"), llm_enabled=False)

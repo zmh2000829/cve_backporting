@@ -23,7 +23,7 @@ import logging
 import tempfile
 import time
 from datetime import datetime
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import re
 from services.output_support import (
     build_repo_traceability,
@@ -1606,6 +1606,74 @@ def _compare_generated_vs_real(generated_patch: str, real_diff: str) -> dict:
     }
 
 
+def _maybe_recalibrate_validate_level_from_accuracy(
+    result,
+    generated_vs_real: dict,
+    policy_engine,
+    git_mgr,
+    target_version: str,
+    path_mapper=None,
+):
+    """validate 专用: 当 verified-direct 与真实修复完全一致时，重新按低漂移场景定级。
+
+    这里校正的是“证明链强弱”而不是补丁语义本身。verified-direct 仍表示工具绕过
+    git apply 做了内存级定位，但如果 validate 已证明生成补丁与真实合入补丁完全一致，
+    就不应继续把它留在最高谨慎度路径。
+    """
+    if not result or not generated_vs_real or not policy_engine:
+        return {}
+    if not getattr(result, "fix_patch", None) or not getattr(result, "dry_run", None):
+        return {}
+    if not getattr(result, "level_decision", None):
+        return {}
+    if (result.dry_run.apply_method or "") != "verified-direct":
+        return {}
+    if not generated_vs_real.get("deterministic_exact_match"):
+        return {}
+
+    original_level = result.level_decision.level
+    original_base_level = result.level_decision.base_level
+    adjusted_dryrun = replace(result.dry_run, apply_method="verified-direct-exact")
+    reevaluated = policy_engine.evaluate(
+        result.fix_patch,
+        adjusted_dryrun,
+        git_mgr,
+        target_version,
+        path_mapper,
+        prerequisite_patches=result.prerequisite_patches,
+        dependency_details=result.dependency_details,
+    )
+    if not reevaluated or not reevaluated.level_decision:
+        return {}
+
+    note = (
+        "Validate 准确度校正: generated_vs_real 为 deterministic exact match，"
+        "按 verified-direct-exact 重新评估级别。"
+    )
+    if note not in (reevaluated.workflow_steps or []):
+        reevaluated.workflow_steps.insert(2 if len(reevaluated.workflow_steps) >= 2 else 0, note)
+    reevaluated.level_decision.reason = (
+        f"{reevaluated.level_decision.reason} {note}"
+    ).strip()
+
+    result.level_decision = reevaluated.level_decision
+    result.validation_details = reevaluated
+    result.function_impacts = reevaluated.function_impacts
+
+    return {
+        "applied": True,
+        "reason": note,
+        "match_verdict": generated_vs_real.get("verdict", ""),
+        "deterministic_exact_match": True,
+        "original_base_method": "verified-direct",
+        "adjusted_base_method": reevaluated.level_decision.base_method,
+        "original_base_level": original_base_level,
+        "adjusted_base_level": reevaluated.level_decision.base_level,
+        "original_level": original_level,
+        "adjusted_level": reevaluated.level_decision.level,
+    }
+
+
 def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
                          git_mgr=None, show_stages=True,
                          cve_info=None, deep=False, stage_callback=None,
@@ -1990,6 +2058,20 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
             issues.append(
                 f"补丁仅部分一致 (核心相似度 {gvr_core:.0%})")
 
+        accuracy_recalibration = _maybe_recalibrate_validate_level_from_accuracy(
+            result,
+            generated_vs_real,
+            pipe.policy_engine,
+            wt_mgr,
+            tv,
+            getattr(pipe.dryrun, "path_mapper", None),
+        )
+        if accuracy_recalibration.get("applied"):
+            checks["validate_level_recalibrated"] = True
+            checks["validate_level_recalibration_reason"] = accuracy_recalibration.get("reason", "")
+        else:
+            checks["validate_level_recalibrated"] = False
+
         # ── 构建面向开发人员的详细分析过程描述 ──────────────
         try:
             narrative = _build_analysis_narrative(
@@ -2044,6 +2126,7 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
             "diff_comparison": diff_comparison,
             "generated_vs_real": generated_vs_real,
             "generated_patch_vs_primary_fix": primary_generated_vs_real if solution_set_needed else {},
+            "accuracy_recalibration": accuracy_recalibration,
             "root_cause": root_cause,
             "tool_prereqs": tool_prereqs_detail,
             "tool_prereqs_for_compare": [p.commit_id[:12] for p in compare_tool_prereqs],
