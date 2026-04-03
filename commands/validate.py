@@ -174,7 +174,7 @@ def register(subparsers, parent):
     validate = subparsers.add_parser("validate", help="基于已修复CVE验证工具准确度", parents=[parent])
     validate.add_argument("--cve", dest="cve_id", required=True)
     validate.add_argument("--target", dest="target_version", required=True)
-    validate.add_argument("--known-fix", required=True, help="本地仓库中真实修复的commit ID")
+    validate.add_argument("--known-fix", required=True, help="本地仓库中真实修复的 commit ID；多个可用逗号分隔")
     validate.add_argument("--known-prereqs", default="", help="实际先合入的前置commit列表 (逗号分隔)")
     validate.add_argument("--mainline-fix", default="", help="社区 mainline 修复 commit ID (提供后跳过 MITRE 爬取)")
     validate.add_argument("--mainline-intro", default="", help="社区 mainline 引入 commit ID (可选)")
@@ -280,6 +280,7 @@ def _execute_batch_validate_case(runtime, config, tv, cve_id, group, *, deep=Fal
     primary = group["primary_fix"]
     prereqs = group["prereq_fixes"]
     cve_info = group.get("cve_info")
+    known_fix_commits = [item["commit"] for item in group.get("all_fixes", []) if item.get("commit")]
     known_prereq_commits = [p["commit"] for p in prereqs]
     worker_git_mgr = git_mgr if git_mgr is not None else _make_parallel_git_mgr(config)
 
@@ -292,6 +293,7 @@ def _execute_batch_validate_case(runtime, config, tv, cve_id, group, *, deep=Fal
             deep=deep,
             output_dir=case_output_dir,
             run_id=run_id,
+            known_fixes=known_fix_commits,
         )
         has_patch = result.get("dryrun_detail", {}).get("has_adapted_patch", False)
         verdict = result.get("generated_vs_real", {}).get("verdict", "no_data")
@@ -486,6 +488,8 @@ def run_validate(args, config, runtime):
     tv = args.target_version
     git_mgr = runtime._make_git_mgr(config, tv)
     run_id = make_run_id()
+    known_fix_commits = runtime._coerce_commit_list(args.known_fix)
+    primary_known_fix = known_fix_commits[0] if known_fix_commits else args.known_fix
     known_prereqs = [p.strip() for p in args.known_prereqs.split(",") if p.strip()] if args.known_prereqs else []
 
     cve_info = None
@@ -505,7 +509,7 @@ def run_validate(args, config, runtime):
 
     info_lines = [
         f"[bold]CVE:[/] {args.cve_id}  [bold]目标:[/] {tv}",
-        f"[bold]Known Fix:[/] {args.known_fix[:12]}",
+        f"[bold]Known Fix:[/] {primary_known_fix[:12]}" + (f"  [dim](共 {len(known_fix_commits)} 个实际 fix)[/]" if len(known_fix_commits) > 1 else ""),
         f"[bold]Known Prereqs:[/] {len(known_prereqs)} 个",
     ]
     if mainline_fix:
@@ -519,11 +523,12 @@ def run_validate(args, config, runtime):
     ))
 
     result = runtime._run_single_validate(
-        config, args.cve_id, tv, args.known_fix, known_prereqs,
+        config, args.cve_id, tv, primary_known_fix, known_prereqs,
         git_mgr=git_mgr, show_stages=True, cve_info=cve_info,
         deep=getattr(args, "deep", False),
         output_dir=ensure_case_output_dir(config.output.output_dir, run_id, "validate", args.cve_id),
         run_id=run_id,
+        known_fixes=known_fix_commits,
     )
 
     if not result.get("overall_pass"):
@@ -645,14 +650,15 @@ def run_benchmark(args, config, runtime):
     results = []
     for i, entry in enumerate(entries, 1):
         cve_id = entry.get("cve_id", "N/A")
-        known_fix = entry.get("known_fix_commit", "")
+        known_fix_commits = runtime._coerce_commit_list(entry.get("known_fix_commit", ""))
+        known_fix = known_fix_commits[0] if known_fix_commits else ""
         known_prereqs = entry.get("known_prereqs", []) or []
         notes = entry.get("notes", "")
 
         runtime.console.print(f"\n{'━' * 60}")
         runtime.console.print(
             f"[bold cyan][{i}/{len(entries)}][/]  {cve_id}  "
-            f"[dim]fix={known_fix[:12]}  prereqs={len(known_prereqs)}[/]"
+            f"[dim]fix={known_fix[:12]}{' +' + str(len(known_fix_commits)-1) if len(known_fix_commits) > 1 else ''}  prereqs={len(known_prereqs)}[/]"
             + (f"  [dim italic]{notes}[/]" if notes else "")
         )
 
@@ -670,6 +676,7 @@ def run_benchmark(args, config, runtime):
             git_mgr=git_mgr, show_stages=True,
             output_dir=ensure_case_output_dir(config.output.output_dir, run_id, "benchmark-case", cve_id),
             run_id=run_id,
+            known_fixes=known_fix_commits,
         )
         results.append(result)
 

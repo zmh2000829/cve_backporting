@@ -95,6 +95,24 @@ def _coerce_commit_list(values):
     return [str(values).strip()] if str(values).strip() else []
 
 
+def _dedupe_commit_list(values):
+    seen = set()
+    out = []
+    for value in _coerce_commit_list(values):
+        if value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
+
+
+def _coerce_known_fix_commits(known_fix=None, known_fixes=None):
+    commits = _dedupe_commit_list(known_fixes)
+    if commits:
+        return commits
+    return _dedupe_commit_list(known_fix)
+
+
 def _make_stage_trace_tracker(stage_callback=None):
     events = []
     starts = {}
@@ -669,11 +687,14 @@ def _prepare_validate_json(result: dict) -> dict:
 
 # ─── validate / benchmark ────────────────────────────────────────────
 
-def _find_rollback_commit(git_mgr, rv, known_fix, known_prereqs):
-    """计算回滚目标：如果有 known_prereqs 则回滚到最早的 prereq 之前，否则回滚到 fix 之前"""
-    if not known_prereqs:
-        return f"{known_fix}~1"
-    all_commits = list(known_prereqs) + [known_fix]
+def _find_rollback_commit(git_mgr, rv, known_fixes, known_prereqs):
+    """计算回滚目标：回滚到实际修复集合中最早 commit 的前一个提交。"""
+    fix_commits = _coerce_known_fix_commits(known_fixes)
+    all_commits = _dedupe_commit_list(list(fix_commits) + list(known_prereqs or []))
+    if not all_commits:
+        return "HEAD~1"
+    if len(all_commits) == 1:
+        return f"{all_commits[0]}~1"
     earliest = all_commits[0]
     for c in all_commits[1:]:
         rc = git_mgr.run_git_rc(
@@ -739,15 +760,56 @@ def _parse_diff_by_file(diff_text: str) -> dict:
     for line in diff_text.split("\n"):
         if line.startswith("diff --git"):
             if current_file:
-                files[current_file] = "\n".join(current_lines)
+                files.setdefault(current_file, []).append("\n".join(current_lines))
             m = re.search(r" b/(.*)", line)
             current_file = m.group(1) if m else None
             current_lines = [line]
         elif current_file is not None:
             current_lines.append(line)
     if current_file:
-        files[current_file] = "\n".join(current_lines)
-    return files
+        files.setdefault(current_file, []).append("\n".join(current_lines))
+    return {
+        path: "\n".join(sections)
+        for path, sections in files.items()
+    }
+
+
+def _combine_patch_texts(parts) -> str:
+    chunks = [str(part or "").strip() for part in (parts or []) if str(part or "").strip()]
+    return "\n".join(chunks).strip()
+
+
+def _collect_commit_diff_bundle(config, git_mgr, tv, commit_ids):
+    details = []
+    diffs = []
+    for commit_id in _dedupe_commit_list(commit_ids):
+        meta = git_mgr.run_git(
+            ["git", "show", "--stat", "--format=%H%n%s%n%an", commit_id],
+            tv, timeout=30)
+        detail = serialize_commit_reference(config, git_mgr, tv, commit_id, extra={"subject": "", "author": ""})
+        if meta:
+            lines = meta.strip().split("\n")
+            if len(lines) >= 3:
+                detail = serialize_commit_reference(
+                    config, git_mgr, tv, lines[0].strip(),
+                    extra={
+                        "subject": lines[1],
+                        "author": lines[2],
+                        "stat": "\n".join(lines[3:])[:500],
+                    },
+                )
+
+        raw = git_mgr.run_git(["git", "show", "--format=", commit_id], tv, timeout=30)
+        diff_text = raw.strip() if raw else ""
+        detail["diff_lines"] = len(diff_text.splitlines()) if diff_text else 0
+        details.append(detail)
+        if diff_text:
+            diffs.append(diff_text)
+
+    return {
+        "details": details,
+        "combined_diff": _combine_patch_texts(diffs),
+    }
 
 
 def _extract_key_changes(diff_text: str, max_lines: int = 15) -> list:
@@ -1237,6 +1299,9 @@ def _build_quality_narrative(gvr: dict, diff_cmp: dict):
         "adapted_patch(community)": (
             "对比基准: 使用社区原始补丁作为回退 "
             "(工具适配未产生新补丁, 行号可能不一致)"),
+        "predicted_solution_set": (
+            "对比基准: 使用“工具生成主补丁 + 工具识别的 strong/medium 前置补丁”"
+            " 与“实际 known_fix/known_prereqs 解集”做整体比较"),
     }.get(source, source)
 
     conclusion = (
@@ -1544,33 +1609,46 @@ def _compare_generated_vs_real(generated_patch: str, real_diff: str) -> dict:
 def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
                          git_mgr=None, show_stages=True,
                          cve_info=None, deep=False, stage_callback=None,
-                         output_dir=None, run_id: str = ""):
+                         output_dir=None, run_id: str = "",
+                         known_fixes=None):
     """执行单个 CVE 的回退验证，返回结果 dict。
     cve_info: 可选的预构建 CveInfo，提供后跳过 MITRE 爬取。
     deep: 是否同时执行 v2 深度分析。"""
     if git_mgr is None:
         git_mgr = _make_git_mgr(config, tv)
     run_id = run_id or make_run_id()
+    known_fix_commits = _coerce_known_fix_commits(known_fix, known_fixes)
+    if not known_fix_commits:
+        known_fix_commits = [known_fix]
+    primary_known_fix = known_fix_commits[0]
+    actual_solution_commits = _dedupe_commit_list(list(known_fix_commits) + list(known_prereqs or []))
 
-    status, _ = git_mgr.check_commit_existence(known_fix, tv)
-    if status != "on_branch":
-        msg = f"known_fix {known_fix[:12]} 不在目标分支 (status={status})"
+    missing_fixes = []
+    for commit_id in actual_solution_commits:
+        status, _ = git_mgr.check_commit_existence(commit_id, tv)
+        if status != "on_branch":
+            missing_fixes.append((commit_id, status))
+    if missing_fixes:
+        first_commit, status = missing_fixes[0]
+        msg = f"known_fix {first_commit[:12]} 不在目标分支 (status={status})"
         console.print(f"[red]{msg}[/]")
         return enrich_result_payload({
-            "cve_id": cve_id, "known_fix": known_fix, "target": tv,
+            "cve_id": cve_id, "known_fix": primary_known_fix, "known_fix_commits": known_fix_commits, "target": tv,
             "worktree_commit": "", "checks": {},
             "overall_pass": False, "summary": msg,
             "result_status": make_result_status(
                 state="error",
                 error_code="known_fix_not_on_branch",
                 user_message=msg,
-                technical_detail=msg,
+                technical_detail="; ".join(
+                    f"{commit_id[:12]}:{st}" for commit_id, st in missing_fixes[:6]
+                ),
                 retryable=False,
-                evidence_refs=[cve_id, known_fix[:12]],
+                evidence_refs=[cve_id] + [commit_id[:12] for commit_id, _ in missing_fixes[:6]],
             ),
         }, "validate")
 
-    rollback = _find_rollback_commit(git_mgr, tv, known_fix, known_prereqs)
+    rollback = _find_rollback_commit(git_mgr, tv, known_fix_commits, known_prereqs)
     resolved = git_mgr.run_git(["git", "rev-parse", rollback], tv, timeout=10)
     rollback_hash = resolved.strip() if resolved else rollback
 
@@ -1578,7 +1656,7 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
     if not git_mgr.create_worktree(tv, rollback, wt_dir):
         console.print(f"[red]创建 worktree 失败 @ {rollback}[/]")
         return enrich_result_payload({
-            "cve_id": cve_id, "known_fix": known_fix, "target": tv,
+            "cve_id": cve_id, "known_fix": primary_known_fix, "known_fix_commits": known_fix_commits, "target": tv,
             "worktree_commit": rollback, "checks": {},
             "overall_pass": False, "summary": "创建worktree失败",
             "result_status": make_result_status(
@@ -1604,9 +1682,10 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
 
         if show_stages:
             tracker = StageTracker(STAGES)
+            rollback_label = primary_known_fix[:16] if len(known_fix_commits) == 1 else f"{primary_known_fix[:12]} +{len(known_fix_commits)-1}"
             header = Panel(
                 f"[bold]CVE:[/] {cve_id}  [bold]目标:[/] {tv}\n"
-                f"[bold]回滚至:[/] {rollback_hash[:16]}  [dim](known_fix~)[/]",
+                f"[bold]回滚至:[/] {rollback_hash[:16]}  [dim]({rollback_label}~)[/]",
                 title="[bold magenta]验证模式 — 回退分析[/]",
                 border_style="magenta", padding=(0, 2),
             )
@@ -1634,7 +1713,7 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
 
         if result.cve_info is None or not result.cve_info.fix_commit_id:
             return enrich_result_payload({
-                "cve_id": cve_id, "known_fix": known_fix, "target": tv,
+                "cve_id": cve_id, "known_fix": primary_known_fix, "known_fix_commits": known_fix_commits, "target": tv,
                 "worktree_commit": rollback_hash[:16] if rollback_hash else rollback,
                 "checks": {}, "overall_pass": False,
                 "summary": "CVE上游数据不完整(MITRE无fix commit), 无法验证",
@@ -1651,13 +1730,19 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
 
         checks = {}
 
-        # fix_correctly_absent: 直接用 git 验证 known_fix 是否在 worktree
+        # fix_correctly_absent: 验证整个实际解集都不在回滚后的 worktree 历史中
         # HEAD 的历史中, 避免 subject_match 在共享 git 对象库中误判。
-        rc = wt_mgr.run_git_rc(
-            ["git", "merge-base", "--is-ancestor", known_fix, "HEAD"],
-            tv, timeout=10)
-        fix_in_worktree = (rc == 0)
-        checks["fix_correctly_absent"] = not fix_in_worktree
+        present_actual_commits = []
+        for commit_id in actual_solution_commits:
+            rc = wt_mgr.run_git_rc(
+                ["git", "merge-base", "--is-ancestor", commit_id, "HEAD"],
+                tv, timeout=10)
+            if rc == 0:
+                present_actual_commits.append(commit_id[:12])
+        checks["fix_correctly_absent"] = not present_actual_commits
+        checks["actual_solution_commit_count"] = len(actual_solution_commits)
+        checks["known_fix_commit_count"] = len(known_fix_commits)
+        checks["actual_solution_commits_still_present"] = present_actual_commits
 
         checks["intro_detected"] = result.is_vulnerable
 
@@ -1730,33 +1815,17 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
             }
 
         # 获取 known_fix 的完整信息(stat + diff)
-        known_fix_detail = {}
-        local_diff = ""
-        kf_meta = git_mgr.run_git(
-            ["git", "show", "--stat", "--format=%H%n%s%n%an", known_fix],
-            tv, timeout=30)
-        if kf_meta:
-            lines = kf_meta.strip().split("\n")
-            if len(lines) >= 3:
-                known_fix_detail = serialize_commit_reference(
-                    config, git_mgr, tv, lines[0].strip(),
-                    extra={
-                        "subject": lines[1],
-                        "author": lines[2],
-                        "stat": "\n".join(lines[3:])[:500],
-                    }
-                )
-        kf_raw = git_mgr.run_git(
-            ["git", "show", "--format=", known_fix], tv, timeout=30)
-        if kf_raw:
-            local_diff = kf_raw.strip()
+        primary_fix_bundle = _collect_commit_diff_bundle(config, git_mgr, tv, [primary_known_fix])
+        known_fix_bundle = _collect_commit_diff_bundle(config, git_mgr, tv, known_fix_commits)
+        actual_solution_bundle = _collect_commit_diff_bundle(config, git_mgr, tv, actual_solution_commits)
+        known_fix_details = known_fix_bundle["details"]
+        actual_solution_details = actual_solution_bundle["details"]
+        known_fix_detail = known_fix_details[0] if known_fix_details else {}
+        primary_local_diff = primary_fix_bundle["combined_diff"] or known_fix_bundle["combined_diff"]
+        local_diff = actual_solution_bundle["combined_diff"] or known_fix_bundle["combined_diff"]
 
-        # ── 核心: 代码差异对比 ───────────────────────────
-        diff_comparison = _compare_patch_code(community_diff, local_diff)
-
-        # 根因诊断
-        root_cause = _diagnose_root_cause(diff_comparison, dryrun_detail,
-                                          known_prereqs, result.dry_run)
+        diff_comparison = {}
+        root_cause = {}
 
         tool_prereqs_detail = [
             serialize_commit_reference(
@@ -1772,6 +1841,13 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
             )
             for p in (result.prerequisite_patches or [])
         ]
+        compare_tool_prereqs = [
+            p for p in (result.prerequisite_patches or [])
+            if getattr(p, "grade", "") in ("strong", "medium")
+        ]
+        compare_tool_prereq_bundle = _collect_commit_diff_bundle(
+            config, git_mgr, tv, [p.commit_id for p in compare_tool_prereqs]
+        )
 
         known_prereqs_detail = []
         for kid in known_prereqs:
@@ -1834,26 +1910,74 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
         use_community = (apply_method in l0_l2_methods
                          and community_diff and local_diff)
 
-        generated_vs_real = {}
+        generated_patch_for_compare = ""
+        primary_compare_source = ""
+        primary_compare_note = ""
+        primary_generated_vs_real = {}
         if use_community:
-            generated_vs_real = _compare_generated_vs_real(
-                community_diff, local_diff)
-            generated_vs_real["compare_source"] = "community_patch"
-            generated_vs_real["note"] = (
+            generated_patch_for_compare = community_diff
+            primary_compare_source = "community_patch"
+            primary_generated_vs_real = _compare_generated_vs_real(
+                community_diff, primary_local_diff or local_diff)
+            primary_compare_note = (
                 f"apply_method={apply_method}，社区补丁可直接应用，"
                 "使用社区原始补丁做本质比较"
             )
         elif adapted_patch and local_diff:
-            generated_vs_real = _compare_generated_vs_real(
-                adapted_patch, local_diff)
+            generated_patch_for_compare = adapted_patch
+            primary_generated_vs_real = _compare_generated_vs_real(
+                adapted_patch, primary_local_diff or local_diff)
             is_regen = apply_method in (
                 "regenerated", "conflict-adapted", "verified-direct")
-            generated_vs_real["compare_source"] = (
+            primary_compare_source = (
                 "adapted_patch" if is_regen else "adapted_patch(community)")
         elif community_diff and local_diff:
+            generated_patch_for_compare = community_diff
+            primary_compare_source = "community_patch"
+            primary_generated_vs_real = _compare_generated_vs_real(
+                community_diff, primary_local_diff or local_diff)
+        if primary_generated_vs_real:
+            primary_generated_vs_real["compare_source"] = primary_compare_source
+            if primary_compare_note:
+                primary_generated_vs_real["note"] = primary_compare_note
+            primary_generated_vs_real["compare_scope"] = "single_fix" if len(actual_solution_commits) == 1 else "actual_solution_set"
+
+        predicted_solution_diff = _combine_patch_texts([
+            generated_patch_for_compare,
+            compare_tool_prereq_bundle.get("combined_diff", ""),
+        ])
+        solution_set_needed = (
+            len(actual_solution_commits) > 1
+            or len(compare_tool_prereqs) > 0
+        )
+        generated_vs_real = primary_generated_vs_real
+        if solution_set_needed and predicted_solution_diff and local_diff:
             generated_vs_real = _compare_generated_vs_real(
-                community_diff, local_diff)
-            generated_vs_real["compare_source"] = "community_patch"
+                predicted_solution_diff,
+                local_diff,
+            )
+            generated_vs_real["compare_source"] = "predicted_solution_set"
+            generated_vs_real["compare_scope"] = "solution_set"
+            generated_vs_real["generated_components"] = {
+                "main_patch_source": primary_compare_source or "community_patch",
+                "tool_prereq_scope": "strong_medium_only",
+                "tool_prereq_count": len(compare_tool_prereqs),
+                "tool_prereq_commits": [p.commit_id[:12] for p in compare_tool_prereqs[:8]],
+            }
+            generated_vs_real["real_components"] = {
+                "known_fix_count": len(known_fix_commits),
+                "known_prereq_count": len(known_prereqs),
+                "actual_solution_commit_count": len(actual_solution_commits),
+                "actual_solution_commits": [cid[:12] for cid in actual_solution_commits[:12]],
+            }
+            generated_vs_real["note"] = (
+                "按“工具生成主补丁 + 工具判定的 strong/medium 前置补丁”"
+                " 对比 “实际 known_fix 集合 + known_prereqs 集合” 的整体代码修改。"
+            )
+
+        diff_comparison = _compare_patch_code(generated_patch_for_compare or community_diff, local_diff)
+        root_cause = _diagnose_root_cause(diff_comparison, dryrun_detail,
+                                          known_prereqs, result.dry_run)
 
         # ★ 将补丁本质比较结果纳入 overall 判定
         gvr_verdict = generated_vs_real.get("verdict", "")
@@ -1894,7 +2018,7 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
         dependency_details = serialize_dependency_details(result.dependency_details)
 
         out = {
-            "cve_id": cve_id, "known_fix": known_fix, "target": tv,
+            "cve_id": cve_id, "known_fix": primary_known_fix, "known_fix_commits": known_fix_commits, "target": tv,
             "target_version": tv,
             "worktree_commit": rollback_hash[:16] if rollback_hash else rollback,
             "checks": checks,
@@ -1914,10 +2038,15 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
             "manual_review_checklist": serialized_validation_details.get("manual_review_checklist", []),
             "function_impacts": serialize_function_impacts(result.function_impacts),
             "known_fix_detail": known_fix_detail,
+            "known_fixs_detail": known_fix_details,
+            "actual_solution_commits": actual_solution_commits,
+            "actual_solution_detail": actual_solution_details,
             "diff_comparison": diff_comparison,
             "generated_vs_real": generated_vs_real,
+            "generated_patch_vs_primary_fix": primary_generated_vs_real if solution_set_needed else {},
             "root_cause": root_cause,
             "tool_prereqs": tool_prereqs_detail,
+            "tool_prereqs_for_compare": [p.commit_id[:12] for p in compare_tool_prereqs],
             "known_prereqs_detail": known_prereqs_detail,
             "recommendations": recommendations,
             "patch_file": patch_file,

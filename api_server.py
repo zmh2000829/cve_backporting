@@ -62,6 +62,13 @@ def _coerce_prereqs(payload: Dict[str, Any]) -> list:
     return []
 
 
+def _coerce_known_fix_commits(payload: Dict[str, Any]) -> list:
+    commits = cli._coerce_commit_list(payload.get("known_fixes", []))
+    if commits:
+        return commits
+    return cli._coerce_commit_list(payload.get("known_fix", []))
+
+
 def _coerce_workers(payload: Dict[str, Any], deep: bool = False) -> int:
     try:
         workers = int(payload.get("workers", 1) or 1)
@@ -148,9 +155,10 @@ def _default_validate_handler(payload: Dict[str, Any], config):
     cve_id = (payload.get("cve_id") or "").strip()
     if not cve_id:
         raise ValueError("missing cve_id")
-    known_fix = (payload.get("known_fix") or "").strip()
-    if not known_fix:
+    known_fix_commits = _coerce_known_fix_commits(payload)
+    if not known_fix_commits:
         raise ValueError("missing known_fix")
+    known_fix = known_fix_commits[0]
 
     known_prereqs = _coerce_prereqs(payload)
     deep = bool(payload.get("deep", False))
@@ -159,7 +167,8 @@ def _default_validate_handler(payload: Dict[str, Any], config):
 
     result = cli._run_single_validate(
         cfg, cve_id, target, known_fix, known_prereqs,
-        show_stages=False, cve_info=cve_info, deep=deep)
+        show_stages=False, cve_info=cve_info, deep=deep,
+        known_fixes=known_fix_commits)
     result["l0_l5"] = build_l0_l5_view(result)
     result["p2_enabled"] = bool(getattr(cfg.policy, "special_risk_rules_enabled", True)) if getattr(cfg, "policy", None) else True
     return result
@@ -184,8 +193,9 @@ def _default_batch_validate_handler(payload: Dict[str, Any], config):
         if not isinstance(item, dict):
             return {"index": idx, "error": {"index": idx, "reason": "invalid item"}}
         cve_id = (item.get("cve_id") or "").strip()
-        known_fix = (item.get("known_fix") or "").strip()
-        if not cve_id or not known_fix:
+        known_fix_commits = _coerce_known_fix_commits(item)
+        known_fix = known_fix_commits[0] if known_fix_commits else ""
+        if not cve_id or not known_fix_commits:
             return {"index": idx, "error": {"index": idx, "cve_id": cve_id, "reason": "missing cve_id or known_fix"}}
 
         known_prereqs = cli._coerce_commit_list(item.get("known_prereqs", []))
@@ -205,6 +215,7 @@ def _default_batch_validate_handler(payload: Dict[str, Any], config):
             cfg, cve_id, target, known_fix, known_prereqs,
             git_mgr=local_git_mgr, show_stages=False, cve_info=cve_info,
             deep=deep,
+            known_fixes=known_fix_commits,
         )
         result["l0_l5"] = build_l0_l5_view(result)
         return {"index": idx, "result": result}
@@ -340,7 +351,7 @@ def _build_invalid_request_error(route: str, payload: Dict[str, Any], detail: st
     elif "missing known_fix" in detail:
         missing_input = ["known_fix"]
         user_message = "缺少已知真实修复 commit。"
-        hint = "`/api/validate` 需要 `known_fix`，用于和工具分析结果做对照验证。"
+        hint = "`/api/validate` 需要 `known_fix`；可传单个 commit、逗号分隔字符串，或 `known_fixes` 数组，用于和工具分析结果做对照验证。"
         suggested_fix = {
             "target_version": payload.get("target_version") or payload.get("target") or "5.10-hulk",
             "cve_id": payload.get("cve_id") or "CVE-2024-26633",
@@ -349,7 +360,7 @@ def _build_invalid_request_error(route: str, payload: Dict[str, Any], detail: st
     elif "missing items" in detail:
         missing_input = ["items"]
         user_message = "缺少批量验证条目。"
-        hint = "`/api/batch-validate` 需要 `items` 数组，每项至少包含 `cve_id` 和 `known_fix`。"
+        hint = "`/api/batch-validate` 需要 `items` 数组，每项至少包含 `cve_id` 和 `known_fix`；多 fix 可使用 `known_fixes` 数组。"
         suggested_fix = {
             "target_version": payload.get("target_version") or payload.get("target") or "5.10-hulk",
             "items": [{"cve_id": "CVE-2024-26633", "known_fix": "deadbeefdead"}],

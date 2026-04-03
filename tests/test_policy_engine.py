@@ -594,6 +594,41 @@ int foo(void) {
         self.assertEqual(summary["critical_structure_change"]["count"], 1)
         self.assertEqual(summary["manual_prerequisite_analysis"]["count"], 1)
 
+    def test_find_rollback_commit_uses_earliest_fix_or_prereq(self):
+        class _Git:
+            @staticmethod
+            def run_git_rc(cmd, rv, timeout=30):
+                commit = cmd[3]
+                earliest = cmd[4]
+                order = {"aaa111": 1, "bbb222": 2, "ccc333": 3}
+                return 0 if order[commit] <= order[earliest] else 1
+
+        rollback = cli._find_rollback_commit(_Git(), "5.10-hulk", ["bbb222", "ccc333"], ["aaa111"])
+        self.assertEqual(rollback, "aaa111~1")
+
+    def test_compare_generated_vs_real_tracks_repeated_file_sections(self):
+        generated = """diff --git a/foo.c b/foo.c
+@@ -1,2 +1,2 @@
+-old_a
++new_a
+diff --git a/foo.c b/foo.c
+@@ -5,2 +5,2 @@
+-old_b
++new_b
+"""
+        actual = """diff --git a/foo.c b/foo.c
+@@ -1,2 +1,2 @@
+-old_a
++alt_a
+diff --git a/foo.c b/foo.c
+@@ -5,2 +5,2 @@
+-old_b
++new_b
+"""
+        comparison = cli._compare_generated_vs_real(generated, actual)
+        self.assertNotEqual(comparison["verdict"], "identical")
+        self.assertLess(comparison["core_similarity"], 1.0)
+
 
 class APIServerRegressionTests(unittest.TestCase):
     def test_validate_handler_applies_p2_override(self):
@@ -626,6 +661,38 @@ class APIServerRegressionTests(unittest.TestCase):
 
         self.assertFalse(result["p2_enabled"])
         self.assertEqual(result["l0_l5"]["current_level"], "L2")
+
+    def test_validate_handler_accepts_known_fixes_array(self):
+        config = SimpleNamespace(policy=SimpleNamespace(special_risk_rules_enabled=True))
+        original = api_server.cli._run_single_validate
+        try:
+            def fake_run_single_validate(cfg, cve_id, target, known_fix, known_prereqs, **kwargs):
+                self.assertEqual(known_fix, "aaa111")
+                self.assertEqual(kwargs.get("known_fixes"), ["aaa111", "bbb222"])
+                return {
+                    "cve_id": cve_id,
+                    "target_version": target,
+                    "known_fix": known_fix,
+                    "known_fix_commits": kwargs.get("known_fixes"),
+                    "level_decision": {"level": "L1", "base_level": "L1", "base_method": "context-C1"},
+                    "validation_details": {
+                        "strategy_buckets": {"dependency_bucket": "independent"},
+                        "special_risk_report": {"summary": {"triggered_sections": [], "has_critical_structure_change": False}},
+                    },
+                    "generated_vs_real": {"verdict": "essentially_same", "deterministic_exact_match": False},
+                }
+
+            api_server.cli._run_single_validate = fake_run_single_validate
+            result = api_server._default_validate_handler({
+                "target_version": "5.10-hulk",
+                "cve_id": "CVE-TEST-LIST",
+                "known_fixes": ["aaa111", "bbb222"],
+            }, config)
+        finally:
+            api_server.cli._run_single_validate = original
+
+        self.assertEqual(result["known_fix_commits"], ["aaa111", "bbb222"])
+        self.assertEqual(result["l0_l5"]["current_level"], "L1")
 
     def test_batch_validate_handler_returns_batch_summary(self):
         config = SimpleNamespace(policy=SimpleNamespace(special_risk_rules_enabled=True))

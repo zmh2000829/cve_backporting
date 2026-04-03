@@ -196,9 +196,13 @@ def build_human_friendly_summary(data: dict, mode: str) -> dict:
             "DryRun是否通过": "是" if data.get("dry_run_clean") else "否/未执行",
         })
     else:
+        actual_fix_count = len(data.get("known_fix_commits") or [])
+        if not actual_fix_count and data.get("known_fix"):
+            actual_fix_count = 1
         overview.update({
             "验证是否通过": "是" if data.get("overall_pass") else "否",
             "真实修复commit": data.get("known_fix", ""),
+            "实际fix数量": actual_fix_count,
             "结论摘要": data.get("summary", ""),
         })
 
@@ -242,6 +246,7 @@ def build_human_friendly_summary(data: dict, mode: str) -> dict:
     if mode == "validate":
         generated = data.get("generated_vs_real") or {}
         summary["patch_quality"] = {
+            "比较范围": generated.get("compare_scope", "single_fix"),
             "工具补丁与真实修复关系": generated.get("verdict", ""),
             "核心相似度": generated.get("core_similarity", 0),
             "比较来源": generated.get("compare_source", ""),
@@ -408,8 +413,14 @@ def prepare_validate_json(result: dict, *, deep_serializer=None) -> dict:
             "dryrun_detail": raw.get("dryrun_detail", {}),
             "function_impacts": raw.get("function_impacts", []),
             "generated_vs_real": raw.get("generated_vs_real", {}),
+            "generated_patch_vs_primary_fix": raw.get("generated_patch_vs_primary_fix", {}),
             "diff_comparison": raw.get("diff_comparison", {}),
             "tool_prereqs": raw.get("tool_prereqs", []),
+            "tool_prereqs_for_compare": raw.get("tool_prereqs_for_compare", []),
+            "known_fix_commits": raw.get("known_fix_commits", []),
+            "known_fixs_detail": raw.get("known_fixs_detail", []),
+            "actual_solution_commits": raw.get("actual_solution_commits", []),
+            "actual_solution_detail": raw.get("actual_solution_detail", []),
             "known_prereqs_detail": raw.get("known_prereqs_detail", []),
             "analysis_stages": raw.get("analysis_stages", []),
             "analysis_narrative": raw.get("analysis_narrative", {}),
