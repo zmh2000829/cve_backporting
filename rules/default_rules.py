@@ -181,6 +181,10 @@ class CriticalStructureRule(PolicyRule):
         if not ctx.critical_structure_hits:
             return None
         uniq = sorted(set(ctx.critical_structure_hits))
+        lock_objects = ctx.risk_markers.get("lock_objects", [])[:8]
+        fields = ctx.risk_markers.get("fields", [])[:8]
+        state_points = ctx.risk_markers.get("state_points", [])[:8]
+        error_path_nodes = ctx.risk_markers.get("error_path_nodes", [])[:8]
         categories = []
         if any(k in uniq for k in ("spin_lock", "mutex", "rcu")):
             categories.append("locking")
@@ -188,19 +192,28 @@ class CriticalStructureRule(PolicyRule):
             categories.append("lifetime")
         if "struct" in uniq:
             categories.append("layout")
+        only_generic_struct = set(uniq).issubset({"struct"})
+        has_context_markers = bool(lock_objects or fields or state_points or error_path_nodes)
+        if only_generic_struct and not has_context_markers:
+            return None
+        high_risk = any(cat in categories for cat in ("locking", "lifetime"))
+        severity = "high" if high_risk else "warn"
+        level_floor = "L3" if high_risk else "L2"
+        message = "检测到关键结构/锁变更: " + ", ".join(uniq[:6]) if high_risk else "检测到结构体/关键字段相关变更，建议核对数据路径与布局影响"
         return {
             "rule_id": self.rule_id,
             "name": self.name,
-            "severity": self.severity,
-            "level_floor": "L3",
-            "message": "检测到关键结构/锁变更: " + ", ".join(uniq[:6]),
+            "severity": severity,
+            "level_floor": level_floor,
+            "message": message,
             "evidence": {
                 "keywords": uniq,
                 "categories": categories,
-                "lock_objects": ctx.risk_markers.get("lock_objects", [])[:8],
-                "fields": ctx.risk_markers.get("fields", [])[:8],
-                "state_points": ctx.risk_markers.get("state_points", [])[:8],
-                "error_path_nodes": ctx.risk_markers.get("error_path_nodes", [])[:8],
+                "lock_objects": lock_objects,
+                "fields": fields,
+                "state_points": state_points,
+                "error_path_nodes": error_path_nodes,
+                "generic_struct_only": only_generic_struct,
             },
         }
 
@@ -265,18 +278,31 @@ class P2StateMachineRule(PolicyRule):
         if not section.get("triggered"):
             return None
         high_risk = section.get("risk") == "high"
+        condition_changes = section.get("condition_changes", [])
+        return_path_changes = section.get("return_path_changes", [])
+        state_fields = section.get("state_fields", [])
+        callback_or_ops_changes = section.get("callback_or_ops_changes", [])
+        low_signal_only = (
+            not high_risk
+            and not condition_changes
+            and not state_fields
+            and not callback_or_ops_changes
+            and len(return_path_changes) <= 1
+        )
+        if low_signal_only:
+            return None
         return {
             "rule_id": self.rule_id,
             "name": self.name,
             "severity": "high" if high_risk else "warn",
-            "level_floor": "L3" if high_risk else "L2",
+            "level_floor": "L3" if high_risk else "L1",
             "message": section.get("summary", "检测到状态机/控制流变化"),
             "evidence": {
-                "condition_changes": section.get("condition_changes", []),
-                "return_path_changes": section.get("return_path_changes", []),
+                "condition_changes": condition_changes,
+                "return_path_changes": return_path_changes,
                 "error_codes": section.get("error_codes", []),
-                "state_fields": section.get("state_fields", []),
-                "callback_or_ops_changes": section.get("callback_or_ops_changes", []),
+                "state_fields": state_fields,
+                "callback_or_ops_changes": callback_or_ops_changes,
                 "evidence_lines": section.get("evidence_lines", []),
             },
         }
@@ -296,7 +322,7 @@ class P2StructFieldRule(PolicyRule):
             "rule_id": self.rule_id,
             "name": self.name,
             "severity": "high" if high_risk else "warn",
-            "level_floor": "L3" if high_risk else "L2",
+            "level_floor": "L3" if high_risk else "L1",
             "message": section.get("summary", "检测到结构体字段/数据路径变化"),
             "evidence": {
                 "field_changes": section.get("field_changes", []),
@@ -371,7 +397,7 @@ class PrerequisiteRecommendedRule(PolicyRule):
             "rule_id": self.rule_id,
             "name": self.name,
             "severity": self.severity,
-            "level_floor": "L2",
+            "level_floor": "L1",
             "message": f"检测到 {len(medium)} 个中等依赖，建议同时评估关联补丁",
             "evidence": {
                 "count": len(medium),
@@ -517,6 +543,9 @@ class CallChainPropagationRule(PolicyRule):
     rule_class = "risk_profile"
     rule_scope = "risk"
 
+    def __init__(self, promotion_min_fanout: int = 2):
+        self.promotion_min_fanout = max(1, int(promotion_min_fanout or 1))
+
     def evaluate(self, ctx: RuleContext) -> Optional[Dict]:
         risky = []
         for impact in ctx.function_impacts:
@@ -529,6 +558,8 @@ class CallChainPropagationRule(PolicyRule):
 
         top, fanout = sorted(risky, key=lambda item: item[1], reverse=True)[0]
         has_critical = bool(ctx.critical_structure_hits)
+        if not has_critical and fanout < self.promotion_min_fanout:
+            return None
         severity = "high" if has_critical else "warn"
         floor = "L4" if has_critical else "L2"
         return {
@@ -545,6 +576,7 @@ class CallChainPropagationRule(PolicyRule):
                 "callers": top.callers[:12],
                 "callees": top.callees[:12],
                 "fanout": fanout,
+                "promotion_min_fanout": self.promotion_min_fanout,
                 "critical_structure_hits": sorted(set(ctx.critical_structure_hits))[:8],
             },
         }
@@ -653,7 +685,12 @@ class L1APISurfaceRule(PolicyRule):
         if not parts:
             return None
 
-        level_floor = "L2" if scan["param_count_changed"] else ("L1" if ctx.base_level == "L1" else "L2")
+        if scan["param_count_changed"] or scan["sig_change"]:
+            level_floor = "L2"
+        elif scan["return_delta"] >= self.return_delta_threshold:
+            level_floor = "L1" if ctx.base_level in ("L0", "L1") else "L2"
+        else:
+            level_floor = "L1"
         return {
             "rule_id": self.rule_id,
             "name": self.name,
@@ -728,6 +765,7 @@ def register_rules(registry: RuleRegistry, config=None):
     line_threshold = getattr(config, "large_change_line_threshold", 80) if config else 80
     hunk_threshold = getattr(config, "large_hunk_threshold", 8) if config else 8
     fanout_threshold = getattr(config, "call_chain_fanout_threshold", 6) if config else 6
+    call_chain_promotion_min = getattr(config, "call_chain_promotion_min_fanout", 2) if config else 2
     return_delta = getattr(config, "l1_return_line_delta_threshold", 2) if config else 2
     single_line_max = getattr(config, "single_line_impact_max_changed_lines", 4) if config else 4
 
@@ -754,7 +792,7 @@ def register_rules(registry: RuleRegistry, config=None):
         registry.register(P2ErrorPathRule())
 
     if not config or getattr(config, "call_chain_rules_enabled", True):
-        registry.register(CallChainPropagationRule())
+        registry.register(CallChainPropagationRule(call_chain_promotion_min))
         registry.register(CallChainFanoutRule(fanout_threshold))
 
     if not config or getattr(config, "l1_api_surface_rules_enabled", True):

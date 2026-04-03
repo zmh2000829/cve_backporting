@@ -81,9 +81,10 @@ class PolicyConfig:
     large_hunk_threshold: int = 8
     call_chain_rules_enabled: bool = True
     call_chain_fanout_threshold: int = 6
+    call_chain_promotion_min_fanout: int = 2
     critical_structure_rules_enabled: bool = True
     critical_structure_keywords: list = field(default_factory=lambda: [
-        "spin_lock", "mutex", "rcu", "refcount", "kref", "atomic", "struct"
+        "spin_lock", "mutex", "rcu", "refcount", "kref", "atomic"
     ])
     extra_rule_modules: list = field(default_factory=list)
     # L1 细粒度：签名/返回值启发式（可关）
@@ -150,6 +151,7 @@ class ConfigLoader:
                     "large_hunk_threshold",
                     "call_chain_rules_enabled",
                     "call_chain_fanout_threshold",
+                    "call_chain_promotion_min_fanout",
                     "critical_structure_rules_enabled",
                     "critical_structure_keywords",
                     "extra_rule_modules",

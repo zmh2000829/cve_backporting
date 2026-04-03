@@ -7,7 +7,7 @@ from rules.base import LevelPolicy, LevelPolicyRegistry
 
 LEVEL_ORDER: List[str] = ["L0", "L1", "L2", "L3", "L4", "L5"]
 DEFAULT_LEVEL_FLOOR_BY_SEVERITY: Dict[str, str] = {
-    "info": "L1",
+    "info": "L0",
     "warn": "L2",
     "high": "L3",
 }
