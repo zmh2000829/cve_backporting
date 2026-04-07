@@ -408,13 +408,17 @@ def _build_batch_reading_guide() -> dict:
         "recommended_order": [
             "1. summary.overview：先看总量、并行参数、P2 是否开启",
             "2. summary.level_distribution：看每个 L0-L5 级别有多少个",
-            "3. summary.risk_hit_summary：看关键结构变更、专项高风险、关联补丁等统计",
-            "4. result_groups.passed / failed / errors[*].summary_cn：看每个 CVE 的中文结论与原因",
-            "5. technical_details.cve_results：需要深挖时再看每个 CVE 的完整技术明细",
+            "3. summary.strategy_effectiveness：看 7 个确定性策略 + AI 兜底的占比和效果",
+            "4. summary.level_accuracy：看每个 L0-L5 级别各自的验证通过率和补丁准确率",
+            "5. summary.risk_hit_summary：看关键结构变更、专项高风险、关联补丁等统计",
+            "6. result_groups.passed / failed / errors[*].summary_cn：看每个 CVE 的中文结论与原因",
+            "7. technical_details.cve_results：需要深挖时再看每个 CVE 的完整技术明细",
         ],
         "field_explanations": {
             "current_level": "最终 L0-L5 级别，表示结合规则抬升后的最终场景。",
             "base_level": "DryRun 基线级别，表示规则抬升前的原始级别。",
+            "strategy_effectiveness": "多级 DryRun 策略效果统计，按 presentation 中的 7 个确定性策略家族聚合。",
+            "level_accuracy": "每个 L0-L5 级别的单独准确率统计，区分 overall_pass、acceptable_patch 和 exact_match。",
             "critical_structure_change": "是否涉及锁、生命周期、状态机、结构体字段等关键结构变化。",
             "special_risk_sections": "命中的专项高风险类别。",
             "summary_cn": "面向用户的中文结论块，优先阅读这一段而不是 technical_summary。",
@@ -445,6 +449,8 @@ def _build_batch_summary_view(tv: str, total_cves: int, total_patches: int, skip
             "final_level_counts": level_distribution.get("final_level_counts", l0_l5.get("current_level_distribution", {})),
             "base_level_counts": level_distribution.get("base_level_counts", l0_l5.get("base_level_distribution", {})),
         },
+        "strategy_effectiveness": batch_summary.get("strategy_effectiveness", {}),
+        "level_accuracy": batch_summary.get("level_accuracy", {}),
         "risk_hit_summary": {
             "any_special_risk": risk_hit_summary.get("any_special_risk", {
                 "count": special_risk.get("any_special_risk_count", 0),

@@ -9,6 +9,21 @@ import re
 from urllib.parse import urlparse
 
 
+STRATEGY_FAMILY_ORDER = [
+    "Strict",
+    "Context-C1/Whitespace",
+    "3-Way",
+    "Verified-Direct",
+    "Regenerated",
+    "Zero-Context",
+    "Conflict-Adapted",
+    "AI-Generated",
+    "Unresolved",
+]
+
+PATCH_ACCEPTABLE_VERDICTS = {"identical", "essentially_same"}
+
+
 def coerce_commit_url_base(value: str) -> str:
     if not value:
         return ""
@@ -376,6 +391,176 @@ def aggregate_l0_l5_levels(results: list) -> dict:
     }
 
 
+def _rate(numerator: int, denominator: int) -> float:
+    return round(numerator / denominator, 4) if denominator else 0.0
+
+
+def _coerce_apply_attempts(normalized: dict) -> list:
+    dryrun_detail = normalized.get("dryrun_detail") or {}
+    attempts = dryrun_detail.get("apply_attempts") or []
+    return attempts if isinstance(attempts, list) else []
+
+
+def _resolve_strategy_family(normalized: dict) -> str:
+    dryrun_detail = normalized.get("dryrun_detail") or {}
+    method = str(dryrun_detail.get("apply_method", "") or "").strip()
+    attempts = _coerce_apply_attempts(normalized)
+    success_attempts = [
+        str(item.get("method", "") or "")
+        for item in attempts
+        if isinstance(item, dict) and str(item.get("success", "")).lower() == "yes"
+    ]
+
+    if any(name.startswith("regenerated-zero/") for name in success_attempts):
+        return "Zero-Context"
+    if method == "strict":
+        return "Strict"
+    if method in ("ignore-ws", "context-C1", "C1-ignore-ws"):
+        return "Context-C1/Whitespace"
+    if method == "3way":
+        return "3-Way"
+    if method in ("verified-direct", "verified-direct-exact"):
+        return "Verified-Direct"
+    if method == "regenerated":
+        return "Regenerated"
+    if method == "conflict-adapted":
+        return "Conflict-Adapted"
+    if method == "ai-generated":
+        return "AI-Generated"
+    return "Unresolved"
+
+
+def aggregate_strategy_effectiveness(results: list) -> dict:
+    counts = Counter({name: 0 for name in STRATEGY_FAMILY_ORDER})
+    pass_counts = Counter({name: 0 for name in STRATEGY_FAMILY_ORDER})
+    acceptable_counts = Counter({name: 0 for name in STRATEGY_FAMILY_ORDER})
+    exact_counts = Counter({name: 0 for name in STRATEGY_FAMILY_ORDER})
+
+    for result in results or []:
+        normalized = _normalize_aggregatable_result(result)
+        if not normalized:
+            continue
+        family = _resolve_strategy_family(normalized)
+        counts[family] += 1
+
+        if normalized.get("overall_pass"):
+            pass_counts[family] += 1
+
+        generated = normalized.get("generated_vs_real") or {}
+        if generated.get("verdict") in PATCH_ACCEPTABLE_VERDICTS:
+            acceptable_counts[family] += 1
+        if generated.get("deterministic_exact_match"):
+            exact_counts[family] += 1
+
+    total = sum(counts.values())
+    automated_count = total - counts["Unresolved"]
+    rows = []
+    for name in STRATEGY_FAMILY_ORDER:
+        total_count = counts[name]
+        if not total_count and name == "AI-Generated":
+            continue
+        rows.append({
+            "strategy": name,
+            "count": total_count,
+            "rate": _rate(total_count, total),
+            "passed": pass_counts[name],
+            "pass_rate": _rate(pass_counts[name], total_count),
+            "acceptable_patch": acceptable_counts[name],
+            "acceptable_patch_rate": _rate(acceptable_counts[name], total_count),
+            "exact_match": exact_counts[name],
+            "exact_match_rate": _rate(exact_counts[name], total_count),
+        })
+
+    return {
+        "strategies": rows,
+        "counts": {row["strategy"]: row["count"] for row in rows},
+        "automation": {
+            "automated_count": automated_count,
+            "automated_rate": _rate(automated_count, total),
+            "manual_only_count": counts["Unresolved"],
+            "manual_only_rate": _rate(counts["Unresolved"], total),
+        },
+        "definition": {
+            "Strict": "apply_method == strict",
+            "Context-C1/Whitespace": "apply_method in {ignore-ws, context-C1, C1-ignore-ws}",
+            "3-Way": "apply_method == 3way",
+            "Verified-Direct": "apply_method in {verified-direct, verified-direct-exact}",
+            "Regenerated": "apply_method == regenerated and apply_attempts not regenerated-zero/*",
+            "Zero-Context": "apply_attempts contains regenerated-zero/* success",
+            "Conflict-Adapted": "apply_method == conflict-adapted",
+            "AI-Generated": "apply_method == ai-generated",
+            "Unresolved": "dryrun_detail.apply_method missing or tool failed to stabilize into a strategy family",
+        },
+    }
+
+
+def aggregate_level_accuracy(results: list) -> dict:
+    level_names = [f"L{i}" for i in range(6)]
+    final_stats = {
+        level: {
+            "total": 0,
+            "passed": 0,
+            "acceptable_patch": 0,
+            "exact_match": 0,
+        }
+        for level in level_names
+    }
+    base_stats = {
+        level: {
+            "total": 0,
+            "passed": 0,
+            "acceptable_patch": 0,
+            "exact_match": 0,
+        }
+        for level in level_names
+    }
+
+    for result in results or []:
+        normalized = _normalize_aggregatable_result(result)
+        if not normalized:
+            continue
+        level_view = build_l0_l5_view(normalized)
+        current_level = level_view.get("current_level", "")
+        base_level = level_view.get("base_level", "")
+        verdict = (normalized.get("generated_vs_real") or {}).get("verdict", "")
+        exact = bool((normalized.get("generated_vs_real") or {}).get("deterministic_exact_match"))
+        passed = bool(normalized.get("overall_pass"))
+        acceptable = verdict in PATCH_ACCEPTABLE_VERDICTS
+
+        for bucket, level in ((final_stats, current_level), (base_stats, base_level)):
+            if level not in bucket:
+                continue
+            bucket[level]["total"] += 1
+            if passed:
+                bucket[level]["passed"] += 1
+            if acceptable:
+                bucket[level]["acceptable_patch"] += 1
+            if exact:
+                bucket[level]["exact_match"] += 1
+
+    def _finalize(stats: dict) -> dict:
+        out = {}
+        for level in level_names:
+            item = dict(stats[level])
+            total = item["total"]
+            item["pass_rate"] = _rate(item["passed"], total)
+            item["acceptable_patch_rate"] = _rate(item["acceptable_patch"], total)
+            item["exact_match_rate"] = _rate(item["exact_match"], total)
+            out[level] = item
+        return out
+
+    return {
+        "levels": level_names,
+        "final_levels": _finalize(final_stats),
+        "base_levels": _finalize(base_stats),
+        "definitions": {
+            "pass_rate": "overall_pass == true",
+            "acceptable_patch_rate": "generated_vs_real.verdict in {identical, essentially_same}",
+            "exact_match_rate": "generated_vs_real.deterministic_exact_match == true",
+        },
+    }
+
+
 def aggregate_special_risk_metrics(results: list) -> dict:
     section_counter = Counter()
     critical_structure_change_count = 0
@@ -468,6 +653,8 @@ def aggregate_promotion_metrics(results: list) -> dict:
 
 def aggregate_batch_validate_summary(results: list) -> dict:
     level_summary = aggregate_l0_l5_levels(results)
+    strategy_effectiveness = aggregate_strategy_effectiveness(results)
+    level_accuracy = aggregate_level_accuracy(results)
     special_risk_summary = aggregate_special_risk_metrics(results)
     promotion_summary = aggregate_promotion_metrics(results)
     dependency_bucket_counter = Counter()
@@ -519,6 +706,8 @@ def aggregate_batch_validate_summary(results: list) -> dict:
     return {
         "total": total,
         "l0_l5": level_summary,
+        "strategy_effectiveness": strategy_effectiveness,
+        "level_accuracy": level_accuracy,
         "level_distribution": {
             "levels": level_summary.get("levels", ["L0", "L1", "L2", "L3", "L4", "L5"]),
             "final_level_counts": level_summary.get("current_level_distribution", {}),
@@ -576,6 +765,8 @@ def aggregate_batch_validate_summary(results: list) -> dict:
             "incomplete_reason_distribution": dict(sorted(incomplete_reason_counter.items())),
             "solution_set_verdict_distribution": dict(sorted(solution_set_verdict_counter.items())),
             "solution_set_case_count": solution_set_case_count,
+            "strategy_effectiveness": strategy_effectiveness,
+            "level_accuracy": level_accuracy,
         },
         "special_risk": special_risk_summary,
     }

@@ -8,6 +8,103 @@ from rich.text import Text
 from rich import box
 
 
+def _ratio_bar(rate: float, width: int = 26) -> str:
+    rate = 0.0 if rate is None else max(0.0, min(float(rate), 1.0))
+    filled = int(round(rate * width))
+    return "█" * filled + "░" * max(width - filled, 0)
+
+
+def _render_strategy_effectiveness_table(summary: dict):
+    rows = (summary.get("strategy_effectiveness") or {}).get("strategies") or []
+    if not rows:
+        return None
+
+    tbl = Table(
+        box=box.SIMPLE,
+        show_header=True,
+        padding=(0, 1),
+        expand=True,
+        show_edge=False,
+        title="[bold]多级策略效果统计（7 策略 + AI 兜底）[/]",
+    )
+    tbl.add_column("策略", width=22)
+    tbl.add_column("占比图", width=28)
+    tbl.add_column("数量", width=10, justify="right")
+    tbl.add_column("占比", width=8, justify="right")
+    tbl.add_column("通过率", width=8, justify="right")
+    tbl.add_column("补丁准确率", width=12, justify="right")
+
+    for row in rows:
+        if not row.get("count") and row.get("strategy") == "AI-Generated":
+            continue
+        rate = row.get("rate", 0.0)
+        pass_rate = row.get("pass_rate", 0.0)
+        acceptable_rate = row.get("acceptable_patch_rate", 0.0)
+        tbl.add_row(
+            str(row.get("strategy", "")),
+            _ratio_bar(rate),
+            str(row.get("count", 0)),
+            f"{rate:.1%}",
+            f"{pass_rate:.1%}",
+            f"{acceptable_rate:.1%}",
+        )
+
+    automation = (summary.get("strategy_effectiveness") or {}).get("automation") or {}
+    if automation:
+        tbl.add_section()
+        tbl.add_row(
+            "自动化覆盖",
+            _ratio_bar(automation.get("automated_rate", 0.0)),
+            str(automation.get("automated_count", 0)),
+            f"{automation.get('automated_rate', 0.0):.1%}",
+            "-",
+            "-",
+        )
+        tbl.add_row(
+            "仍需纯人工",
+            _ratio_bar(automation.get("manual_only_rate", 0.0)),
+            str(automation.get("manual_only_count", 0)),
+            f"{automation.get('manual_only_rate', 0.0):.1%}",
+            "-",
+            "-",
+        )
+
+    return tbl
+
+
+def _render_level_accuracy_table(summary: dict):
+    accuracy = (summary.get("level_accuracy") or {}).get("final_levels") or {}
+    if not accuracy:
+        return None
+
+    tbl = Table(
+        box=box.SIMPLE,
+        show_header=True,
+        padding=(0, 1),
+        expand=True,
+        show_edge=False,
+        title="[bold]L0-L5 分级准确率（按最终级别）[/]",
+    )
+    tbl.add_column("级别", width=4)
+    tbl.add_column("样本数", width=8, justify="right")
+    tbl.add_column("验证通过", width=10, justify="right")
+    tbl.add_column("通过率", width=8, justify="right")
+    tbl.add_column("补丁准确率", width=12, justify="right")
+    tbl.add_column("完全一致率", width=12, justify="right")
+
+    for level in [f"L{i}" for i in range(6)]:
+        item = accuracy.get(level) or {}
+        tbl.add_row(
+            level,
+            str(item.get("total", 0)),
+            str(item.get("passed", 0)),
+            f"{item.get('pass_rate', 0.0):.1%}",
+            f"{item.get('acceptable_patch_rate', 0.0):.1%}",
+            f"{item.get('exact_match_rate', 0.0):.1%}",
+        )
+    return tbl
+
+
 def render_benchmark_report(results: list, target: str):
     from core import ui as base
     from rich.console import Group
@@ -105,11 +202,14 @@ def render_benchmark_report(results: list, target: str):
 def render_batch_validate_report(results: list, target: str, policy_config=None):
     from core import ui as base
     from rich.console import Group
+    from core.output_serializers import aggregate_batch_validate_summary
 
     total = len(results)
     if total == 0:
         base.console.print("[yellow]无验证结果[/]")
         return
+
+    batch_summary = aggregate_batch_validate_summary(results)
 
     verdict_counts = {}
     level_counts = Counter()
@@ -259,7 +359,7 @@ def render_batch_validate_report(results: list, target: str, policy_config=None)
             verdict_parts.append(f"[{color}]{label}: {count} ({count / total:.0%})[/{color}]")
     summary.add_row("补丁判定分布", "  ".join(verdict_parts))
 
-    method_order = ["strict", "context-C1", "3way", "regenerated", "conflict-adapted", "ai-generated", "N/A"]
+    method_order = ["strict", "ignore-ws", "context-C1", "C1-ignore-ws", "3way", "verified-direct", "verified-direct-exact", "regenerated", "conflict-adapted", "ai-generated", "N/A"]
     method_parts = []
     for method in method_order:
         count = method_counts.get(method, 0)
@@ -392,6 +492,14 @@ def render_batch_validate_report(results: list, target: str, policy_config=None)
         detail.add_row(*row)
 
     report_parts = [summary, Text("")]
+    strategy_effectiveness_table = _render_strategy_effectiveness_table(batch_summary)
+    if strategy_effectiveness_table is not None:
+        report_parts.append(strategy_effectiveness_table)
+        report_parts.append(Text(""))
+    level_accuracy_table = _render_level_accuracy_table(batch_summary)
+    if level_accuracy_table is not None:
+        report_parts.append(level_accuracy_table)
+        report_parts.append(Text(""))
     level_policies = base._level_policy_table()
     if level_policies is not None:
         level_policies.title = "[bold]L0-L5 策略配置（全局）[/]"

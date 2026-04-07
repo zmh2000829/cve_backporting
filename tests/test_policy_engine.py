@@ -627,6 +627,8 @@ int foo(void) {
         summary = aggregate_batch_validate_summary([
             {
                 "cve_id": "CVE-1",
+                "overall_pass": True,
+                "dryrun_detail": {"apply_method": "strict"},
                 "level_decision": {"level": "L0", "base_level": "L0"},
                 "generated_vs_real": {"verdict": "identical", "deterministic_exact_match": True},
                 "validation_details": {
@@ -641,6 +643,11 @@ int foo(void) {
             },
             {
                 "cve_id": "CVE-2",
+                "overall_pass": False,
+                "dryrun_detail": {
+                    "apply_method": "regenerated",
+                    "apply_attempts": [{"method": "regenerated-zero/unidiff-zero", "success": "yes"}],
+                },
                 "level_decision": {"level": "L3", "base_level": "L1"},
                 "generated_vs_real": {"verdict": "different", "deterministic_exact_match": False},
                 "validation_details": {
@@ -660,6 +667,10 @@ int foo(void) {
         self.assertEqual(summary["critical_structure_change"]["count"], 1)
         self.assertEqual(summary["manual_prerequisite_analysis"]["count"], 1)
         self.assertEqual(summary["promotion_summary"]["promoted_count"], 1)
+        self.assertEqual(summary["strategy_effectiveness"]["counts"]["Strict"], 1)
+        self.assertEqual(summary["strategy_effectiveness"]["counts"]["Zero-Context"], 1)
+        self.assertEqual(summary["level_accuracy"]["final_levels"]["L0"]["pass_rate"], 1.0)
+        self.assertEqual(summary["level_accuracy"]["final_levels"]["L3"]["total"], 1)
 
     def test_batch_summary_tracks_promotion_rules(self):
         summary = aggregate_batch_validate_summary([
@@ -703,6 +714,7 @@ int foo(void) {
         self.assertEqual(summary["deterministic_exact_match"]["count"], 1)
         self.assertEqual(summary["critical_structure_change"]["count"], 1)
         self.assertEqual(summary["manual_prerequisite_analysis"]["count"], 1)
+        self.assertEqual(summary["strategy_effectiveness"]["counts"]["Unresolved"], 1)
 
     def test_batch_summary_keeps_primary_accuracy_and_tracks_solution_set_separately(self):
         summary = aggregate_batch_validate_summary([
