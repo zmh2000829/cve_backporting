@@ -5,14 +5,17 @@ import os
 import sys
 import tempfile
 import unittest
+import argparse
 from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import api_server
 import cli
+from commands import analyze as analyze_cmd
+from commands.policy_cli import apply_policy_cli_overrides
 from commands import validate as validate_cmd
-from core.config import PolicyConfig, POLICY_PROFILE_PRESETS
+from core.config import Config, PolicyConfig, POLICY_PROFILE_PRESETS
 from core.models import DependencyAnalysisDetails, DryRunResult, PatchInfo, PrerequisitePatch
 from core.output_serializers import aggregate_batch_validate_summary
 from core.policy_engine import PolicyEngine
@@ -44,6 +47,47 @@ def _patch(diff: str, files=None, subject="t") -> PatchInfo:
 
 
 class PolicyEngineRegressionTests(unittest.TestCase):
+    def test_cli_policy_profile_override_changes_runtime_profile(self):
+        cfg = Config(policy=PolicyConfig(profile="balanced", special_risk_rules_enabled=True))
+        args = SimpleNamespace(policy_profile="conservative", p2_enabled=False)
+        out = apply_policy_cli_overrides(cfg, args)
+        self.assertEqual(cfg.policy.profile, "balanced")
+        self.assertEqual(out.policy.profile, "conservative")
+        self.assertEqual(
+            out.policy.large_change_line_threshold,
+            POLICY_PROFILE_PRESETS["conservative"]["large_change_line_threshold"],
+        )
+        self.assertEqual(
+            out.policy.call_chain_fanout_threshold,
+            POLICY_PROFILE_PRESETS["conservative"]["call_chain_fanout_threshold"],
+        )
+        self.assertFalse(out.policy.special_risk_rules_enabled)
+
+    def test_analyze_cli_accepts_policy_profile_argument(self):
+        parser = argparse.ArgumentParser()
+        subparsers = parser.add_subparsers(dest="command")
+        analyze_cmd.register(subparsers, argparse.ArgumentParser(add_help=False))
+        args = parser.parse_args([
+            "analyze",
+            "--cve", "CVE-2024-26633",
+            "--target", "5.10-hulk",
+            "--policy-profile", "conservative",
+        ])
+        self.assertEqual(args.policy_profile, "conservative")
+
+    def test_validate_cli_accepts_policy_profile_argument(self):
+        parser = argparse.ArgumentParser()
+        subparsers = parser.add_subparsers(dest="command")
+        validate_cmd.register(subparsers, argparse.ArgumentParser(add_help=False))
+        args = parser.parse_args([
+            "validate",
+            "--cve", "CVE-2024-26633",
+            "--target", "5.10-hulk",
+            "--known-fix", "deadbeef",
+            "--policy-profile", "balanced",
+        ])
+        self.assertEqual(args.policy_profile, "balanced")
+
     def test_l0_strict_harmless_when_no_rules(self):
         diff = """diff --git a/x.c b/x.c
 @@ -1,2 +1,2 @@
@@ -418,6 +462,7 @@ int foo(void) {
 
     def test_profile_conservative_presets_exist(self):
         self.assertIn("conservative", POLICY_PROFILE_PRESETS)
+        self.assertIn("balanced", POLICY_PROFILE_PRESETS)
         self.assertLess(
             POLICY_PROFILE_PRESETS["conservative"]["large_change_line_threshold"],
             POLICY_PROFILE_PRESETS["aggressive"]["large_change_line_threshold"],

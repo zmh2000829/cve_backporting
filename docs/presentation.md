@@ -1738,6 +1738,22 @@ python cli.py batch-validate --file data.json --target 5.10-hulk # 批量验证
 python cli.py benchmark --file benchmarks.yaml                  # 基准测试
 ```
 
+### 终端策略风格参数
+
+CLI 现在支持 `--policy-profile`，用于按命令覆盖本次执行的策略风格；其优先级高于 YAML 中的 `policy.profile`。
+
+| 风格 | 终端参数 | 风格定位 | 大改动阈值 | 大 hunk 阈值 | 调用链 fanout 阈值 | 适合什么时候用 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 保守风格 | `--policy-profile conservative` | 更早升级到人工复核 / 审批通道 | `40` 行 | `4` | `4` | 发布前审查、敏感子系统、安全优先场景 |
+| 平衡风格 | `--policy-profile balanced` | 默认风格，在误抬升与漏抬升之间折中 | `80` 行 | `8` | `6` | 日常 analyze、validate、batch-validate |
+
+| 支持命令 | 示例 |
+| --- | --- |
+| `analyze` | `python cli.py analyze --cve CVE-2024-26633 --target 5.10-hulk --policy-profile conservative` |
+| `validate` | `python cli.py validate --cve CVE-2024-26633 --target 5.10-hulk --known-fix da23bd709b46 --policy-profile balanced` |
+| `batch-validate` | `python cli.py batch-validate --file data.json --target 5.10-hulk --policy-profile conservative` |
+| `benchmark` | `python cli.py benchmark --file benchmarks.yaml --target 5.10-hulk --policy-profile balanced` |
+
 ---
 
 
@@ -2456,6 +2472,102 @@ final_level = max(base_level, 所有命中规则给出的 level_floor)
 - `base_level` 高，不等于风险低
 - `final_level` 高，也不等于 apply 能力差
 - 两者差异大，往往说明“文本可应用”与“语义可放心”不是一回事
+
+---
+
+# 哪些常见情况最容易触发级别升级？
+
+
+| 常见场景 | 典型规则 / 信号 | 常见升级方向 | 为什么会升级 |
+| --- | --- | --- | --- |
+| `strict` 能打上，但发现中等依赖补丁 | `prerequisite_recommended` | `L0 -> L1` | 文本可落地，不等于能脱离关联补丁独立成立；至少要提醒维护者一起审视依赖链 |
+| `strict / L1` 能打上，但 diff 里出现返回路径、签名、入参数量变化 | `l1_api_surface` | `L0/L1 -> L1/L2` | 这类变化通常不是“纯上下文漂移”，而是可能影响调用点、ABI 或错误返回语义 |
+| `3way` 自动合并成功 | `base_method=3way` | `base=L2` | Git 只是把两边修改拼起来了，真正风险在“拼完后的语义是否仍和上游修复等价” |
+| 命中错误路径、清理顺序、回滚路径变化 | `p2_error_path` | `L0/L1 -> L2` | 失败分支往往平时覆盖不足，最容易出现“看起来能跑、异常时出错” |
+| 命中生命周期、释放顺序、引用计数 | `p2_lifecycle_resource` | `L0/L1 -> L2/L3` | 影响对象持有关系、回收时机、回滚一致性，容易引入 UAF / 泄漏 / 双释放 |
+| 命中状态机、条件分支、状态字段变化 | `p2_state_machine_control_flow` | `L0/L1 -> L1/L3` | 不一定改很多行，但会改变进入条件、退出条件和状态转移路径 |
+| 命中结构体字段 / 数据路径变化 | `p2_struct_field_data_path`、`critical_structures` | `L0/L1 -> L1/L3` | 风险不在“字段改了”，而在“字段被谁读写、保护域是否变了、旧字段语义还成不成立” |
+| 命中锁、同步、并发保护域变化 | `p2_locking_sync`、`critical_structures` | `L0/L1 -> L3` | 这是最典型的“少量代码，语义却非常重”的场景 |
+| 修改函数已沿调用链扩散 | `call_chain_propagation`、`call_chain_fanout` | `L0/L1/L2 -> L2/L4` | 风险已经不止在单个 hunk，而是会影响调用者 / 被调用者链路 |
+| 强前置依赖补丁存在 | `prerequisite_required` | `L0/L1/L2 -> L3` | 单 patch 不能独立解释时，自动化不能再给低风险结论 |
+| 冲突适配或重生成上下文才能落地 | `conflict-adapted`、`regenerated`、`verified-direct` | `base=L3/L4` | 说明系统已经不只是“应用补丁”，而是在做更强的语义适配 |
+
+一句话抓重点：
+
+- `L0/L1` 升档，最常见是“虽然能打上，但已不是纯文本问题”
+- `L2/L3` 升档，最常见是“虽然可以适配，但语义风险已经显性化”
+- `L4/L5` 升档，最常见是“风险扩散到调用链/审批链，自动化不该再拍板”
+
+---
+
+# 结合这 30 个 CVE，当前算法看起来合理吗？
+
+先看你这组数字本身：
+
+- 总样本 `30` 个，其中发生升级的有 `20` 个，升级率 `66.7%`
+- `base=L0` 有 `14` 个，但最终 `final=L0` 为 `0`
+- `base=L1` 有 `8` 个，其中 `6` 个继续升到 `L2/L3`
+- 最终 `L3` 达到 `15` 个，`L4` 有 `3` 个
+
+这说明两件事同时成立：
+
+- 方向上是合理的：这组样本里确实高风险密度很高
+- 体感上会觉得“升得很猛”：因为这套算法采用的是 `max(level_floor)` 保守策略，只要命中一个更高 floor，就直接按更高通道处理
+
+为什么说“高风险密度很高”不是错觉？
+
+- `critical_structure_change_count = 19 / 30`
+- `any_special_risk_count = 24 / 30`
+- `manual_prerequisite_analysis_count = 19 / 30`
+- `struct_field_data_path = 16 / 30`
+- `error_path = 12 / 30`
+- `state_machine_control_flow = 9 / 30`
+
+换句话说，这批样本并不是“普通小补丁居多”，而是大量样本同时带有字段路径、错误路径、状态机、生命周期、依赖链这些会触发升级的信号。对于这种样本集，`base_level` 和 `final_level` 拉开是预期现象。
+
+但为什么仍然会让人觉得偏保守？核心看 `top_promotion_rules`：
+
+- 较硬的升级依据：`prerequisite_required=5`、`critical_structures=4`
+- 中度但较常见的升级依据：`call_chain_propagation=8`、`prerequisite_recommended=8`
+- 启发式较强、最值得持续审视的依据：`p2_struct_field_data_path=8`、`l1_api_surface=7`、`p2_error_path=7`
+
+这意味着当前升级压力不只是来自“强依赖 / 锁 / 明确关键结构”，也明显来自一批偏保守的启发式规则。所以这套算法的结论更准确地说是：
+
+- **方向合理**：没有把高风险样本错误地留在低级别
+- **风格保守**：对 `字段路径 / API 表面 / 中等依赖 / 调用链传播` 这几类信号宁可先升档，再让人审
+
+把你的 `promotion_matrix` 翻成用户更容易理解的话，就是：
+
+| 观察到的现象 | 用户应该怎么理解 |
+| --- | --- |
+| `L0->L1 = 3` | 原来像是“可直接回移”，但系统发现它还带着轻度依赖或 API/返回路径漂移，不能直接快走 |
+| `L0->L2 = 4` | 文本上完全能打上，但错误路径 / 3way 语义 / 调用面变化让它进入受控复核区 |
+| `L0->L3 = 4` | 最值得警惕：这表示“strict 成功”并没有换来低风险，因为结构、生命周期或强依赖把它顶到了语义敏感区 |
+| `L0->L4 = 3` | 少见但合理，通常意味着 strict 只是表面现象，真实风险已经扩散到关键链路或关键结构 |
+| `L1->L2 = 3`、`L1->L3 = 3` | 轻漂移样本里，约一半并不只是‘格式/上下文’问题，而是附带了语义风险或依赖风险 |
+
+当前我的判断是：
+
+- 这组样本里 `L3/L4` 偏多，并不直接说明算法错了
+- 真正值得警惕的是：`base=L0` 的 14 个样本全部被抬升了，这说明 `L0` 通道现在非常苛刻
+- 如果这种现象只出现在安全高风险样本集上，可以接受
+- 如果未来在更混合、更日常的样本里仍长期出现“`base=L0` 很多，但 `final=L0` 近乎为 0”，就说明规则门槛需要继续回调
+
+可以持续盯的 4 个校准信号：
+
+| 校准信号 | 如何解读 |
+| --- | --- |
+| `base=L0` 持续很多，但 `final=L0` 长期接近 `0` | `direct_backport_candidate` 太苛刻，或 veto / risk 规则过强 |
+| `top_promotion_rules` 长期被 `p2_struct_field_data_path`、`l1_api_surface`、`prerequisite_recommended` 主导 | 说明启发式规则比“硬证据规则”更主导分级，偏保守风险较高 |
+| `L0->L3/L4` 经常高于 `L0->L1/L2` | 说明系统经常把“文本上简单”的补丁直接判成高风险，需要检查是否过度依赖 `max(floor)` |
+| `critical_structure_change_count` 不高，但 `L3/L4` 仍很多 | 说明高等级主要不是由锁/生命周期等硬语义驱动，而是由较宽的启发式规则驱动 |
+
+建议对外表述时，不要把这组结果讲成“算法过于激进”，而要讲成：
+
+- 当前算法是**保守型分流器**
+- 它优先避免把高风险样本留在低级别
+- 这组 30 个 CVE 说明样本本身高风险密度高
+- 但也提示我们后续要重点校准 `字段路径 / API 表面 / 中等依赖 / 调用链传播` 这几类升级器
 
 ---
 

@@ -223,7 +223,23 @@ When evaluating `L0-L5` ratios in batch mode:
 - A rise in `L5` means more cases are ending in the highest-difficulty lane and therefore deserve immediate senior review
 - The healthiest low-level distribution is not "maximum L0/L1", but "L0/L1 only when positive admission evidence is strong enough"
 
-**Profiles** (`policy.profile`): `conservative` / `balanced` / `aggressive` / `default` — preset thresholds for large-change and call-chain fanout; explicit YAML values override presets.
+### CLI Policy Styles
+
+The CLI now supports a direct profile override via `--policy-profile`. This flag overrides `policy.profile` from YAML for the current command only.
+
+| CLI style | Parameter | Intended behavior | Large-change threshold | Large-hunk threshold | Call-chain fanout threshold | Recommended use |
+| --- | --- | --- | --- | --- | --- | --- |
+| Conservative | `--policy-profile conservative` | Promote earlier and keep more cases in human-review lanes | `40` lines | `4` hunks | `4` | Safety-first triage, release branches, sensitive subsystems |
+| Balanced | `--policy-profile balanced` | Default tradeoff between false promotion and missed risk | `80` lines | `8` hunks | `6` | Daily analysis and routine validation |
+
+Supported commands:
+
+| Command | Example |
+| --- | --- |
+| `analyze` | `python cli.py analyze --cve CVE-2024-26633 --target 5.10-hulk --policy-profile conservative` |
+| `validate` | `python cli.py validate --cve CVE-2024-26633 --target 5.10-hulk --known-fix da23bd709b46 --policy-profile balanced` |
+| `batch-validate` | `python cli.py batch-validate --file cve_data.json --target 5.10-hulk --policy-profile conservative` |
+| `benchmark` | `python cli.py benchmark --file benchmarks.yaml --target 5.10-hulk --policy-profile balanced` |
 
 Rule engine highlights:
 - Built-in Python rules now live in [rules/default_rules.py](/Users/junxiaoqiong/Workplace/cve_backporting/rules/default_rules.py)
@@ -338,6 +354,9 @@ End-to-end: intelligence → intro detection → fix location → dependency →
 
 ```bash
 python cli.py analyze --cve CVE-2024-26633 --target 5.10-hulk
+
+# Conservative safety-first lane
+python cli.py analyze --cve CVE-2024-26633 --target 5.10-hulk --policy-profile conservative
 ```
 
 ### `check-intro` — Vulnerability Introduction Detection
@@ -377,6 +396,12 @@ python cli.py validate \
   --cve CVE-2024-26633 --target 5.10-hulk \
   --known-fix da23bd709b46 \
   --mainline-fix <fix_commit> --mainline-intro <intro_commit>
+
+# Force the conservative review style for this run only
+python cli.py validate \
+  --cve CVE-2024-26633 --target 5.10-hulk \
+  --known-fix da23bd709b46 \
+  --policy-profile conservative
 ```
 
 ### `batch-validate` — Batch Patch Accuracy Assessment
@@ -392,6 +417,9 @@ python cli.py batch-validate --file cve_data.json --target 5.10-hulk --limit 10
 
 # Recommended parallel mode for a single local repo
 python cli.py batch-validate --file cve_data.json --target 5.10-hulk --workers 2
+
+# Batch validation with conservative promotion thresholds
+python cli.py batch-validate --file cve_data.json --target 5.10-hulk --workers 2 --policy-profile conservative
 ```
 
 Recommended usage:

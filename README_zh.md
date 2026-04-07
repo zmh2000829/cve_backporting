@@ -141,6 +141,9 @@ python cli.py build-cache --target 5.10-hulk
 
 ```bash
 python cli.py analyze --cve CVE-2024-26633 --target 5.10-hulk
+
+# 保守风格：更早把样本推入人工复核通道
+python cli.py analyze --cve CVE-2024-26633 --target 5.10-hulk --policy-profile conservative
 ```
 
 ### 6. 命令如何选择
@@ -163,6 +166,9 @@ python cli.py analyze --cve CVE-2024-26633 --target 5.10-hulk
 
 ```bash
 python cli.py analyze --cve CVE-2024-26633 --target 5.10-hulk
+
+# 保守风格：更早把样本推入人工复核通道
+python cli.py analyze --cve CVE-2024-26633 --target 5.10-hulk --policy-profile conservative
 ```
 
 ### 批量 CVE 分析
@@ -264,6 +270,22 @@ final_level = max(base_level, 所有命中规则给出的 level_floor)
 | `L4` | 风险已经从局部 patch 扩散到调用链或冲突适配，需要资深维护者审批 |
 | `L5` | 最难处理的级别，说明系统已经无法稳定自动拍板，必须由资深维护者接管 |
 
+#### 终端策略风格参数
+
+CLI 现在支持通过 `--policy-profile` 直接指定本次执行的策略风格。该参数只影响当前命令，且优先级高于 YAML 中的 `policy.profile`。
+
+| 风格 | 终端参数 | 行为特征 | 大改动阈值 | 大 hunk 阈值 | 调用链 fanout 阈值 | 适用场景 |
+|------|----------|----------|------------|--------------|--------------------|----------|
+| 保守风格 | `--policy-profile conservative` | 更早升档，宁可多进人工复核，也尽量不把高风险样本留在低级别 | `40` 行 | `4` 个 hunk | `4` | 发布前审查、敏感子系统、安全优先场景 |
+| 平衡风格 | `--policy-profile balanced` | 默认风格，在误抬升和漏抬升之间做折中 | `80` 行 | `8` 个 hunk | `6` | 日常分析、常规 validate / batch-validate |
+
+| 支持命令 | 示例 |
+|----------|------|
+| `analyze` | `python cli.py analyze --cve CVE-2024-26633 --target 5.10-hulk --policy-profile conservative` |
+| `validate` | `python cli.py validate --cve CVE-2024-26633 --target 5.10-hulk --known-fix da23bd709b46 --policy-profile balanced` |
+| `batch-validate` | `python cli.py batch-validate --file cve_data.json --target 5.10-hulk --policy-profile conservative` |
+| `benchmark` | `python cli.py benchmark --file benchmarks.yaml --target 5.10-hulk --policy-profile balanced` |
+
 #### `base_level`、`final_level`、`direct_backport` 为什么必须分开看
 
 - `base_level`：补丁是怎么 apply 上去的
@@ -362,11 +384,17 @@ python cli.py check-fix --cve CVE-2024-26633 --target 5.10-hulk
 # 单条验证（与已知修复对比）
 python cli.py validate --cve CVE-2024-26633 --target 5.10-hulk --known-fix <commit>
 
+# 单条验证，强制走保守风格
+python cli.py validate --cve CVE-2024-26633 --target 5.10-hulk --known-fix <commit> --policy-profile conservative
+
 # 批量验证
 python cli.py batch-validate --file cve_data.json --target 5.10-hulk
 
 # 单本地仓库的推荐并行方式
 python cli.py batch-validate --file cve_data.json --target 5.10-hulk --workers 2
+
+# 批量验证，显式指定平衡风格
+python cli.py batch-validate --file cve_data.json --target 5.10-hulk --workers 2 --policy-profile balanced
 
 # 启动 HTTP API 服务（analyze / validate / batch-validate）
 python cli.py server --host 0.0.0.0 --port 8000
