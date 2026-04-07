@@ -2240,165 +2240,105 @@ Step 5: 产出可答辩结论（工具自动生成 narrative）
 
 ---
 
-# 本轮变化边界：哪些没变，哪些变了？
+# 先给结论：L0-L5 到底在表达什么？
 
-### 先回答最关键的两个问题
+`L0-L5` 不是“补丁难度分”，也不是单独的“语义风险分”。
 
-1. **L0-L5 的核心算法主干没有变化**
-   - 仍然是先得到 `DryRun baseline`
-   - 再通过规则 `level_floor` 做风险抬升
-   - `strict / context-C1 / 3way / regenerated / verified-direct / conflict-adapted` 这些基础路径没有被重写
+它是四个判断合并后的**最终执行 / 审查通道**：
 
-2. **七策略序列搜索引擎没有变化**
-   - 仍然用于 `Regenerated` 路径中的 hunk 定位
-   - 仍然是“确定性序列搜索优先，代码语义匹配兜底”
-   - 本轮没有改动七策略的顺序、核心匹配逻辑或触发边界
-
-### 本轮真正变化的是三层
-
-- **规则层**：从“命中几个 warning”升级为“准入 / 否决 / 高风险画像”三类意图
-- **证据层**：从笼统 warning 升级为锁对象、字段、状态点、错误路径节点等具体证据
-- **输出层**：新增统一 `analysis_framework`，让用户先看过程、证据、结论，再看 L0-L5
-
----
-
-# 当前编排框架：DryRun 基线 × 规则 level_floor 抬升
-
-```
-DryRun 成功方法
-  └─ 生成 base_level/base_method
-
-规则引擎
-  └─ 每条规则输出 risk evidence
-  └─ 每条规则归属 admission / veto / risk_profile
-  └─ veto 已继续拆成 low_level_veto / direct_backport_veto
-  └─ 如有需要显式给出 level_floor
-
-最终输出:
-  level_decision + analysis_framework
-    ├─ level / base_level / base_method
-    ├─ review_mode / next_action
-    ├─ rule_hits / warnings / evidence
-    └─ process / evidence / conclusion
-```
-
-### 关键收敛原则
-
-- **L0**：100% 可落地且无额外风险
-- **L1**：进入 LLM/人工复核，不自动无害
-- **L3/L4**：关键结构与传播风险必须显式升级
-- **规则决定风险抬升，不再回退为硬编码判断**
-
----
-
-# 深层定级：L0-L5 不是“补丁难度分”
-
-### 本质定义
-
-`L0-L5` 不是单纯的“能不能 apply”，也不是单纯的“语义风险分数”。
-
-它是三个维度叠加后的**执行 / 审查分流层级**：
-
-1. **补丁可应用性的证明强度**
-   - baseline 是 `strict`、`context-C1`、`3way` 还是 `verified-direct`
-2. **关联补丁判断的确定性**
-   - 是否存在 `required / recommended / independent`
-3. **语义影响面的扩散程度**
-   - 是否命中锁、生命周期、状态机、结构体字段、错误路径、调用链传播
-
-### 一条公式
+1. DryRun 是如何证明补丁可应用的
+2. 关联补丁判断是否稳定
+3. 是否命中关键语义风险
+4. 最终应该走哪种审查和审批路径
 
 ```text
 final_level = max(base_level, 所有命中规则给出的 level_floor)
 ```
 
-### 三个最容易误解的点
+### 三个必须统一的口径
 
-- `strict` 成功 **不等于** 最终一定是 `L0`
-- `verified-direct` **不等于** 一定语义最危险，但一定代表证明链更弱
-- “只改一行” **不等于** 低风险，单行也可能直接改状态迁移、锁语义或字段路径
-
----
-
-# 深层定级矩阵：每一级到底在表达什么？
-
-| 级别 | 本质含义 | 典型基线 | 想留在这一层必须满足什么 | 常见落入原因 | 建议动作 |
-|---|---|---|---|---|---|
-| **L0** | 确定性安全通道 | `strict` | 无 warn/high 抬升、无强/中依赖、无关键结构、无明显传播 | 原始补丁上下文完全一致，语义边界清晰 | 可直接回移，只保留最小回归验证 |
-| **L1** | 低风险漂移通道，但不自动无害 | `ignore-ws` / `context-C1` | 漂移仅限 context/空白/邻近无关插入，且没有硬否决证据 | 注释、格式、微小上下文偏移 | 进入 LLM/人工轻审查，确认只是轻微漂移 |
-| **L2** | 中等谨慎通道 | `3way`，或低级别被规则抬升 | 核心改动仍接近原补丁，但证据已不足以留在低级别 | 大改动、API surface 变化、错误路径变化、调用扇出、`recommended` 前置 | 逐 hunk 审查，核对调用点、返回路径和依赖 |
-| **L3** | 语义敏感通道 | `regenerated`，或更低基线被继续抬升 | 已触及关键语义，不再适合低风险处理 | 锁/生命周期/状态机/字段变化，或 `required` 前置 | 做聚焦代码审查和子系统回归测试 |
-| **L4** | 高风险传播通道 | `conflict-adapted`，或关键变更继续传播后抬升 | 风险已不是局部 patch 问题，而是沿调用关系或冲突适配扩散 | 关键结构变化叠加调用链传播、多条 hard veto 同时命中 | 需要资深维护者审批，显式审查传播链 |
-| **L5** | 兜底 / 最弱证明通道 | `verified-direct` / unknown | 引擎可能仍保住了修复意图，但证明方式最弱 | 绕过常规 `git apply` 的内存级验证、未知基线、fallback 路径 | 保留证据做人工确认，并做更强验证后再考虑合入 |
-
-### 两个重要补充
-
-- **L5 是“证明链最弱”，不是“语义一定最危险”**
-  - 例如某个补丁没有前置依赖，也没有明显高风险点，但如果只能靠 `verified-direct` 证明可适配，仍然应该留在 `L5`
-- **L3.5 不是最终用户层级**
-  - `zero-context` 是内部 DryRun 技术，外部仍归入 `regenerated` 家族，通常按 `L3` 理解，除非规则继续把它抬高
+- `strict` 成功，不代表最终一定是 `L0`
+- `verified-direct` 当前属于 `L3` 的基线方法，不是 `L5`
+- `L5` 只用于未知方法、DryRun 缺失或证据链断裂的兜底场景
 
 ---
 
-# 这一级别如何回答用户真正关心的三件事？
+# 当前代码中的默认定义：先看 `base_level`，再看规则抬升
 
-### 先看三件事，再看 L0-L5
-
-- **能不能直接回移**
-  - 看 `analysis_framework.conclusion.direct_backport`
-- **需不需要考虑关联补丁**
-  - 看 `analysis_framework.conclusion.prerequisite`
-- **是不是有较大影响风险**
-  - 看 `analysis_framework.conclusion.risk`
-
-### L0-L5 是对三件事的综合执行结论
-
-它不是替代这三件事，而是把这三件事和 baseline 证明强度合并后给出的执行通道。
-
-所以真实样本里经常出现：
-
-- `base=L0, final=L4`
-  - 补丁本身能 strict 通过，但因为强依赖前置、关键结构、传播风险，被提升到人工审批通道
-- `prerequisite=independent, final=L5`
-  - 没有依赖问题，但证明方式只能靠 `verified-direct`，所以仍然不能当成低风险直回
-- `单行修改, final=L3`
-  - 文本很小，但命中条件分支、状态字段、锁/字段路径等高敏感语义
-
-### 看比例时不要只看级别数字
-
-- `L3/L4` 占比上升，很多时候代表“风险证据被显式暴露出来了”，不一定是 apply 能力退化
-- `L5` 占比上升，很多时候代表 fallback 适配能力增强了，不一定说明补丁更差
-- 真正健康的目标不是“把样本都压进 L0/L1”，而是“只有正向准入证据足够强时，才允许样本停在 L0/L1”
+| 级别 | 当前默认 `base_method` | 代码里的策略定义 | 审查模式 | 建议动作 |
+|---|---|---|---|---|
+| **L0** | `strict` | 确定性无害，才允许 `harmless=true` | `auto-pass` | 可直接回移，只保留最小回归验证 |
+| **L1** | `ignore-ws` / `context-C1` / `C1-ignore-ws` | 轻微上下文漂移，不自动判无害 | `llm-review` | 做轻量人工/LLM 复核 |
+| **L2** | `3way` | 中等风险适配，证据不足以停留在低级别 | `targeted-review` | 逐 hunk 核对调用点、返回路径和依赖 |
+| **L3** | `regenerated` / `verified-direct` | 语义敏感变更，必须做聚焦审查 | `focused-review` | 重点审查锁、字段、状态机、回归测试 |
+| **L4** | `conflict-adapted` | 高风险牵连，已进入传播或冲突适配场景 | `manual-approval` | 资深维护者审批，显式看传播链 |
+| **L5** | unknown / missing | 回退或未知路径，证据链最弱 | `fallback-review` | 保留证据，走人工确认或补样本验证 |
 
 ---
 
-# 当前默认规则与迁移结果
+# L0-L2：从“可直接回移”到“需要人工逐 hunk 核对”
 
-| 规则 | 触发条件 | 当前输出 |
-|------|----------|----------|
-| `direct_backport_candidate` | strict 命中、无强依赖、改动小、无明显传播、且无字段/状态/错误路径语义标记 | admission，支持 `可直接回移` |
-| `independent_patch` | 无强/中依赖，依赖分析结论可独立成立 | admission，支持 `可不优先考虑关联补丁` |
-| `large_change` | 改动行数 / hunk 数超阈值 | warning，至少抬升到 `L2` |
-| `critical_structures` | 锁/RCU/refcount，或布局敏感的 `struct` 场景命中 | high risk，至少抬升到 `L3` |
-| `p2_locking_sync` | 锁对象、加解锁位置、保护区间、同步顺序变化 | high risk，至少抬升到 `L3` |
-| `p2_lifecycle_resource` | alloc/free、get/put、refcount、回滚路径变化 | high risk，至少抬升到 `L3` |
-| `p2_state_machine_control_flow` | 条件分支、返回路径、状态字段、ops 行为变化，且必须有状态语义 | warning/high，至少抬升到 `L2/L3` |
-| `p2_struct_field_data_path` | struct 字段定义、访问路径、读写位置变化 | warning/high，至少抬升到 `L2/L3` |
-| `p2_error_path` | `goto err`、cleanup、错误码、恢复逻辑变化 | warning，至少抬升到 `L2` |
-| `prerequisite_required` | 存在强依赖前置补丁 | direct_backport_veto，阻止“可直接回移” |
-| `prerequisite_recommended` | 存在中等依赖前置补丁 | direct_backport_veto，提示优先评估关联补丁 |
-| `call_chain_propagation` | 修改函数存在调用/被调用牵连；已过滤伪调用与成员访问伪 callee | warning / high，关键变更时可抬升到 `L4` |
-| `call_chain_fanout` | callers + callees 扇出超阈值 | warning，至少抬升到 `L2` |
-| `l1_api_surface` | 签名变化 / return 路径变化 | low_level_veto，阻止误入 `L0/L1` |
-| `l1_light_drift_sample` | 注释漂移、日志文本漂移、等价宏替换、局部变量重命名 | admission，给 L1 “轻微漂移”提供正向样本证据 |
-| `single_line_high_impact` | 变更行数很少但命中锁/生命周期/布局/控制流敏感语义 | risk_profile，避免“单行=低风险”误判 |
+| 级别 | 清晰定义 | 常见进入原因 | 汇报时建议这样说 |
+|---|---|---|---|
+| **L0** | 已有最强可应用性证明，且没有额外语义风险暴露 | `strict` 命中，且无前置依赖、无传播、无关键结构/状态/字段风险 | 这个补丁可以直接回移，系统没有观察到额外语义风险 |
+| **L1** | 只有轻微漂移，补丁意图仍清晰，但不能自动当成无害 | `ignore-ws` / `context-C1`，或命中注释、日志、等价宏、局部变量 rename 等轻漂移样本 | 这类样本可以快速处理，但仍要做轻量复核，确认只是上下文漂移 |
+| **L2** | 已能适配，但证据不足以继续停在低风险区 | `3way`，或命中大改动、API surface、错误路径、调用扇出、`recommended` 前置 | 这不是不能做，而是要逐 hunk 核对调用点、返回路径和关联补丁 |
 
-### 规则意图收敛
+### 汇报重点
 
-- `admission`：支持“可直接回移”
-- `low_level_veto`：阻止误入低级别处理区
-- `direct_backport_veto`：阻止“可直接回移”结论
-- `risk_profile`：识别锁、生命周期、状态机、结构体字段、错误路径等高风险画像
+- `L0/L1` 不是“apply 成功就放行”，而是“证据足够强才允许停留”
+- `L2` 不是失败，而是进入明确的人工对照通道
+
+---
+
+# L3-L5：从“语义敏感”到“兜底谨慎”
+
+| 级别 | 清晰定义 | 常见进入原因 | 汇报时建议这样说 |
+|---|---|---|---|
+| **L3** | 已触及语义敏感区，不能再按低风险回移处理 | `regenerated` / `verified-direct`，或命中锁、生命周期、状态机、字段路径、`required` 前置 | 系统已经看到明确的语义风险点，必须做聚焦审查和回归测试 |
+| **L4** | 风险不再是局部 patch 问题，而是沿调用链或冲突适配扩散 | `conflict-adapted`，或关键结构变化叠加调用链传播 | 这已经不是单点补丁问题，需要资深维护者审批和链路评估 |
+| **L5** | 工具没有拿到足够强的证明链，只能按最高谨慎度兜底 | DryRun 缺失、方法未识别、fallback 路径、证据链断裂 | 不是说一定最危险，而是当前自动化证明最弱，不能让系统替人拍板 |
+
+### 两个容易讲错的点
+
+- `verified-direct` 现在归入 `L3`，因为它仍属于已识别的基线方法
+- `L5` 表达的是“证明链最弱”，不是“语义一定最危险”
+
+---
+
+# `base_level`、`final_level`、`direct_backport` 为什么必须分开看？
+
+- `base_level`：补丁是怎么 apply 上去的
+- `final_level`：综合规则后应该走哪条审查通道
+- `direct_backport`：是否允许输出“可直接回移”的结论
+
+### 真实样本会出现这几种组合
+
+- `base=L0, final=L3`
+  - 文本上可 `strict` 应用，但命中了锁、字段、状态机等语义风险
+- `base=L1, final=L1`
+  - 只是注释、日志、等价宏、局部变量 rename 这类轻微漂移
+- `base=L2, final=L4`
+  - `3way` 可过，但风险已经沿调用链传播，或进入冲突适配
+- `base=L3, final=L3`
+  - 需要 `regenerated / verified-direct`，必须走聚焦审查
+
+### 汇报时不要只看“级别数字”
+
+- `L3/L4` 占比上升，很多时候说明风险证据被显式暴露出来了，不等于 apply 能力退化
+- `L0/L1` 占比下降，很多时候说明低级别准入变严了，不等于工具变差
+- 真正健康的目标不是把样本都压进 `L0/L1`，而是让低级别只留给证据最强的样本
+
+---
+
+# 当前规则如何把样本从低级别抬升出去？
+
+| 规则类型 | 代表规则 | 作用 |
+|------|----------|------|
+| `admission` | `direct_backport_candidate`、`independent_patch`、`l1_light_drift_sample` | 给 `L0/L1` 提供正向证据，不再只靠 warning 反推 |
+| `low_level_veto` | `large_change`、`l1_api_surface` | 阻止样本误留在 `L0/L1` |
+| `direct_backport_veto` | `prerequisite_required`、`prerequisite_recommended` | 阻止“可直接回移”结论 |
+| `risk_profile` | `critical_structures`、`p2_*`、`call_chain_*`、`single_line_high_impact` | 暴露语义风险与传播面，必要时抬升到 `L3/L4` |
 
 ### 目录收口
 
@@ -2409,45 +2349,21 @@ final_level = max(base_level, 所有命中规则给出的 level_floor)
 
 ---
 
-# 本轮新增：降低级别误抬升
+# 本轮新增：修正误抬升，同时继续收紧 L0/L1 准入
 
-### 不是放宽标准，而是修正“证据 -> 结论”映射
+| 变化点 | 现在的口径 | 汇报价值 |
+|------|-----------|---------|
+| 降低误抬升 | 普通 `struct` 指针不再自动当布局风险；伪调用和成员访问不再制造假传播；纯错误码返回变化不再误判成状态机变化 | `L3/L4` 更接近真实语义风险，而不是宽匹配副作用 |
+| 收紧 L0 | `strict` 不再天然等于“可直接回移”；还必须无前置依赖、无传播、无字段/状态/错误路径语义标记 | `L0` 只留给真正稳定、证据最强的样本 |
+| 强化 L1 | `l1_light_drift_sample` 会显式给出注释漂移、日志文本漂移、等价宏替换、局部变量 rename 等正向样本 | `L1` 不再只是口头说“轻微漂移”，而是有证据可复核 |
+| 强化依赖说明 | 关联补丁开始输出共享字段、锁域、状态点、证据行等语义域证据 | “为什么建议先看关联补丁”可以讲得更具体 |
 
-| 误抬升来源 | 过去的问题 | 现在的收紧方式 | 结果 |
-|-----------|-----------|---------------|------|
-| `critical_structures` | 任意 `struct` 文本都可能触发，普通 `struct foo *ctx` 也会被抬高 | 仅在 `struct {...}` 定义变化，或 `sizeof / offsetof / container_of` 这类布局敏感场景命中 | 普通结构体指针/引用修改不再误抬升 |
-| 调用链传播 | `sizeof`、`likely`、`ARRAY_SIZE`、`ops->helper()` 之类伪调用会制造 caller/callee 牵连 | 过滤 builtin/pseudo call，跳过成员访问伪 callee，跨文件只连接唯一符号 | L0 不再因为伪传播被误抬到 `L3/L4` |
-| `p2_state_machine_control_flow` | 看到 `if/return/break` 就容易触发，纯错误码返回变化会误入状态机专项 | 必须同时看到状态字段、状态常量或真实状态迁移语义；纯 `if (ret) return -E...` 只归入 `error_path` | 状态机命中更接近真实状态迁移风险 |
+### 这轮文档同步后的标准讲法
 
-### 对 L0-L5 分布的影响应该这样解读
-
-- 如果 `L3/L4` 因此下降，通常代表误报减少了，不代表标准放松了
-- 如果 `L0/L1` 略有回升，代表低风险准入边界更干净，不代表工具更激进了
-- 真正的目标不是把样本都压低，而是让高等级只由真实语义风险驱动
-
-### 本轮回归固定了 3 类典型反例
-
-- 普通 `struct` 指针修改不会触发 `critical_structures`
-- `ops->helper()` 不会生成到 `helper` 的调用链边
-- 纯错误码返回变化不会触发 `p2_state_machine_control_flow`
-
----
-
-# 本轮新增：继续收紧 L0/L1 与关联补丁证据
-
-### L0 不是“strict 就放行”，L1 也不再只是模糊描述
-
-| 项目 | 现在新增的约束/证据 | 作用 |
-|------|--------------------|------|
-| L0 正向准入 | `direct_backport_candidate` 还要求无 `special_risk`、无字段/状态/错误路径标记、无传播、无前置依赖 | 让 “可直接回移” 只留给真正稳定的样本 |
-| L1 边界样本 | `l1_light_drift_sample` 显式记录注释漂移、日志文本漂移、等价宏替换、局部变量重命名 | 让 “轻微漂移” 变成可复核样本，而不是口头判断 |
-| 关联补丁证据 | `PrerequisitePatch` 输出 `shared_fields / shared_lock_domains / shared_state_points / evidence_lines` | 让“建议先看关联补丁”能落到共享字段、锁域、状态迁移证据 |
-
-### 这轮的实际效果
-
-- `L0` 准入更硬，不再把“strict 但有语义标记”的样本直接当成可直回
-- `L1` 解释更强，能告诉用户这是注释/日志/宏别名/局部变量 rename 这类轻微漂移
-- 依赖分析不再只讲 overlap，而是开始显式讲共享字段、共享锁域、共享状态点
+- `L0-L5` 是“自动化证明强度 + 风险暴露程度”的综合分流
+- `L0/L1` 代表可以更快处理，不代表可以省掉判断
+- `L3/L4` 代表风险点已经被显式看见，需要更强审查
+- `L5` 代表自动化证明最弱，系统不能替人拍板
 
 ---
 
