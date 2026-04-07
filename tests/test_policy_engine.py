@@ -3,6 +3,7 @@
 
 import os
 import sys
+import tempfile
 import unittest
 from types import SimpleNamespace
 
@@ -10,6 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import api_server
 import cli
+from commands import validate as validate_cmd
 from core.config import PolicyConfig, POLICY_PROFILE_PRESETS
 from core.models import DependencyAnalysisDetails, DryRunResult, PatchInfo, PrerequisitePatch
 from core.output_serializers import aggregate_batch_validate_summary
@@ -701,6 +703,75 @@ int foo(void) {
         self.assertEqual(summary["deterministic_exact_match"]["count"], 1)
         self.assertEqual(summary["critical_structure_change"]["count"], 1)
         self.assertEqual(summary["manual_prerequisite_analysis"]["count"], 1)
+
+    def test_batch_summary_keeps_primary_accuracy_and_tracks_solution_set_separately(self):
+        summary = aggregate_batch_validate_summary([
+            {
+                "cve_id": "CVE-1",
+                "level_decision": {"level": "L1", "base_level": "L1"},
+                "generated_vs_real": {"verdict": "identical", "deterministic_exact_match": True},
+                "solution_set_vs_real": {"verdict": "different", "deterministic_exact_match": False},
+                "validation_details": {
+                    "strategy_buckets": {"dependency_bucket": "recommended"},
+                    "special_risk_report": {"summary": {"triggered_sections": [], "has_critical_structure_change": False}},
+                },
+            },
+        ])
+        self.assertEqual(summary["verdict_distribution"]["identical"], 1)
+        self.assertEqual(summary["deterministic_exact_match"]["count"], 1)
+        self.assertEqual(summary["solution_set_verdict_distribution"]["different"], 1)
+        self.assertEqual(summary["solution_set_deterministic_exact_match"]["count"], 0)
+        self.assertEqual(summary["solution_set_deterministic_exact_match"]["case_count"], 1)
+
+    def test_batch_case_bucket_uses_primary_patch_accuracy(self):
+        tmpdir = tempfile.mkdtemp(prefix="batch-case-")
+        try:
+            runtime = SimpleNamespace(
+                _run_single_validate=lambda *args, **kwargs: {
+                    "cve_id": "CVE-1",
+                    "generated_vs_real": {
+                        "verdict": "identical",
+                        "core_similarity": 1.0,
+                        "deterministic_exact_match": True,
+                    },
+                    "solution_set_vs_real": {
+                        "verdict": "different",
+                        "core_similarity": 0.3,
+                        "deterministic_exact_match": False,
+                    },
+                    "dryrun_detail": {"has_adapted_patch": True, "apply_method": "verified-direct"},
+                    "validation_details": {
+                        "strategy_buckets": {"dependency_bucket": "recommended"},
+                        "special_risk_report": {"summary": {"triggered_sections": [], "has_critical_structure_change": False}},
+                    },
+                    "analysis_framework": {
+                        "conclusion": {
+                            "direct_backport": {"status": "review"},
+                            "prerequisite": {"status": "recommended"},
+                            "risk": {"status": "attention"},
+                        }
+                    },
+                    "result_status": {"state": "complete"},
+                    "summary": "主补丁准确，但整套解集不完整",
+                    "tool_prereqs": [],
+                }
+            )
+            config = SimpleNamespace(output=SimpleNamespace(output_dir=tmpdir))
+            group = {
+                "primary_fix": {"commit": "aaa111", "subject": "fix"},
+                "prereq_fixes": [],
+                "all_fixes": [{"commit": "aaa111"}, {"commit": "bbb222"}],
+            }
+            case_out = validate_cmd._execute_batch_validate_case(
+                runtime, config, "5.10-hulk", "CVE-1", group, git_mgr=object(), run_id="run1"
+            )
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir)
+
+        self.assertEqual(case_out["bucket"], "passed")
+        self.assertEqual(case_out["verdict"], "identical")
+        self.assertEqual(case_out["item"]["solution_set_verdict"], "different")
 
     def test_find_rollback_commit_uses_earliest_fix_or_prereq(self):
         class _Git:

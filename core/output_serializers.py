@@ -472,9 +472,12 @@ def aggregate_batch_validate_summary(results: list) -> dict:
     promotion_summary = aggregate_promotion_metrics(results)
     dependency_bucket_counter = Counter()
     verdict_counter = Counter()
+    solution_set_verdict_counter = Counter()
     result_state_counter = Counter()
     incomplete_reason_counter = Counter()
     deterministic_exact_match_count = 0
+    solution_set_exact_match_count = 0
+    solution_set_case_count = 0
     manual_prereq_analysis_count = 0
 
     for result in results or []:
@@ -486,6 +489,13 @@ def aggregate_batch_validate_summary(results: list) -> dict:
         verdict_counter[verdict] += 1
         if generated.get("deterministic_exact_match"):
             deterministic_exact_match_count += 1
+        solution_set = normalized.get("solution_set_vs_real") or {}
+        if solution_set:
+            solution_set_case_count += 1
+            solution_verdict = solution_set.get("verdict", "no_data")
+            solution_set_verdict_counter[solution_verdict] += 1
+            if solution_set.get("deterministic_exact_match"):
+                solution_set_exact_match_count += 1
 
         status = normalized.get("result_status") or {}
         state = status.get("state", "")
@@ -522,6 +532,13 @@ def aggregate_batch_validate_summary(results: list) -> dict:
             "rate": round(deterministic_exact_match_count / total, 4) if total else 0.0,
             "definition": "generated_vs_real.deterministic_exact_match == true",
         },
+        "solution_set_verdict_distribution": dict(sorted(solution_set_verdict_counter.items())),
+        "solution_set_deterministic_exact_match": {
+            "count": solution_set_exact_match_count,
+            "rate": round(solution_set_exact_match_count / solution_set_case_count, 4) if solution_set_case_count else 0.0,
+            "case_count": solution_set_case_count,
+            "definition": "solution_set_vs_real.deterministic_exact_match == true",
+        },
         "critical_structure_change": {
             "count": critical_structure_change_count,
             "rate": round(critical_structure_change_count / total, 4) if total else 0.0,
@@ -557,6 +574,8 @@ def aggregate_batch_validate_summary(results: list) -> dict:
             "top_promotion_rules": promotion_summary.get("top_promotion_rules", {}),
             "result_state_distribution": dict(sorted(result_state_counter.items())),
             "incomplete_reason_distribution": dict(sorted(incomplete_reason_counter.items())),
+            "solution_set_verdict_distribution": dict(sorted(solution_set_verdict_counter.items())),
+            "solution_set_case_count": solution_set_case_count,
         },
         "special_risk": special_risk_summary,
     }

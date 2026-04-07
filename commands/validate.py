@@ -88,6 +88,11 @@ def _build_batch_case_summary(item: dict, result: dict) -> dict:
         one_liner = f"当前结论不完整：{result_status.get('user_message', one_liner)}"
     elif result_status.get("state") == "error":
         one_liner = f"当前验证失败：{result_status.get('user_message', one_liner)}"
+    elif item.get("solution_set_verdict"):
+        one_liner += (
+            f" 主补丁准确度={item.get('verdict') or 'unknown'}，"
+            f"整套解集准确度={item.get('solution_set_verdict')}。"
+        )
 
     return {
         "一句话结论": one_liner,
@@ -301,6 +306,7 @@ def _execute_batch_validate_case(runtime, config, tv, cve_id, group, *, deep=Fal
             break
 
     generated = result.get("generated_vs_real", {})
+    solution_set = result.get("solution_set_vs_real", {})
     verdict = generated.get("verdict", "no_data")
     core_sim = generated.get("core_similarity", 0)
     method = result.get("dryrun_detail", {}).get("apply_method", "-")
@@ -339,6 +345,8 @@ def _execute_batch_validate_case(runtime, config, tv, cve_id, group, *, deep=Fal
         "verdict": verdict,
         "core_similarity": round(core_sim, 3),
         "deterministic_exact_match": bool(generated.get("deterministic_exact_match")),
+        "solution_set_verdict": solution_set.get("verdict", ""),
+        "solution_set_core_similarity": round(solution_set.get("core_similarity", 0), 3) if solution_set else None,
         "method": method,
         "l0_l5": level_view,
         "current_level": level_view.get("current_level", ""),
@@ -447,11 +455,13 @@ def _build_batch_summary_view(tv: str, total_cves: int, total_patches: int, skip
         },
         "key_findings": {
             "deterministic_exact_match": batch_summary.get("deterministic_exact_match", {}),
+            "solution_set_deterministic_exact_match": batch_summary.get("solution_set_deterministic_exact_match", {}),
             "critical_structure_change": batch_summary.get("critical_structure_change", {}),
             "manual_prerequisite_analysis": batch_summary.get("manual_prerequisite_analysis", {}),
             "special_risk_section_counts": special_risk.get("section_counts", {}),
             "special_risk_samples": special_risk.get("samples", {}),
             "verdict_distribution": batch_summary.get("verdict_distribution", {}),
+            "solution_set_verdict_distribution": batch_summary.get("solution_set_verdict_distribution", {}),
         },
     }
 

@@ -207,6 +207,31 @@ class ReportSchemaRegressionTests(unittest.TestCase):
         self.assertEqual(report["summary"]["level_recalibration"]["原级别"], "L3")
         self.assertEqual(report["technical_details"]["accuracy_recalibration"]["adjusted_level"], "L1")
 
+    def test_prepare_validate_json_keeps_primary_and_solution_set_quality_separate(self):
+        report = prepare_validate_json({
+            "cve_id": "CVE-2024-77777",
+            "target_version": "5.10-hulk",
+            "known_fix": "deadbeefcafebabe",
+            "overall_pass": True,
+            "summary": "验证通过",
+            "generated_vs_real": {
+                "verdict": "identical",
+                "core_similarity": 1.0,
+                "compare_source": "adapted_patch",
+                "compare_scope": "primary_fix",
+            },
+            "solution_set_vs_real": {
+                "verdict": "different",
+                "core_similarity": 0.35,
+                "compare_source": "predicted_solution_set",
+                "compare_scope": "solution_set",
+            },
+        })
+
+        self.assertEqual(report["summary"]["patch_quality"]["工具补丁与真实修复关系"], "identical")
+        self.assertEqual(report["summary"]["solution_set_quality"]["工具预测解集与实际解集关系"], "different")
+        self.assertEqual(report["technical_details"]["solution_set_vs_real"]["compare_scope"], "solution_set")
+
 
 class OutputSupportRegressionTests(unittest.TestCase):
     class _FakeGitMgr:

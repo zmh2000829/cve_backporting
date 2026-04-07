@@ -284,6 +284,7 @@ def _default_batch_validate_handler(payload: Dict[str, Any], config):
             }),
             "manual_prerequisite_analysis": batch_summary.get("manual_prerequisite_analysis", {}),
             "verdict_distribution": batch_summary.get("verdict_distribution", {}),
+            "solution_set_verdict_distribution": batch_summary.get("solution_set_verdict_distribution", {}),
         },
         "l0_l5_summary": l0_l5_summary,
         "batch_summary": batch_summary,

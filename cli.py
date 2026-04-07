@@ -2008,7 +2008,7 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
             primary_generated_vs_real["compare_source"] = primary_compare_source
             if primary_compare_note:
                 primary_generated_vs_real["note"] = primary_compare_note
-            primary_generated_vs_real["compare_scope"] = "single_fix" if len(actual_solution_commits) == 1 else "actual_solution_set"
+            primary_generated_vs_real["compare_scope"] = "single_fix" if len(known_fix_commits) == 1 else "primary_fix"
 
         predicted_solution_diff = _combine_patch_texts([
             generated_patch_for_compare,
@@ -2019,31 +2019,37 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
             or len(compare_tool_prereqs) > 0
         )
         generated_vs_real = primary_generated_vs_real
+        solution_set_vs_real = {}
         if solution_set_needed and predicted_solution_diff and local_diff:
-            generated_vs_real = _compare_generated_vs_real(
+            solution_set_vs_real = _compare_generated_vs_real(
                 predicted_solution_diff,
                 local_diff,
             )
-            generated_vs_real["compare_source"] = "predicted_solution_set"
-            generated_vs_real["compare_scope"] = "solution_set"
-            generated_vs_real["generated_components"] = {
+            solution_set_vs_real["compare_source"] = "predicted_solution_set"
+            solution_set_vs_real["compare_scope"] = "solution_set"
+            solution_set_vs_real["generated_components"] = {
                 "main_patch_source": primary_compare_source or "community_patch",
                 "tool_prereq_scope": "strong_medium_only",
                 "tool_prereq_count": len(compare_tool_prereqs),
                 "tool_prereq_commits": [p.commit_id[:12] for p in compare_tool_prereqs[:8]],
             }
-            generated_vs_real["real_components"] = {
+            solution_set_vs_real["real_components"] = {
                 "known_fix_count": len(known_fix_commits),
                 "known_prereq_count": len(known_prereqs),
                 "actual_solution_commit_count": len(actual_solution_commits),
                 "actual_solution_commits": [cid[:12] for cid in actual_solution_commits[:12]],
             }
-            generated_vs_real["note"] = (
+            solution_set_vs_real["note"] = (
                 "按“工具生成主补丁 + 工具判定的 strong/medium 前置补丁”"
                 " 对比 “实际 known_fix 集合 + known_prereqs 集合” 的整体代码修改。"
             )
+        if not generated_vs_real and solution_set_vs_real:
+            generated_vs_real = solution_set_vs_real
 
-        diff_comparison = _compare_patch_code(generated_patch_for_compare or community_diff, local_diff)
+        diff_comparison = _compare_patch_code(
+            generated_patch_for_compare or community_diff,
+            primary_local_diff or local_diff,
+        )
         root_cause = _diagnose_root_cause(diff_comparison, dryrun_detail,
                                           known_prereqs, result.dry_run)
 
@@ -2126,6 +2132,7 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
             "diff_comparison": diff_comparison,
             "generated_vs_real": generated_vs_real,
             "generated_patch_vs_primary_fix": primary_generated_vs_real if solution_set_needed else {},
+            "solution_set_vs_real": solution_set_vs_real,
             "accuracy_recalibration": accuracy_recalibration,
             "root_cause": root_cause,
             "tool_prereqs": tool_prereqs_detail,
