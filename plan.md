@@ -1,6 +1,6 @@
 # CVE Backporting Engine 执行计划
 
-> 更新：2026-04-03
+> 更新：2026-04-07
 >
 > 目标：不改变现有核心算法主干，优先解决“用户看不懂为什么这么判”的问题，让工具稳定回答三件事：
 > 1. 哪些补丁可以直接回移
@@ -22,6 +22,36 @@
 - CLI/TUI/API 虽然已经统一了主输出骨架，但展示层仍直接依赖部分 raw payload 字段，API 也缺少自描述 schema，调用方和文档仍有再次漂移风险。
 - `L1` 不应天然等于“不可直接回移”；若 DryRun 仅表现为 `context-C1 / ignore-ws` 级别漂移且没有否决证据，应回到“可直接回移 + 保留最小验证”的低风险路径。
 
+## 项目结构理解（基于代码阅读）
+
+| 层 | 关键文件 | 当前作用 | 当前主要问题 |
+|---|---|---|---|
+| 入口层 | `cli.py` / `commands/*.py` / `api_server.py` | 统一 CLI、批量命令与 HTTP API 入口 | 参数归一化、错误提示和默认行为仍分散在多处，入口之间存在再次漂移风险 |
+| 编排层 | `pipeline.py` / `agents/*.py` | 串联 `Crawler -> Analysis -> Dependency -> DryRun`，并承接 deep analysis | 早返回较多、原地修改状态较多，导致 fixed / incomplete / force-dryrun 路径不易单出口收敛 |
+| 搜索与仓库层 | `core/git_manager.py` / `agents/analysis.py` / `core/matcher.py` | 提供 git 查询、缓存、三级搜索、diff 匹配与路径映射 | 阈值和候选保留策略仍偏硬编码，基础设施失败与算法未命中容易被混在一起 |
+| 策略层 | `core/policy_engine.py` / `rules/*.py` | 负责 `base_level -> rule_hits -> final_level`，并生成 checklist 与 strategy buckets | 规则体系已可插拔，但置信度仍偏静态标签，尚未和真实样本结果做持续校准 |
+| 展示与报告层 | `services/reporting.py` / `core/report_schema.py` / `core/ui.py` / `core/ui_batch.py` | 输出 friendly JSON、TUI 面板、批量统计与 traceability | 用户能看到结论，但展示层仍直接读取 raw payload，术语词典尚未做到单一真源 |
+
+## 本轮补充建议（聚焦用户体验与准确率）
+
+### 用户体验
+
+| 建议 | 具体抓手 | 预期价值 |
+|---|---|---|
+| 单条结果首屏做成“决策卡” | 在 CLI/TUI/API 顶层固定展示 `当前状态 / 最终级别 / 主要阻塞 / 下一动作 / 三条关键证据` | 让维护者在 10 秒内完成 triage，而不是先钻 raw JSON |
+| 搜索 near-miss 明确可见 | 把 `L2/L3` 最接近候选、相似度、阈值差距和落败原因直接返回 | 减少“没找到 = 目标仓没有修复”的误解，也方便调参 |
+| 批量结果直接变成工作清单 | 按“可直接处理 / 需补前置 / 高风险需审批 / 情报不足待补”分组，并附典型样本 | 从统计报表升级为维护者可执行工作面板 |
+| 术语和等级说明统一出厂 | 把 `L0-L5 / base_level / final_level / verified-direct / incomplete` 的用户口径收敛成同一词典 | 避免 README、presentation、CLI、API 各说各话 |
+
+### 准确率
+
+| 建议 | 具体抓手 | 预期价值 |
+|---|---|---|
+| 建低级别真实样本回归集 | 为 `L0/L1` 补正负例 patch corpus，并把期望 `final_level / direct_backport / prerequisite` 固化进回归 | 避免“看起来命中 strict，就被误放进低风险区” |
+| 搜索阈值改成 profile + 回放验证 | 将 `0.85 / 0.70` 阈值、candidate limit、路径扩展策略做成 profile，并支持离线回放对比 | 用真实样本选 recall/precision，而不是靠经验常数 |
+| 置信度从静态标签变成经验校准 | 将 `validate / batch-validate` 的真实通过率、误抬升情况回灌到 confidence 分段 | 让“为什么这么判”之外，再补上“系统有多大把握” |
+| 基础设施失败与算法未命中分桶 | 把 cache miss、git 失败、branch 不匹配、diff 拉取失败与真正搜索未命中拆开统计 | 防止把环境问题误判成算法能力问题 |
+
 ## 已完成
 
 | 编号 | 事项 | 状态 | 说明 |
@@ -37,7 +67,7 @@
 | D9 | `validate`/API 支持 mainline override | ✅ | 已支持 `mainline_fix / mainline_intro` 跳过 MITRE 情报依赖 |
 | D10 | HTTP API 主链路 | ✅ | `/api/analyze`、`/api/validate`、`/api/batch-validate` 已打通 |
 | D11 | 批量并行验证 | ✅ | `batch-validate` 已支持 `workers`，单仓建议 1-2 |
-| D12 | L5 `verified-direct` | ✅ | 已支持绕过 `git apply` 的内存级定位、验证和 diff 重建 |
+| D12 | `verified-direct` 内存直改路径 | ✅ | 已支持绕过 `git apply` 的内存级定位、验证和 diff 重建 |
 | D13 | 批量统计兼容 friendly JSON | ✅ | 已修复 `batch-validate` 汇总层对 friendly JSON 的兼容问题，避免真实结果被统计成全 0 |
 | D14 | P0 / P5 本轮真实回归 | ✅ | 2026-04-02 已完成 `unittest discover`、真实 `analyze / validate / batch-validate / invalid-request`、以及 `server --config` 启动验证 |
 
@@ -62,6 +92,7 @@
 | P1-3 | L1 “轻微漂移”边界样本化 | ✅ | 已新增 `l1_light_drift_sample`，可对注释漂移、日志文本漂移、等价宏替换、局部变量重命名给出正向样本证据，避免 L1 只剩模糊描述 |
 | P1-4 | 固定“可直接回移”的准入说明 | ⏳ | 需要让 L0/L1 输出明确的“为什么可直回”，而不是只输出“为什么不能直回” |
 | P1-5 | 低级别准确率回归集 | ⏳ | 现有单测更偏规则逻辑，需要补真实 patch 样本回归，特别是 L0/L1 正负例 |
+| P1-6 | 置信度经验校准 | ⏳ | `rules/level_policies.py` 里的 `high / medium / low` 仍偏静态标签；建议结合 `validate / batch-validate` 的真实命中率、误抬升率和 incomplete 比例做经验校准 |
 
 ## P2
 
@@ -99,6 +130,7 @@
 | P4-6 | 搜索 near-miss 候选可观测性 | ⏳ | `analysis.py` 当前只保留有限 top candidates，且“为什么没过阈值”表达较弱；需要把接近命中的 subject/diff 候选、分数和落败原因显式输出，方便调参和人工复核 |
 | P4-7 | 搜索阈值与 profile 配置化 | ⏳ | `L2 0.85 / L3 0.70` 仍是代码内经验阈值；建议沉淀为 profile 配置，并记录到结果元数据，避免不同环境下 recall/precision 无法解释 |
 | P4-8 | Git / cache / search 失败原因分类 | ⏳ | 当前 cache miss、git 命令失败、branch 不匹配、diff 拉取失败经常被折叠成“没找到”；需要结构化区分失败原因，避免把基础设施问题误当成算法未命中 |
+| P4-9 | 搜索 profile 回放实验台 | ⏳ | `AnalysisAgent` 当前把 threshold、candidate limit、path expansion 策略绑定在代码路径里；建议增加 profile 回放与对比输出，支持用真实样本评估阈值调整收益 |
 
 ## P5
 
@@ -141,6 +173,8 @@
 | P6-12 | 结果可追溯性 | ✅ | `analyze / validate / batch-validate` 报告已新增 `traceability`，显式记录 `report/schema version`、`generated_at`、规则 profile/开关、目标仓 `HEAD/branch/path/remote`、数据源类型与时间戳；输出目录与补丁路径也会在 `artifacts` 中回写 |
 | P6-13 | UI 展示 view-model 层 | ⏳ | `core/ui.py` 和 `core/ui_batch.py` 仍直接读取大量 `validation_details / level_decision / result_status` 原始字段；建议增加稳定的 presentation view-model，降低展示层对底层 schema 细节的耦合 |
 | P6-14 | API schema / 自描述能力 | ⏳ | 当前 API 已能返回结构化错误，但还缺请求/响应 schema、示例和 capability 描述；建议补 `/api/schema` 或 OpenAPI-lite 输出，减少调用方靠 README 猜字段 |
+| P6-15 | 单条结果决策卡 | ⏳ | CLI/TUI/API 首屏建议固定输出“当前状态 / 最终级别 / 主要阻塞 / 下一动作 / 三条关键证据”，让结果更像可执行判断而不是技术明细转储 |
+| P6-16 | 术语词典与展示协议单一真源 | ⏳ | `presentation`、README、`services/reporting.py`、`core/ui.py` 对 L0-L5 和历史 DryRun 层级仍可能存在双口径；建议抽统一术语词典和展示协议，减少解释漂移 |
 
 ## 建议优先顺序
 
@@ -148,12 +182,12 @@
 |---|---|---|
 | 第一阶段 | P0-7 / P6-3 / P6-1 | 先把 pipeline 单出口、fixed/incomplete 结论补齐和边界态表达收拢，避免主链路再出现“有结果但解释空心化” |
 | 第二阶段 | P2-6 / P2-7 / P2-8 / P1-2 | 已完成第一轮降误报，当前重点转向继续扩真实样本和低级别负例，防止宽匹配、伪调用链和弱语义命中继续把级别虚高 |
-| 第三阶段 | P4-6 / P4-7 / P4-8 | 把搜索阈值、near-miss 候选和基础设施失败原因做成可观测、可解释、可调参的层，先解决“为什么没找到/为什么差一点命中” |
-| 第四阶段 | P1-1 / P1-3 / P1-4 / P1-5 | 把 L0/L1 做成真正可信的低风险处理区，并补齐“为什么可以直接回移”的正向说明 |
+| 第三阶段 | P4-6 / P4-7 / P4-8 / P4-9 | 把搜索阈值、near-miss 候选和基础设施失败原因做成可观测、可解释、可调参的层，先解决“为什么没找到/为什么差一点命中” |
+| 第四阶段 | P1-1 / P1-3 / P1-4 / P1-5 / P1-6 | 把 L0/L1 做成真正可信的低风险处理区，并补齐“为什么可以直接回移”以及“系统有多大把握”的正向说明 |
 | 第五阶段 | P3-2 / P3-3 / P3-4 / P3-5 | 把“需不需要关联补丁”做成用户可执行判断，并能沉淀长期召回趋势 |
 | 第六阶段 | P5-13 / P5-14 / P5-15 / P5-16 / P5-17 | 继续拆分 orchestration、schema 和入口归一化层，避免职责交叉重新把输出和实现拖回双轨 |
 | 第七阶段 | P5-10 / P5-11 / P5-12 / P5-18 | 把远程情报、cache、worktree、telemetry 做成可审计的工程底座，保证真实批量跑数稳定 |
-| 第八阶段 | P6-4 / P6-8 / P6-9 / P6-13 / P6-14 | 把输出结果做成真正的维护者工作清单，并给 CLI/TUI/API 提供稳定展示层和自描述接口 |
+| 第八阶段 | P6-4 / P6-8 / P6-9 / P6-13 / P6-14 / P6-15 / P6-16 | 把输出结果做成真正的维护者工作清单，并给 CLI/TUI/API 提供稳定展示层、统一术语和自描述接口 |
 
 ## 北极星结果
 
@@ -166,3 +200,4 @@
 | `L0/L1` 变成真正可信的低风险处理区 | ⏳ | 还需要更强的准入条件、更硬的否决条件和更好的回归集 |
 | 工程结构允许后续持续迭代而不反复引入兼容问题 | ⏳ | 需要拆巨石文件、统一 schema、补齐真实链路回归与异常模型 |
 | 用户能把结果直接当作回移工作清单使用 | ⏳ | 还需要补边界状态表达、批量分组视图、审查 checklist 和结果追溯信息 |
+| 用户在 CLI / API / presentation 看到的是同一套等级语言 | ⏳ | 还需要统一术语词典、展示协议和历史 DryRun 术语对外说明 |

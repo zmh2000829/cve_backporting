@@ -67,9 +67,9 @@ LEVEL_POLICIES = [
     LevelPolicy(
         level="L5",
         methods=[],
-        strategy="L5 回退/未知路径：DryRun 缺失、方法未识别或证据链断裂时，按最高谨慎度处理。",
-        review_mode="fallback-review",
-        next_action="保留证据，走人工确认或补充样本验证。",
+        strategy="L5 最高难度通道：当已知自动化路径不足以形成稳定证明，或方法未知、证据链断裂时，按最高复杂度、最高人工介入级别处理。",
+        review_mode="expert-escalation",
+        next_action="暂停自动决策，补齐证据，并由资深维护者主导复核与验证。",
         harmless_allowed=False,
         confidence_with_llm="low",
         confidence_without_llm="low",

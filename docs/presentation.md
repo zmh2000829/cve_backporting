@@ -350,22 +350,24 @@ PathMapper 双向翻译 → 自动发现等价路径 → 正确匹配
 ```
 补丁输入
   │
-  ├─ L0:   Strict ──────────── 上下文完全一致    → 最理想情况
+  ├─ Strict ────────────────── 上下文完全一致    → 最理想情况
   │                            失败 ↓
-  ├─ L1:   Context-C1 ──────── 行号小幅偏移      → 附近有少量新增代码
+  ├─ Context-C1 ────────────── 行号小幅偏移      → 附近有少量新增代码
   │                            失败 ↓
-  ├─ L2:   3-Way Merge ─────── 双方都有修改      → 同区域非冲突改动
+  ├─ 3-Way Merge ───────────── 双方都有修改      → 同区域非冲突改动
   │                            失败 ↓
-  ├─ L5:   Verified-Direct ─── ⭐ 绕过 git apply  → 宏重命名/空白差异/上下文偏移
+  ├─ Verified-Direct ───────── ⭐ 绕过 git apply → 宏重命名/空白差异/上下文偏移
   │                            失败 ↓
-  ├─ L3:   Regenerated ─────── context 被打断    → 企业插入自定义代码
+  ├─ Regenerated ───────────── context 被打断    → 企业插入自定义代码
   │                            失败 ↓
-  ├─ L3.5: Zero-Context ────── 零上下文 diff     → 上下文严重损坏
+  ├─ Zero-Context ──────────── 零上下文 diff     → 上下文严重损坏
   │                            失败 ↓
-  ├─ L4:   Conflict-Adapted ── 代码发生实质变更   → removed 行在目标已不同
+  ├─ Conflict-Adapted ──────── 代码发生实质变更   → removed 行在目标已不同
   │                            失败 ↓
-  └─ L6:   AI-Generated ────── 🤖 所有规则失效   → 跨版本大面积重构
+  └─ AI-Generated ──────────── 🤖 所有规则失效   → 跨版本大面积重构
 ```
+
+> 注：上图是 DryRun 的内部方法链，不是新增用户等级。对外最终只使用第 13 章的 `L0-L5`；`Verified-Direct / Zero-Context / AI-Generated` 都只是内部适配方法名。
 
 ---
 
@@ -520,7 +522,7 @@ L4 Conflict-Adapted:
 
 ---
 
-# L5 Verified-Direct — 内存直改，绕过 git apply ⭐
+# Verified-Direct — 内存直改，绕过 git apply ⭐
 
 ### 解决场景
 
@@ -533,7 +535,7 @@ L4 Conflict-Adapted:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│  L0 ✘ → L1 ✘ → L2 ✘ → 触发 L5 Verified-Direct                     │
+│  Strict ✘ → Context-C1 ✘ → 3-Way ✘ → 触发 Verified-Direct       │
 │                                                                     │
 │  Step 1: 读取目标文件内容到内存                                       │
 │  Step 2: 逐 hunk 定位变更点 (复用 S1-S7 七策略搜索)                  │
@@ -556,7 +558,7 @@ L4 Conflict-Adapted:
 hfsplus_uni2asc() 参数列表不同           缩进从 tab 改为 space
 git apply L0-L2 全部失败                 传统做法: 束手无策
 
-L5 Verified-Direct:
+Verified-Direct:
   → 符号映射检测到 HFSPLUS_UNICODE_MAX_LEN → HFSPLUS_MAX_STRLEN
   → 自动替换 added 行中的宏名
   → 适配缩进风格
@@ -567,7 +569,7 @@ L5 Verified-Direct:
 
 ---
 
-# L6 AI-Generated — 智能兜底 🤖
+# AI-Generated — 智能兜底 🤖
 
 ### 解决场景
 
@@ -581,7 +583,8 @@ L5 Verified-Direct:
 
 ```
 ┌────────────────────────────────────────────────────────────────────┐
-│  L0 ✘ → L1 ✘ → L2 ✘ → L5 ✘ → L3 ✘ → L4 ✘ → 触发 L6             │
+│  Strict ✘ → Context-C1 ✘ → 3-Way ✘ → Verified-Direct ✘          │
+│  → Regenerated ✘ → Conflict-Adapted ✘ → 触发 AI-Generated       │
 │                                                                    │
 │  输入 LLM:                                                         │
 │    ├─ mainline patch (原始修复意图)                                 │
@@ -611,20 +614,20 @@ L5 Verified-Direct:
 ┌────────────────┬──────────────────────────────────────────────┐
 │   Level        │  ██████████████████████████████████████████  │
 ├────────────────┼──────────────────────────────────────────────┤
-│ L0 Strict      │  ████████████                    ~20%        │
-│ L1 Context-C1  │  █████████                       ~15%        │
-│ L2 3-Way       │  ██████                          ~10%        │
-│ L5 Verified ⭐ │  ██████████████████████          ~15%  ←NEW  │
-│ L3 Regen       │  ████████████████████            ~25%  ←关键 │
-│ L3.5 Zero-Ctx  │  █████                           ~5%         │
-│ L4 Adapted     │  █████                           ~5%         │
-│ L6 AI 🤖      │  ███                             ~3%         │
+│ Strict         │  ████████████                    ~20%        │
+│ Context-C1     │  █████████                       ~15%        │
+│ 3-Way          │  ██████                          ~10%        │
+│ Verified ⭐    │  ██████████████████████          ~15%  ←NEW  │
+│ Regenerated    │  ████████████████████            ~25%  ←关键 │
+│ Zero-Context   │  █████                           ~5%         │
+│ Adapted        │  █████                           ~5%         │
+│ AI 🤖          │  ███                             ~3%         │
 ├────────────────┼──────────────────────────────────────────────┤
 │ 自动化率       │  █████████████████████████████████ ~95%      │
 │ 仍需纯人工     │  ███                              ~5%       │
 └────────────────┴──────────────────────────────────────────────┘
 
-L5 Verified-Direct + L3 Regenerated 联合解决了 ~40% 的困难补丁
+Verified-Direct + Regenerated 联合解决了 ~40% 的困难补丁
 ```
 
 ---
@@ -1114,8 +1117,8 @@ score = 0.5 × S_structure  (SequenceMatcher 编辑距离)
 │                                                                     │
 │  DryRun Agent                                                       │
 │    ├─ L0-L2: Git 内置策略                                            │
-│    ├─ L5: Verified-Direct  ←── 内存直改 + 符号映射 + 缩进适配 ⭐     │
-│    ├─ L3: Regenerated       ←── 七策略搜索 + 代码语义匹配            │
+│    ├─ Verified-Direct ←───── 内存直改 + 符号映射 + 缩进适配 ⭐        │
+│    ├─ Regenerated   ←─────── 七策略搜索 + 代码语义匹配               │
 │    │     ├─ S1: 精确序列                                             │
 │    │     ├─ S2: 锚点行定位                                           │
 │    │     ├─ S3: 函数作用域                                           │
@@ -1124,9 +1127,9 @@ score = 0.5 × S_structure  (SequenceMatcher 编辑距离)
 │    │     ├─ S6: 分段 context                                         │
 │    │     ├─ S7: 逐行投票                                             │
 │    │     └─ 兜底: CodeMatcher 语义匹配                               │
-│    ├─ L3.5: Zero-Context   ←── 零上下文 diff + --unidiff-zero        │
-│    ├─ L4: Conflict-Adapted ←── 冲突分析 + 严重性分级                 │
-│    └─ L6: AI-Generated 🤖 ←── AIPatchGenerator                     │
+│    ├─ Zero-Context ←─────── 零上下文 diff + --unidiff-zero           │
+│    ├─ Conflict-Adapted ←─── 冲突分析 + 严重性分级                    │
+│    └─ AI-Generated 🤖 ←──── AIPatchGenerator                        │
 │                                                                     │
 │  每个算法都在特定 Agent 的特定阶段被调用                              │
 │  形成 情报→搜索→依赖→定位→适配→验证 的完整算法链路                   │
@@ -1152,7 +1155,7 @@ score = 0.5 × S_structure  (SequenceMatcher 编辑距离)
 | L0-L5 DryRun | 确定性算法 | ✅ 启用 | **核心 — 可重现、可解释** |
 | 代码语义匹配 | SequenceMatcher | ✅ 启用 | 纯算法，非 AI |
 | Diff 包含度 | Multiset 计数 | ✅ 启用 | 纯算法，非 AI |
-| **L6 AI 补丁生成** | **LLM (GPT-4o等)** | ❌ 可选 | 规则全部失败后的最后手段 |
+| **AI 补丁生成** | **LLM (GPT-4o等)** | ❌ 可选 | 规则全部失败后的最后手段 |
 | **LLM 根因分析** | **LLM** | ❌ 可选 | 验证失败时的辅助诊断 |
 
 ### AI 补丁生成流程
@@ -1532,7 +1535,7 @@ python cli.py batch-validate --file data.json --target 5.10-hulk --deep
     },
     "patch_applicability": {
       "conclusion": "补丁可直接应用",
-      "method": "verified-direct (L5 内存直改)",
+      "method": "verified-direct (内存直改)",
       "reason": "L0-L2 因宏名差异失败，L5 自动检测到 HFSPLUS_UNICODE_MAX_LEN
                 → HFSPLUS_MAX_STRLEN 的符号映射，在内存中完成适配",
       "direct_applicable": true
@@ -1567,7 +1570,7 @@ python cli.py batch-validate --file data.json --target 5.10-hulk --deep
   │ 2. 在目标仓库中未找到修复补丁 → 需要回合                        │
   │ 3. 前置依赖分析: 无强依赖，可独立合入                            │
   │ 4. DryRun: L0/L1/L2 因宏名差异失败                             │
-  │    → L5 Verified-Direct 检测到符号映射，自动适配成功             │
+  │    → Verified-Direct 检测到符号映射，自动适配成功               │
   │ 5. 结论: 可直接合入，补丁已验证                                  │
   │                                                                 │
   │ → 开发者一目了然: 为什么可以直接合入，工具做了什么              │
@@ -1595,7 +1598,7 @@ python cli.py batch-validate --file data.json --target 5.10-hulk --deep
 | 缓存增量更新 | **< 5 秒** | 自动检测 rebase 并降级全量 |
 | 单 hunk 定位 | **< 100ms** | 锚点行 + 偏移传播 |
 | 路径映射 | **8+ 内置规则** | 支持自定义扩展 |
-| DryRun 策略 | **7+ 级** | Strict → C1 → 3way → Verified-Direct → Regen → Zero-Ctx → Adapted |
+| DryRun 策略 | **7+ 级** | Strict → C1 → 3way → 内部 Verified-Direct → Regen → Zero-Ctx → Adapted |
 
 ### 闭环验证框架
 
@@ -1753,7 +1756,7 @@ Step 4: _apply_symbol_mapping 对所有 added 行执行替换
 
 ---
 
-# L5 Verified-Direct vs git apply：为什么要绕过？
+# Verified-Direct vs git apply：为什么要绕过？
 
 ### `git apply` 的致命局限
 
@@ -1768,10 +1771,10 @@ git apply 的匹配策略:
      ✘ 行号大幅偏移 + context 全变的定位
 ```
 
-### L5 的优势
+### Verified-Direct 的优势
 
 ```
-L5 Verified-Direct:
+Verified-Direct:
   1. 用七策略搜索引擎定位 hunk 变更点 → 不依赖 context 连续性
   2. 模糊匹配 removed 行 (similarity ≥ 0.30) → 容忍微小差异
   3. 符号映射 → 自动处理宏重命名
@@ -2027,7 +2030,7 @@ L5 Verified-Direct:
 
   L0 Strict 通过:     高置信 → 社区原始补丁，context 完全一致
   L1-L2 通过:         高置信 → git 自身机制保证
-  L5 Verified-Direct:  中高置信 → 核心改动不变，context 适配
+  Verified-Direct: 中高置信 → 核心改动不变，context 适配
   L3 Regenerated:     中等置信 → 重建了 context，需确认定位准确
   L4 Conflict-Adapted: 低置信 → 有代码冲突，需人工审查语义
 
@@ -2242,9 +2245,10 @@ Step 5: 产出可答辩结论（工具自动生成 narrative）
 
 # 一句话先讲清：L0-L5 到底是什么？
 
-`L0-L5` 不是“补丁难度分”，也不是单独的“语义风险分”。
+`L0-L5` 不是“只看改了多少行”的粗糙难度分，也不是“DryRun 引擎内部层数编号”。
 
-它表达的是：工具基于可应用性证明、依赖稳定性、风险信号和审批要求，最终把样本送进哪一条执行 / 审查通道。
+它表达的是：系统综合 `可应用性证明 + 依赖稳定性 + 语义风险 + 审批要求` 之后，最终把样本送进哪一条执行 / 审查通道。
+对维护者来说，它必须按**严格递进阶梯**来理解：`L0` 最容易处理，`L5` 最难处理。
 
 ```text
 final_level = max(base_level, 所有命中规则给出的 level_floor)
@@ -2253,21 +2257,51 @@ final_level = max(base_level, 所有命中规则给出的 level_floor)
 必须统一三句话：
 
 - `strict` 成功，不代表最终一定是 `L0`
-- `verified-direct` 属于已识别基线方法，当前归入 `L3`
-- `L5` 只表示“自动化证明链最弱”，不是“语义一定最危险”
+- `base_level` 看“补丁怎么落地”，`final_level` 看“该走哪条审查通道”
+- `L0 -> L5` 是递进升级链，`L5` 就是最高难度、最高人工介入级别
 
 ---
 
-# L0-L5 总表：分别对应什么，什么时候升级，推荐自动还是人工
+# Rules 规则调整：从“命中几条规则”升级为“通道编排层”
 
-| 级别 | 分别对应什么 | 遇到哪些关键结构/信号会升级 | 推荐处置 | 自动 / 人工 |
-|---|---|---|---|---|
-| **L0** | 证据最强，可直接进入回移通道 | 只要出现锁、生命周期、状态机、结构体字段、错误路径、传播或关联补丁信号，就会被抬升 | 直接回移 + 最小编译/回归验证 | **自动为主** |
-| **L1** | 轻微漂移，但补丁意图仍清晰 | 注释漂移、日志文本漂移、等价宏替换、局部变量 rename 通常仍留在 L1；如果出现 API 变化或语义风险会继续升级 | 快速复核后执行 | **自动建议 + 轻量人工** |
-| **L2** | 已能适配，但证据不足以继续停在低风险区 | 大改动、返回路径变化、错误路径、调用扇出、中等依赖都常把样本推到 L2 | 逐 hunk 核对后再决定 | **人工核对为主** |
-| **L3** | 已进入语义敏感区，不能再按低风险处理 | 锁与同步、生命周期/引用计数、状态机、结构体字段/数据路径、强依赖、重建/直接验证路径 | 聚焦审查 + 回归测试 | **人工主导** |
-| **L4** | 风险已从局部补丁扩散到更大范围 | 冲突适配、关键结构叠加调用链传播、明显链路牵连 | 资深维护者审批 | **人工审批** |
-| **L5** | 自动化证明链最弱，只能谨慎兜底 | DryRun 缺失、方法未知、情报不完整、证据链断裂 | 暂不自动决策，补证据后再判断 | **人工兜底** |
+```text
+                         ┌──────────────────────────────────┐
+                         │ Patch / Repo / DryRun 证据流     │
+                         │ search + dependency + risk scan  │
+                         └────────────────┬─────────────────┘
+                                          │
+                                          ▼
+                           base_level = DryRun apply 基线
+                                          │
+            ┌─────────────────────────────┼─────────────────────────────┐
+            ▼                             ▼                             ▼
+   admission rules                veto rules                    risk_profile rules
+   给 L0/L1 正向证据              low_level_veto                标出必须升级审查的
+   解释“为什么可以快走”           direct_backport_veto          锁/状态/字段/传播风险
+            └─────────────────────────────┬─────────────────────────────┘
+                                          ▼
+                 final_level + direct_backport + prerequisite + next_action
+                                          ▼
+      Deterministic Fast-Track / Quick Review / Controlled Review / Approval
+```
+
+- `admission`：给 L0/L1 正向证据，证明“为什么可以快走”
+- `low_level_veto`：阻止样本误掉进低风险区
+- `direct_backport_veto`：阻止系统轻率给出“可直接回移”
+- `risk_profile`：把锁、生命周期、状态机、字段、错误路径、调用链等真正危险的东西显式抬升出来
+
+---
+
+# L0-L5 总表：从最容易到最困难，严格递进
+
+| 级别 | 通道定位 | 用户看到的核心含义 | 典型进入条件 / 升档信号 | 推荐动作 | 执行模式 |
+|---|---|---|---|---|---|
+| **L0** | **Deterministic Fast-Track** | 文本可原样落地，且没有额外否决或高风险信号 | `strict` 命中，同时满足 `direct_backport_candidate`；一旦出现锁、状态机、字段、错误路径、传播或关联补丁信号，就会立刻升档 | 直接回移，并保留最小编译/回归验证 | **自动为主** |
+| **L1** | **Low-Drift Quick Review** | 补丁主体没变，只是上下文或表示层有轻微漂移 | `context-C1 / ignore-ws / verified-direct-exact` 这类轻漂移基线，且命中 `l1_light_drift_sample`；若出现 API 变化或语义风险，会继续升档 | 快速复核后执行 | **自动建议 + 轻量人工** |
+| **L2** | **Controlled Review** | 已能适配，但证据还不足以继续留在低风险通道 | 大改动、返回路径变化、错误路径、中等依赖、API surface 变化都常把样本推到这里 | 逐 hunk 对照主线后再决定 | **人工核对为主** |
+| **L3** | **Semantic Review** | 系统已经看到了语义敏感点，不能再按低风险处理 | `regenerated / verified-direct` 基线、锁与同步、生命周期/引用计数、状态机、结构体字段/数据路径、强依赖等 | 聚焦审查 + 定向回归测试 | **人工主导** |
+| **L4** | **Approval Gate** | 风险已从局部 patch 扩散到链路级或审批级 | `conflict-adapted`、关键结构叠加调用链传播、明显链路牵连、强冲突适配 | 由资深维护者审批后处理 | **人工审批** |
+| **L5** | **Highest-Difficulty Escalation** | 系统无法再把它留在可控自动化通道里，这是最难、最重、最需要专家接管的级别 | 已知自动化路径走到边界、方法未知、上游情报不足、证据链断裂，或高风险/高不确定性叠加到系统无法稳定拍板 | 暂停自动落地，先补证据、拆风险，再由资深维护者主导验证与决策 | **专家主导** |
 
 ---
 
@@ -2347,11 +2381,11 @@ final_level = max(base_level, 所有命中规则给出的 level_floor)
 
 # 对外汇报时建议直接这样讲
 
-- `L0-L5` 是“自动化证明强度 + 风险暴露程度”的综合分流
+- `L0-L5` 是“自动化证明强度 + 风险暴露程度 + 处理难度”的综合分流
 - `L0/L1` 可以更快处理，但不等于可以省掉判断
 - `L2` 已经进入明确的人审通道
 - `L3/L4` 代表系统已经看到了关键风险点，需要聚焦审查或审批
-- `L5` 代表当前自动化证据不足，系统不能替人拍板
+- `L5` 代表系统已进入最高难度处理区，必须由资深维护者接管
 
 ---
 
@@ -2483,7 +2517,7 @@ final_level = max(base_level, 所有命中规则给出的 level_floor)
 |--------|-----------|
 | Diff 包含度算法 | Squash commit 匹配失效 |
 | 锚点行定位 + 七策略搜索 | Context 序列断裂 |
-| L5 Verified-Direct 内存直改 | 宏重命名/空白差异导致 git apply 失败 |
+| Verified-Direct 内存直改 | 宏重命名/空白差异导致 git apply 失败 |
 | 跨 hunk 偏移传播 | 多 hunk 文件精度递增 |
 | Analysis Narrative | 分析过程不透明，开发者看不懂 |
 | **v2.0 关联补丁完整分析** | 只给结论不给理由，无法追溯 |

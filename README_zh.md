@@ -57,7 +57,7 @@
 - **L3 Regenerated**：重建上下文补丁
 - **L4 Conflict-Adapted**：冲突分析后适配生成
 
-> 可选扩展：在 AI 开启时可进入 **L5 AI-Generated** 进行模型辅助补丁生成。
+> 可选扩展：在 AI 开启时可进入 **AI-Generated** 路径进行模型辅助补丁生成。
 
 ### 4) 七层工程化算法能力，覆盖复杂差异
 在核心五层 DryRun 之外，工程实现整合了更细粒度策略（如 Verified-Direct、Zero-Context 等），形成多路径算法体系，显著提升在企业分支中的命中与适配成功率。
@@ -240,7 +240,7 @@ final_level = max(base_level, 所有命中规则给出的 level_floor)
 
 - `strict` 成功，不代表最终一定是 `L0`
 - `verified-direct` 当前属于 `L3` 的基线方法，不是 `L5`
-- `L5` 只用于未知方法、DryRun 缺失或证据链断裂的兜底场景
+- `L0 -> L5` 必须按递进阶梯理解，`L5` 是最高难度、最高人工介入级别
 
 #### 当前代码中的默认定义
 
@@ -251,7 +251,7 @@ final_level = max(base_level, 所有命中规则给出的 level_floor)
 | `L2` | `3way` | 中等风险适配，证据不足以停留在低级别 | `targeted-review` | 逐 hunk 核对调用点、返回路径和依赖 |
 | `L3` | `regenerated` / `verified-direct` | 语义敏感变更，必须做聚焦审查 | `focused-review` | 重点审查锁、字段、状态机、回归测试 |
 | `L4` | `conflict-adapted` | 高风险牵连，已进入传播或冲突适配场景 | `manual-approval` | 资深维护者审批，显式看传播链 |
-| `L5` | unknown / missing | 回退或未知路径，证据链最弱 | `fallback-review` | 保留证据，走人工确认或补样本验证 |
+| `L5` | unknown / missing | 已进入最高难度处理区，系统无法稳定自动拍板 | `expert-escalation` | 暂停自动决策，补齐证据，并由资深维护者主导复核与验证 |
 
 #### 汇报时建议这样解释
 
@@ -262,7 +262,7 @@ final_level = max(base_level, 所有命中规则给出的 level_floor)
 | `L2` | 已能适配，但证据不足以继续停在低风险区，需要人工逐 hunk 核对 |
 | `L3` | 已碰到关键语义风险，不能再按低风险回移处理，必须做聚焦审查和回归测试 |
 | `L4` | 风险已经从局部 patch 扩散到调用链或冲突适配，需要资深维护者审批 |
-| `L5` | 自动化证明最弱，不代表一定最危险，但系统不能替人拍板 |
+| `L5` | 最难处理的级别，说明系统已经无法稳定自动拍板，必须由资深维护者接管 |
 
 #### `base_level`、`final_level`、`direct_backport` 为什么必须分开看
 

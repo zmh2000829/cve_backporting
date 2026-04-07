@@ -61,22 +61,22 @@ The core innovation — a progressive fallback architecture that maximizes autom
 ```
 Patch Input
   │
-  ├─ L0:   Strict ──────────── Exact context match (git apply --check)
-  ├─ L1:   Context-C1 ──────── Relaxed context (git apply -C1)
-  ├─ L2:   3-Way Merge ─────── Three-way merge with base blob
-  ├─ L5:   Verified-Direct ─── ⭐ In-memory file modification, bypass git apply
-  ├─ L3:   Regenerated ─────── Anchor-line positioning + context rebuild
-  ├─ L3.5: Zero-Context ────── Minimal diff with --unidiff-zero
-  ├─ L4:   Conflict-Adapted ── Hunk-level conflict analysis + adaptation
-  └─ L6:   AI-Generated ────── 🤖 LLM-assisted patch generation (optional)
+  ├─ Strict ────────────────── Exact context match (git apply --check)
+  ├─ Context-C1 ────────────── Relaxed context (git apply -C1)
+  ├─ 3-Way Merge ───────────── Three-way merge with base blob
+  ├─ Verified-Direct ───────── ⭐ In-memory file modification, bypass git apply
+  ├─ Regenerated ───────────── Anchor-line positioning + context rebuild
+  ├─ Zero-Context ──────────── Minimal diff with --unidiff-zero
+  ├─ Conflict-Adapted ──────── Hunk-level conflict analysis + adaptation
+  └─ AI-Generated ──────────── 🤖 LLM-assisted patch generation (optional)
 ```
 
-**Level 5 (Verified-Direct)** — the newest breakthrough — bypasses `git apply` entirely:
+**Verified-Direct** — the newest breakthrough — bypasses `git apply` entirely:
 - **In-Memory Modification** — Reads target file, locates hunks, applies changes directly in Python
 - **Symbol/Macro Mapping** — Auto-detects renamed macros/constants across codebase versions
 - **Indentation Adaptation** — Matches target file's whitespace style (tabs/spaces/width)
 
-**Level 3 (Regenerated)** introduces three core algorithms:
+**Regenerated** introduces three core algorithms:
 - **Anchor-Line Positioning** — Single-line search immune to context sequence interruption by injected enterprise code
 - **Line-by-Line Voting** — Statistical mode-based sequence positioning using per-line position estimates
 - **Cross-Hunk Offset Propagation** — Accumulated offset from prior hunks improves subsequent search precision
@@ -151,11 +151,11 @@ Default scenario meanings:
 - **L2**: medium-risk merge/adaptation or large-change/call-chain warnings
 - **L3**: semantic-sensitive changes, such as critical structures or regenerated context; focused review required
 - **L4**: high-risk propagation, conflict adaptation, or critical changes spread along caller/callee chains; manual approval required
-- **L5**: verified-direct / unknown fallback path; lowest confidence
+- **L5**: highest-difficulty escalation lane; expert takeover required
 
 #### How To Read L0-L5 Correctly
 
-`L0-L5` is not a raw patch-difficulty score and not a pure semantic-risk score.
+`L0-L5` is not a raw line-count score and not an internal DryRun layer number.
 It is an **operational review tier** derived from three signals together:
 
 - **Applicability confidence**: how deterministic the DryRun baseline was
@@ -165,7 +165,7 @@ It is an **operational review tier** derived from three signals together:
 In other words:
 
 - `strict != always L0`
-- `verified-direct != always semantically worst`
+- `L0 -> L5` must be read as a strict escalation ladder
 - `single-line != low risk`
 
 The final level should be read with:
@@ -186,14 +186,14 @@ This means the baseline says "how the patch applied", while the final level says
 | **L2** | Caution lane for medium adaptation or medium warnings | `3way`, or L0/L1 promoted by rules | Core patch still looks structurally close, but evidence is no longer strong enough for low-level handling | Large diff warning, API-surface drift, error-path drift, fanout warning, medium prerequisite evidence | Do targeted hunk review and compare affected call sites / return paths |
 | **L3** | Semantic-sensitive lane | `regenerated`, or lower baseline promoted upward | A critical semantic dimension is touched, or prerequisite certainty becomes blocking | Locking/lifetime/state-machine/struct-field changes, strong prerequisite requirement, regenerated context | Do focused code review plus subsystem-specific regression tests |
 | **L4** | High-risk propagated lane | `conflict-adapted`, or critical changes promoted again | Critical semantic change is no longer local; it propagates or combines with hard veto signals | Critical structures plus caller/callee spread, conflict adaptation, stacked high-risk evidence | Require senior maintainer approval and explicit propagation review |
-| **L5** | Fallback / weakest-proof lane | `verified-direct`, unknown, or missing baseline | The engine could preserve intent, but the proof chain is weakest or bypasses normal apply semantics | In-memory verified adaptation, unknown baseline, fallback path | Preserve evidence, compare with upstream patch manually, and do stronger validation before merge |
+| **L5** | Highest-difficulty escalation lane | unknown or missing baseline, or any result the engine cannot stabilize into a lower lane | The engine can no longer keep the case in a controlled automated lane; this is the hardest tier to process safely | Unknown baseline, broken proof chain, missing intel, unresolved high-uncertainty path | Stop automatic landing, collect more evidence, and hand the case to a senior maintainer for full review |
 
 Two important nuances:
 
-- **L5 is the lowest-confidence lane, not always the highest semantic-risk lane.**
-  A patch may be `prerequisite=independent` and still be `L5` because the engine had
-  to rely on `verified-direct` rather than a normal `git apply` proof path.
-- **L3.5 is an internal DryRun technique, not a user-facing final level.**
+- **L5 is the highest operational difficulty lane.**
+  Whether the cause is broken proof, missing evidence, or stacked uncertainty, the
+  maintainer should read `L5` as "this case is the hardest to land safely."
+- **Zero-Context is an internal DryRun technique, not a user-facing final level.**
   Zero-context regeneration is folded into the `regenerated` family and therefore
   typically surfaces as final `L3` unless stronger promotions push it higher.
 
@@ -212,7 +212,7 @@ The level is the execution lane that results from combining those answers with t
 DryRun proof quality. Real examples therefore look like:
 
 - `base=L0`, `final=L4`: patch applies cleanly, but evidence shows prerequisite or propagation risk
-- `prerequisite=independent`, `final=L5`: no related patch is required, but proof quality is still weak because the engine used a fallback applicability path
+- `prerequisite=independent`, `final=L5`: no related patch is required, but the engine still cannot keep the case in a lower controlled lane, so senior-maintainer takeover is required
 - `single-line change`, `final=L3`: the textual change is small, but it touches state/locking/layout semantics
 
 #### Reading Level Distributions
@@ -220,7 +220,7 @@ DryRun proof quality. Real examples therefore look like:
 When evaluating `L0-L5` ratios in batch mode:
 
 - A rise in `L3/L4` often means the engine is surfacing more semantic evidence, not that `git apply` got worse
-- A rise in `L5` often means more patches are surviving through `verified-direct` or other fallback proof paths, not automatically that those patches are wrong
+- A rise in `L5` means more cases are ending in the highest-difficulty lane and therefore deserve immediate senior review
 - The healthiest low-level distribution is not "maximum L0/L1", but "L0/L1 only when positive admission evidence is strong enough"
 
 **Profiles** (`policy.profile`): `conservative` / `balanced` / `aggressive` / `default` — preset thresholds for large-change and call-chain fanout; explicit YAML values override presets.
@@ -713,7 +713,7 @@ python cli.py analyze --cve CVE-2024-26633 --target 5.10-hulk
 | Hunk positioning (avg) | < 100ms | Anchor-line + offset propagation |
 | Search coverage | L1 + L2 + L3 | ID → Subject → Diff/Containment |
 | Path mappings | 8+ built-in | Extensible via config |
-| DryRun strategies | 7+ levels | Strict → C1 → 3way → Verified-Direct → Regen → Zero-Ctx → Adapted |
+| DryRun strategies | 7+ methods | Strict → C1 → 3way → Verified-Direct → Regen → Zero-Ctx → Adapted |
 | Validation framework | P/R/F1 | git worktree non-destructive rollback |
 
 ---
@@ -774,7 +774,7 @@ cve_backporting/
 
 First application of multiset containment detection in CVE backport tooling — solves the squash commit matching problem that defeats traditional bidirectional similarity.
 
-### 2. Verified-Direct Patch Application (L5)
+### 2. Verified-Direct Patch Application
 
 Bypasses `git apply` entirely — reads target file content, locates hunks using anchor-line strategies, applies symbol mapping (macro/constant renames) and indentation adaptation, then performs in-memory modification. Generates clean unified diff via `difflib.unified_diff`. Solves cases where `git apply` rejects patches due to whitespace or context differences that are semantically irrelevant.
 
@@ -810,12 +810,12 @@ Multi-dimensional similarity (structure + identifiers + keywords) — independen
 
 | Component | Technology | Purpose | Default |
 |-----------|-----------|---------|---------|
-| **Level 6: AI-Generated** | LLM (GPT-4o / DeepSeek / etc.) | Generate adapted patches when rules fail | Disabled |
+| **AI-Generated (optional)** | LLM (GPT-4o / DeepSeek / etc.) | Generate adapted patches when rules fail | Disabled |
 | **LLM Root-Cause Analysis** | LLM | Analyze validation failures | Disabled |
 | **Code Semantic Matching** | SequenceMatcher + Set ops | Multi-dimensional code similarity | Enabled (pure algorithm) |
 | **Diff Containment** | Multiset counting | Detect patches in squash commits | Enabled (pure algorithm) |
 
-Core algorithms (Level 0-5) are **fully deterministic** — no AI model inference, complete reproducibility and explainability. AI features (Level 6) are opt-in enhancements.
+Core non-AI algorithms are **fully deterministic** — no model inference, complete reproducibility and explainability. AI features are opt-in enhancements.
 
 ```yaml
 # config.yaml — AI configuration
