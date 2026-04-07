@@ -973,14 +973,23 @@ class PolicyEngine:
 
     def _analyze_lifecycle_resource(self, entries: List[Dict[str, Any]]) -> Dict[str, Any]:
         lifecycle_re = re.compile(
-            r"\b(kmalloc|kzalloc|kvzalloc|alloc|free|kfree|kvfree|get|put|"
-            r"refcount_inc|refcount_dec|kref_get|kref_put|init|deinit|destroy|cleanup)\b"
+            r"\b("
+            r"kmalloc|kzalloc|kvzalloc|kcalloc|vmalloc|vzalloc|krealloc|"
+            r"kfree|kvfree|vfree|"
+            r"refcount_(?:inc|dec|add|sub|set)|kref_(?:get|put)|"
+            r"get_device|put_device|get_task_struct|put_task_struct|dev_hold|dev_put|"
+            r"[A-Za-z_]\w*_(?:alloc|free|release|destroy|cleanup)|"
+            r"(?:alloc|free|release|destroy|cleanup)_[A-Za-z_]\w*"
+            r")\b"
         )
         hold_objects: List[str] = []
         release_sequences: List[str] = []
         rollback_paths: List[str] = []
         categories = set()
         evidence: List[str] = []
+        alloc_tokens = set()
+        release_tokens = set()
+        ref_tokens = set()
 
         for entry in entries:
             body = entry["body"]
@@ -993,6 +1002,12 @@ class PolicyEngine:
             token = match.group(1)
             categories.add(token)
             evidence.append(body)
+            if re.search(r"\b(?:kmalloc|kzalloc|kvzalloc|kcalloc|vmalloc|vzalloc|krealloc|alloc)\b", token):
+                alloc_tokens.add(token)
+            if re.search(r"\b(?:kfree|kvfree|vfree|free|release|destroy|cleanup)\b", token):
+                release_tokens.add(token)
+            if re.search(r"\b(?:refcount_|kref_|get_device|put_device|get_task_struct|put_task_struct|dev_hold|dev_put)\b", token):
+                ref_tokens.add(token)
             assign_match = re.match(r"([A-Za-z_]\w*(?:->\w+)?)\s*=\s*\w+", body)
             call_match = re.search(r"\(([^)]*)\)", body)
             obj = ""
@@ -1003,15 +1018,23 @@ class PolicyEngine:
             obj = self._normalize_object_name(obj)
             if obj:
                 hold_objects.append(obj)
-            if token in ("free", "kfree", "kvfree", "put", "kref_put", "destroy", "cleanup"):
+            if re.search(r"\b(?:kfree|kvfree|vfree|free|release|destroy|cleanup|put)\b", token):
                 release_sequences.append(body)
             if re.search(r"\bgoto\s+(err|out|fail|free|put)\w*\b", body):
                 rollback_paths.append(body)
 
-        triggered = bool(categories or rollback_paths)
+        has_resource_flow = bool(categories)
+        has_release_flow = bool(release_sequences)
+        has_rollback_with_resource = bool(rollback_paths and (release_sequences or hold_objects or categories))
+        triggered = bool(has_resource_flow or has_rollback_with_resource)
+        high_risk = bool(
+            ref_tokens
+            or (alloc_tokens and (release_tokens or rollback_paths))
+            or (release_tokens and rollback_paths)
+        )
         return {
             "triggered": triggered,
-            "risk": "high" if triggered else "none",
+            "risk": "high" if high_risk else ("warn" if triggered else "none"),
             "categories": self._truncate_list(sorted(categories), 12),
             "ownership_objects": self._truncate_list(hold_objects, 10),
             "release_order_clues": self._truncate_list(release_sequences, 6),
@@ -1145,18 +1168,28 @@ class PolicyEngine:
                 info = access_info.setdefault(field_name, {
                     "field": field_name,
                     "access_paths": set(),
+                    "added_paths": set(),
+                    "removed_paths": set(),
                     "read_functions": set(),
                     "write_functions": set(),
+                    "write_signs": set(),
+                    "read_signs": set(),
                     "lock_protected": False,
                     "state_related": False,
                     "error_path_related": False,
                 })
                 info["access_paths"].add(path)
+                if entry["sign"] == "+":
+                    info["added_paths"].add(path)
+                else:
+                    info["removed_paths"].add(path)
                 func_name = entry.get("function") or entry.get("file") or ""
                 if "=" in body and path in body.split("=", 1)[0]:
                     info["write_functions"].add(func_name)
+                    info["write_signs"].add(entry["sign"])
                 else:
                     info["read_functions"].add(func_name)
+                    info["read_signs"].add(entry["sign"])
                 info["lock_protected"] = info["lock_protected"] or has_lock_context
                 info["state_related"] = info["state_related"] or bool(re.search(r"\b(state|status|mode|flags?)\b", body))
                 info["error_path_related"] = info["error_path_related"] or has_error_context
@@ -1178,18 +1211,27 @@ class PolicyEngine:
 
         field_usages = []
         for field_name, info in access_info.items():
+            access_changed = bool(info["added_paths"] ^ info["removed_paths"])
+            write_path_shift = bool(info["write_signs"]) and info["write_signs"] != {"+", "-"}
+            semantic_context = bool(info["lock_protected"] or info["state_related"] or info["error_path_related"])
+            if not (access_changed or (semantic_context and write_path_shift)):
+                continue
             field_usages.append({
                 "field": field_name,
                 "access_paths": self._truncate_list(sorted(info["access_paths"]), 6),
+                "added_paths": self._truncate_list(sorted(info["added_paths"]), 4),
+                "removed_paths": self._truncate_list(sorted(info["removed_paths"]), 4),
                 "read_functions": self._truncate_list(sorted(info["read_functions"]), 6),
                 "write_functions": self._truncate_list(sorted(info["write_functions"]), 6),
                 "lock_protected": bool(info["lock_protected"]),
                 "state_related": bool(info["state_related"]),
                 "error_path_related": bool(info["error_path_related"]),
+                "access_changed": access_changed,
+                "write_path_shift": write_path_shift,
             })
 
         triggered = bool(field_changes or field_usages)
-        high_risk = bool(field_changes) or any(item["lock_protected"] for item in field_usages)
+        high_risk = bool(field_changes) or any(item["lock_protected"] and item["access_changed"] for item in field_usages)
         return {
             "triggered": triggered,
             "risk": "high" if high_risk else ("warn" if triggered else "none"),

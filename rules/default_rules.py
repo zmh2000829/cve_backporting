@@ -246,17 +246,18 @@ class P2LockingSyncRule(PolicyRule):
 class P2LifecycleResourceRule(PolicyRule):
     rule_id = "p2_lifecycle_resource"
     name = "P2 Lifecycle / Resource"
-    severity = "high"
+    severity = "warn"
 
     def evaluate(self, ctx: RuleContext) -> Optional[Dict]:
         section = _special_section(ctx, "lifecycle_resource")
         if not section.get("triggered"):
             return None
+        high_risk = section.get("risk") == "high"
         return {
             "rule_id": self.rule_id,
             "name": self.name,
-            "severity": "high",
-            "level_floor": "L3",
+            "severity": "high" if high_risk else "warn",
+            "level_floor": "L3" if high_risk else "L2",
             "message": section.get("summary", "检测到生命周期/资源管理变化"),
             "evidence": {
                 "categories": section.get("categories", []),

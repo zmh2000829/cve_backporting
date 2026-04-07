@@ -2240,260 +2240,126 @@ Step 5: 产出可答辩结论（工具自动生成 narrative）
 
 ---
 
-# 先给结论：L0-L5 到底在表达什么？
+# 一句话先讲清：L0-L5 到底是什么？
 
 `L0-L5` 不是“补丁难度分”，也不是单独的“语义风险分”。
 
-它是四个判断合并后的**最终执行 / 审查通道**：
-
-1. DryRun 是如何证明补丁可应用的
-2. 关联补丁判断是否稳定
-3. 是否命中关键语义风险
-4. 最终应该走哪种审查和审批路径
+它表达的是：工具基于可应用性证明、依赖稳定性、风险信号和审批要求，最终把样本送进哪一条执行 / 审查通道。
 
 ```text
 final_level = max(base_level, 所有命中规则给出的 level_floor)
 ```
 
-### 三个必须统一的口径
+必须统一三句话：
 
 - `strict` 成功，不代表最终一定是 `L0`
-- `verified-direct` 当前属于 `L3` 的基线方法，不是 `L5`
-- `L5` 只用于未知方法、DryRun 缺失或证据链断裂的兜底场景
+- `verified-direct` 属于已识别基线方法，当前归入 `L3`
+- `L5` 只表示“自动化证明链最弱”，不是“语义一定最危险”
 
 ---
 
-# 当前代码中的默认定义：先看 `base_level`，再看规则抬升
+# L0-L5 总表：分别对应什么，什么时候升级，推荐自动还是人工
 
-| 级别 | 当前默认 `base_method` | 代码里的策略定义 | 审查模式 | 建议动作 |
+| 级别 | 分别对应什么 | 遇到哪些关键结构/信号会升级 | 推荐处置 | 自动 / 人工 |
 |---|---|---|---|---|
-| **L0** | `strict` | 确定性无害，才允许 `harmless=true` | `auto-pass` | 可直接回移，只保留最小回归验证 |
-| **L1** | `ignore-ws` / `context-C1` / `C1-ignore-ws` | 轻微上下文漂移，不自动判无害 | `llm-review` | 做轻量人工/LLM 复核 |
-| **L2** | `3way` | 中等风险适配，证据不足以停留在低级别 | `targeted-review` | 逐 hunk 核对调用点、返回路径和依赖 |
-| **L3** | `regenerated` / `verified-direct` | 语义敏感变更，必须做聚焦审查 | `focused-review` | 重点审查锁、字段、状态机、回归测试 |
-| **L4** | `conflict-adapted` | 高风险牵连，已进入传播或冲突适配场景 | `manual-approval` | 资深维护者审批，显式看传播链 |
-| **L5** | unknown / missing | 回退或未知路径，证据链最弱 | `fallback-review` | 保留证据，走人工确认或补样本验证 |
+| **L0** | 证据最强，可直接进入回移通道 | 只要出现锁、生命周期、状态机、结构体字段、错误路径、传播或关联补丁信号，就会被抬升 | 直接回移 + 最小编译/回归验证 | **自动为主** |
+| **L1** | 轻微漂移，但补丁意图仍清晰 | 注释漂移、日志文本漂移、等价宏替换、局部变量 rename 通常仍留在 L1；如果出现 API 变化或语义风险会继续升级 | 快速复核后执行 | **自动建议 + 轻量人工** |
+| **L2** | 已能适配，但证据不足以继续停在低风险区 | 大改动、返回路径变化、错误路径、调用扇出、中等依赖都常把样本推到 L2 | 逐 hunk 核对后再决定 | **人工核对为主** |
+| **L3** | 已进入语义敏感区，不能再按低风险处理 | 锁与同步、生命周期/引用计数、状态机、结构体字段/数据路径、强依赖、重建/直接验证路径 | 聚焦审查 + 回归测试 | **人工主导** |
+| **L4** | 风险已从局部补丁扩散到更大范围 | 冲突适配、关键结构叠加调用链传播、明显链路牵连 | 资深维护者审批 | **人工审批** |
+| **L5** | 自动化证明链最弱，只能谨慎兜底 | DryRun 缺失、方法未知、情报不完整、证据链断裂 | 暂不自动决策，补证据后再判断 | **人工兜底** |
 
 ---
 
-# L0-L2：从“可直接回移”到“需要人工逐 hunk 核对”
+# 哪些关键结构最容易把样本从低级别抬升出去？
 
-| 级别 | 清晰定义 | 常见进入原因 | 汇报时建议这样说 |
-|---|---|---|---|
-| **L0** | 已有最强可应用性证明，且没有额外语义风险暴露 | `strict` 命中，且无前置依赖、无传播、无关键结构/状态/字段风险 | 这个补丁可以直接回移，系统没有观察到额外语义风险 |
-| **L1** | 只有轻微漂移，补丁意图仍清晰，但不能自动当成无害 | `ignore-ws` / `context-C1`，或命中注释、日志、等价宏、局部变量 rename 等轻漂移样本 | 这类样本可以快速处理，但仍要做轻量复核，确认只是上下文漂移 |
-| **L2** | 已能适配，但证据不足以继续停在低风险区 | `3way`，或命中大改动、API surface、错误路径、调用扇出、`recommended` 前置 | 这不是不能做，而是要逐 hunk 核对调用点、返回路径和关联补丁 |
-
-### 汇报重点
-
-- `L0/L1` 不是“apply 成功就放行”，而是“证据足够强才允许停留”
-- `L2` 不是失败，而是进入明确的人工对照通道
-
----
-
-# L3-L5：从“语义敏感”到“兜底谨慎”
-
-| 级别 | 清晰定义 | 常见进入原因 | 汇报时建议这样说 |
-|---|---|---|---|
-| **L3** | 已触及语义敏感区，不能再按低风险回移处理 | `regenerated` / `verified-direct`，或命中锁、生命周期、状态机、字段路径、`required` 前置 | 系统已经看到明确的语义风险点，必须做聚焦审查和回归测试 |
-| **L4** | 风险不再是局部 patch 问题，而是沿调用链或冲突适配扩散 | `conflict-adapted`，或关键结构变化叠加调用链传播 | 这已经不是单点补丁问题，需要资深维护者审批和链路评估 |
-| **L5** | 工具没有拿到足够强的证明链，只能按最高谨慎度兜底 | DryRun 缺失、方法未识别、fallback 路径、证据链断裂 | 不是说一定最危险，而是当前自动化证明最弱，不能让系统替人拍板 |
-
-### 两个容易讲错的点
-
-- `verified-direct` 现在归入 `L3`，因为它仍属于已识别的基线方法
-- `L5` 表达的是“证明链最弱”，不是“语义一定最危险”
+| 关键结构 / 信号 | 常见结果 | 为什么会升级 |
+|---|---|---|
+| 锁与同步 | `L3` 起步 | 影响并发语义、保护域与执行顺序 |
+| 生命周期 / 资源释放 / 引用计数 | `L2-L3` | 影响对象持有关系、释放顺序、错误回滚 |
+| 状态机 / 状态迁移 | `L1-L3` | 影响条件分支、进入退出条件与状态转移 |
+| 结构体字段 / 数据路径 | `L1-L3` | 影响字段定义、字段选择、读写路径和保护域 |
+| 错误路径 / 清理顺序 | `L2` 常见 | 影响失败后的恢复、清理与返回值语义 |
+| 调用链传播 / 冲突适配 | `L4` 常见 | 风险已经超出单个 patch，自身会扩散到更大链路 |
+| 强关联补丁 | `L3` 常见 | 单 patch 不能独立解释，执行顺序成为风险源 |
 
 ---
 
-# `base_level`、`final_level`、`direct_backport` 为什么必须分开看？
+# 为什么 `base_level` 和 `final_level` 会差很多？
 
-- `base_level`：补丁是怎么 apply 上去的
-- `final_level`：综合规则后应该走哪条审查通道
-- `direct_backport`：是否允许输出“可直接回移”的结论
+- `base_level` 只回答：补丁是怎么 apply 上去的
+- `final_level` 回答：综合规则后应该走哪条审查通道
+- `direct_backport` 回答：最后能不能给“可直接回移”的结论
 
-### 真实样本会出现这几种组合
+所以出现下面这种组合是正常的：
 
 - `base=L0, final=L3`
-  - 文本上可 `strict` 应用，但命中了锁、字段、状态机等语义风险
+  - 文本上可以 `strict` 应用
+  - 但工具看到了锁、字段、状态机、依赖这类语义风险
 - `base=L1, final=L1`
-  - 只是注释、日志、等价宏、局部变量 rename 这类轻微漂移
+  - 只是轻微漂移，没有额外语义风险
 - `base=L2, final=L4`
-  - `3way` 可过，但风险已经沿调用链传播，或进入冲突适配
-- `base=L3, final=L3`
-  - 需要 `regenerated / verified-direct`，必须走聚焦审查
+  - 可以适配，但风险已经沿传播链或冲突适配扩散
 
-### 汇报时不要只看“级别数字”
+关键结论：
 
-- `L3/L4` 占比上升，很多时候说明风险证据被显式暴露出来了，不等于 apply 能力退化
-- `L0/L1` 占比下降，很多时候说明低级别准入变严了，不等于工具变差
-- 真正健康的目标不是把样本都压进 `L0/L1`，而是让低级别只留给证据最强的样本
+- `base_level` 高，不等于风险低
+- `final_level` 高，也不等于 apply 能力差
+- 两者差异大，往往说明“文本可应用”与“语义可放心”不是一回事
 
 ---
 
-# 当前规则如何把样本从低级别抬升出去？
+# 现在怎么判断“差异大是合理抬升，还是误抬升”？
 
-| 规则类型 | 代表规则 | 作用 |
-|------|----------|------|
-| `admission` | `direct_backport_candidate`、`independent_patch`、`l1_light_drift_sample` | 给 `L0/L1` 提供正向证据，不再只靠 warning 反推 |
-| `low_level_veto` | `large_change`、`l1_api_surface` | 阻止样本误留在 `L0/L1` |
-| `direct_backport_veto` | `prerequisite_required`、`prerequisite_recommended` | 阻止“可直接回移”结论 |
-| `risk_profile` | `critical_structures`、`p2_*`、`call_chain_*`、`single_line_high_impact` | 暴露语义风险与传播面，必要时抬升到 `L3/L4` |
+新的口径重点看三类误报是否被压下去：
 
-### 目录收口
+- 裸 `goto err/out` 不再直接当生命周期高风险
+- 同字段单纯改值，不再直接当结构体字段 / 数据路径变化
+- 纯错误码变化，不再因为出现 `if / return` 就自动算状态机变化
 
-- 默认规则：`rules/default_rules.py`
-- 默认策略：`rules/level_policies.py`
-- 配置样例：`rules/policy.example.yaml`
-- 目录说明：`rules/README.md`
+这意味着：
+
+- `L3/L4` 更接近真实语义风险，而不是宽匹配副作用
+- `L0/L1` 只留给证据更强的样本
+- 用户看到高等级时，更能理解“为什么这么判”
 
 ---
 
-# 本轮新增：修正误抬升，同时继续收紧 L0/L1 准入
+# 批量汇报现在应该怎么读？
 
-| 变化点 | 现在的口径 | 汇报价值 |
-|------|-----------|---------|
-| 降低误抬升 | 普通 `struct` 指针不再自动当布局风险；伪调用和成员访问不再制造假传播；纯错误码返回变化不再误判成状态机变化 | `L3/L4` 更接近真实语义风险，而不是宽匹配副作用 |
-| 收紧 L0 | `strict` 不再天然等于“可直接回移”；还必须无前置依赖、无传播、无字段/状态/错误路径语义标记 | `L0` 只留给真正稳定、证据最强的样本 |
-| 强化 L1 | `l1_light_drift_sample` 会显式给出注释漂移、日志文本漂移、等价宏替换、局部变量 rename 等正向样本 | `L1` 不再只是口头说“轻微漂移”，而是有证据可复核 |
-| 强化依赖说明 | 关联补丁开始输出共享字段、锁域、状态点、证据行等语义域证据 | “为什么建议先看关联补丁”可以讲得更具体 |
+| 先看哪个字段 | 用来回答什么 |
+|---|---|
+| `base_level_distribution` | 当前样本的 apply 能力基线是什么 |
+| `final_level_distribution` | 最终需要多少低风险处理、多少人工审查 |
+| `promotion_matrix` | 样本是从哪一级被抬到了哪一级 |
+| `top_promotion_rules` | 到底是哪些规则在主导抬升 |
+| `deterministic_exact_match` | 工具生成补丁与真实补丁的一致度如何 |
+| `special_risk.section_counts` | 风险主要集中在锁、生命周期、状态机、字段还是错误路径 |
+| `manual_prerequisite_analysis` | 有多少样本是因为关联补丁问题被挡住 |
 
-### 这轮文档同步后的标准讲法
+如果出现“`base_level=L0` 很多，但 `final_level=L3` 也很多”，正确汇报方式不是只报两个数字，而是继续回答：
+
+1. 主要是 `L0->L3` 还是 `L0->L2/L4`
+2. 是哪几条规则在抬升
+3. 抬升主要来自锁/生命周期/字段/错误路径，还是来自关联补丁
+
+---
+
+# 对外汇报时建议直接这样讲
 
 - `L0-L5` 是“自动化证明强度 + 风险暴露程度”的综合分流
-- `L0/L1` 代表可以更快处理，不代表可以省掉判断
-- `L3/L4` 代表风险点已经被显式看见，需要更强审查
-- `L5` 代表自动化证明最弱，系统不能替人拍板
+- `L0/L1` 可以更快处理，但不等于可以省掉判断
+- `L2` 已经进入明确的人审通道
+- `L3/L4` 代表系统已经看到了关键风险点，需要聚焦审查或审批
+- `L5` 代表当前自动化证据不足，系统不能替人拍板
 
 ---
 
-# P2 专项分析本轮已落地
+# 这一轮整理后的核心收获
 
-### 覆盖范围
-
-- 锁与同步语义
-- 生命周期与资源管理
-- 状态机与控制流
-- 结构体字段与数据路径
-- 错误路径专项
-
-### 输出形式
-
-```json
-{
-  "validation_details": {
-    "special_risk_report": {
-      "enabled": true,
-      "summary": {
-        "triggered_sections": ["locking_sync", "error_path"],
-        "high_risk_sections": ["locking_sync"],
-        "has_critical_structure_change": true
-      },
-      "sections": {
-        "locking_sync": { "...": "锁对象/保护数据/同步顺序证据" },
-        "error_path": { "...": "goto err / cleanup / error code 证据" }
-      }
-    },
-    "strategy_buckets": {
-      "special_risk_sections": ["locking_sync", "error_path"],
-      "critical_structure_change": true
-    }
-  }
-}
-```
-
-### 使用方式
-
-- 配置：`policy.special_risk_rules_enabled: true/false`
-- CLI：`--enable-p2` / `--disable-p2`
-- API：请求体支持 `p2_enabled: true/false`
-
----
-
-# CLI / API 返回已统一
-
-### 统一原则
-
-- `analyze` / `validate` / `batch-validate` 三条链路都输出同一套 `result_status + analysis_framework + level_decision`
-- API 不再只是“精简版摘要”，而是返回与 CLI JSON 报告同口径的数据
-- 批量接口额外输出最终聚合统计，便于平台直接消费
-- 历史 `analysis_results` raw JSON 也可以迁移到同一套 schema
-
-### 新的统一解释骨架
-
-```json
-{
-  "report_version": "friendly-json-v2",
-  "schema_version": "result-schema-v2",
-  "result_status": {
-    "state": "complete",
-    "error_code": "",
-    "user_message": "验证通过",
-    "incomplete_reason": ""
-  },
-  "analysis_framework": {
-    "process": {
-      "workflow_steps": ["fix 搜索", "依赖分析", "dryrun", "高风险扫描", "最终结论"],
-      "base_level": "L1",
-      "base_method": "context-C1",
-      "final_level": "L2"
-    },
-    "evidence": {
-      "admission_rules": [],
-      "low_level_veto_rules": [],
-      "direct_backport_veto_rules": [],
-      "risk_profile_rules": [],
-      "lock_objects": ["foo->lock"],
-      "fields": ["ctx->state"],
-      "state_points": ["ctx->state", "if (ctx->state == NEW_STATE) goto err_unlock;"],
-      "error_path_nodes": ["err_unlock", "-EINVAL"]
-    },
-    "conclusion": {
-      "direct_backport": {"status": "blocked"},
-      "prerequisite": {"status": "recommended"},
-      "risk": {"status": "high"}
-    }
-  }
-}
-```
-
-### 这意味着什么
-
-- 用户先看 `analysis_framework`
-- fixed / not-applicable / incomplete 不再返回空字段，而是显式给 `result_status`
-- 再看 `level_decision`
-- `L0-L5` 仍然保留，但不再是唯一理解入口
-
-### API 错误现在也可执行
-
-- `400/404/500` 不再只返回错误字符串
-- 现在统一补 `route / hint / missing_input / suggested_fix / absolute_date`
-- 平台调用方可以直接按返回的 `suggested_fix` 修请求，而不是二次猜参数
-
-### `/api/batch-validate` 关键汇总字段
-
-```json
-{
-  "operation": "batch-validate",
-  "p2_enabled": true,
-  "batch_summary": {
-    "l0_l5": { "...": "L0~L5 分布" },
-    "deterministic_exact_match": { "count": 12 },
-    "critical_structure_change": { "count": 7 },
-    "manual_prerequisite_analysis": { "count": 9 },
-    "result_state_distribution": { "complete": 17, "incomplete": 3 },
-    "incomplete_reason_distribution": { "missing_fix_commit": 2 },
-    "special_risk": { "...": "P2 五类命中统计" }
-  }
-}
-```
-
-### 这意味着什么
-
-- 平台侧可以直接统计 L0~L5 占比
-- 可以直接统计“100% 确定性正确补丁”数量
-- 可以直接统计关键结构变更与需人工分析的关联补丁数量
-- 可以直接统计“哪些结果是情报不足、为什么不足”，而不是把它们都混成 `no_data`
+- 现在 presentation 可以先讲清 `L0-L5` 是什么，再讲为什么升级
+- 汇报不再停留在“分布变化很大”，而是能解释“为什么变大”
+- 用户拿到批量结果后，可以直接回答“哪些可以自动、哪些必须人工、哪些风险最值得优先看”
 
 ---
 

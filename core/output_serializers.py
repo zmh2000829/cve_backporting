@@ -422,9 +422,54 @@ def aggregate_special_risk_metrics(results: list) -> dict:
     }
 
 
+def aggregate_promotion_metrics(results: list) -> dict:
+    from rules.level_policies import effective_level_floor, level_rank
+
+    matrix_counter = Counter()
+    delta_counter = Counter()
+    rule_counter = Counter()
+    promoted_count = 0
+
+    for result in results or []:
+        normalized = _normalize_aggregatable_result(result)
+        if not normalized:
+            continue
+        level_view = build_l0_l5_view(normalized)
+        current_level = level_view.get("current_level", "")
+        base_level = level_view.get("base_level", "")
+        if not current_level or not base_level:
+            continue
+        base_rank = level_rank(base_level)
+        current_rank = level_rank(current_level)
+        if current_rank <= base_rank:
+            delta_counter[str(max(current_rank - base_rank, 0))] += 1
+            continue
+
+        promoted_count += 1
+        matrix_counter[f"{base_level}->{current_level}"] += 1
+        delta_counter[str(current_rank - base_rank)] += 1
+
+        level_decision = serialize_level_decision(normalized.get("level_decision"))
+        for hit in list(level_decision.get("rule_hits") or []):
+            floor = effective_level_floor(hit or {})
+            if level_rank(floor) > base_rank:
+                rule_id = (hit or {}).get("rule_id", "") or "unknown"
+                rule_counter[rule_id] += 1
+
+    total = len(results or [])
+    return {
+        "promoted_count": promoted_count,
+        "promotion_rate": round(promoted_count / total, 4) if total else 0.0,
+        "promotion_matrix": dict(sorted(matrix_counter.items())),
+        "level_delta_distribution": dict(sorted(delta_counter.items(), key=lambda item: int(item[0]))),
+        "top_promotion_rules": dict(rule_counter.most_common(12)),
+    }
+
+
 def aggregate_batch_validate_summary(results: list) -> dict:
     level_summary = aggregate_l0_l5_levels(results)
     special_risk_summary = aggregate_special_risk_metrics(results)
+    promotion_summary = aggregate_promotion_metrics(results)
     dependency_bucket_counter = Counter()
     verdict_counter = Counter()
     result_state_counter = Counter()
@@ -499,6 +544,7 @@ def aggregate_batch_validate_summary(results: list) -> dict:
             "special_risk_section_counts": dict(sorted(special_risk_summary.get("section_counts", {}).items())),
             "samples": special_risk_summary.get("samples", {}),
         },
+        "promotion_summary": promotion_summary,
         "statistics": {
             "levels": level_summary.get("levels", ["L0", "L1", "L2", "L3", "L4", "L5"]),
             "final_level_counts": level_summary.get("current_level_distribution", {}),
@@ -507,6 +553,8 @@ def aggregate_batch_validate_summary(results: list) -> dict:
             "any_special_risk_count": any_special_risk_count,
             "manual_prerequisite_analysis_count": manual_prereq_analysis_count,
             "special_risk_section_counts": dict(sorted(special_risk_summary.get("section_counts", {}).items())),
+            "promotion_matrix": promotion_summary.get("promotion_matrix", {}),
+            "top_promotion_rules": promotion_summary.get("top_promotion_rules", {}),
             "result_state_distribution": dict(sorted(result_state_counter.items())),
             "incomplete_reason_distribution": dict(sorted(incomplete_reason_counter.items())),
         },

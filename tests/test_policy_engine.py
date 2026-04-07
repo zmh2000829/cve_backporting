@@ -580,6 +580,47 @@ int foo(void) {
         self.assertIn("p2_error_path", rule_ids)
         self.assertFalse(vd.special_risk_report["sections"]["state_machine_control_flow"]["triggered"])
 
+    def test_p2_lifecycle_does_not_promote_bare_goto_err_without_resource_ops(self):
+        diff = """diff --git a/foo.c b/foo.c
+@@ -1,4 +1,7 @@ int f(int ret) {
+-    return 0;
++    if (ret)
++        goto err;
++    return 0;
++err:
++    return -EINVAL;
+ }
+"""
+        p = _patch(diff, ["foo.c"])
+        dr = DryRunResult(applies_cleanly=True, apply_method="strict")
+        vd = PolicyEngine(
+            PolicyConfig(profile="default", high_impact_single_line_rules_enabled=False),
+            llm_enabled=False,
+        ).evaluate(p, dr, _MockGit({}), "any")
+        rule_ids = {hit["rule_id"] for hit in vd.level_decision.rule_hits}
+        self.assertNotIn("p2_lifecycle_resource", rule_ids)
+        self.assertIn("p2_error_path", rule_ids)
+        self.assertEqual(vd.level_decision.level, "L2")
+        self.assertFalse(vd.special_risk_report["sections"]["lifecycle_resource"]["triggered"])
+
+    def test_p2_struct_field_ignores_same_field_value_change(self):
+        diff = """diff --git a/foo.c b/foo.c
+@@ -1,2 +1,2 @@ int f(struct foo *ctx) {
+-    ctx->limit = old;
++    ctx->limit = new;
+ }
+"""
+        p = _patch(diff, ["foo.c"])
+        dr = DryRunResult(applies_cleanly=True, apply_method="strict")
+        vd = PolicyEngine(
+            PolicyConfig(profile="default", high_impact_single_line_rules_enabled=False),
+            llm_enabled=False,
+        ).evaluate(p, dr, _MockGit({}), "any")
+        rule_ids = {hit["rule_id"] for hit in vd.level_decision.rule_hits}
+        self.assertNotIn("p2_struct_field_data_path", rule_ids)
+        self.assertEqual(vd.level_decision.level, "L0")
+        self.assertFalse(vd.special_risk_report["sections"]["struct_field_data_path"]["triggered"])
+
     def test_batch_summary_counts(self):
         summary = aggregate_batch_validate_summary([
             {
@@ -616,6 +657,26 @@ int foo(void) {
         self.assertEqual(summary["deterministic_exact_match"]["count"], 1)
         self.assertEqual(summary["critical_structure_change"]["count"], 1)
         self.assertEqual(summary["manual_prerequisite_analysis"]["count"], 1)
+        self.assertEqual(summary["promotion_summary"]["promoted_count"], 1)
+
+    def test_batch_summary_tracks_promotion_rules(self):
+        summary = aggregate_batch_validate_summary([
+            {
+                "cve_id": "CVE-1",
+                "level_decision": {
+                    "level": "L3",
+                    "base_level": "L0",
+                    "rule_hits": [
+                        {"rule_id": "p2_lifecycle_resource", "severity": "warn", "level_floor": "L2"},
+                        {"rule_id": "prerequisite_required", "severity": "high", "level_floor": "L3"},
+                    ],
+                },
+                "validation_details": {"strategy_buckets": {"dependency_bucket": "required"}},
+            }
+        ])
+        self.assertEqual(summary["promotion_summary"]["promotion_matrix"]["L0->L3"], 1)
+        self.assertEqual(summary["promotion_summary"]["top_promotion_rules"]["p2_lifecycle_resource"], 1)
+        self.assertEqual(summary["promotion_summary"]["top_promotion_rules"]["prerequisite_required"], 1)
 
     def test_batch_summary_accepts_friendly_validate_json(self):
         friendly = cli._prepare_validate_json({

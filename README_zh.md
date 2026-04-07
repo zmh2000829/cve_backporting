@@ -282,6 +282,8 @@ final_level = max(base_level, 所有命中规则给出的 level_floor)
 - `L3/L4` 占比上升，很多时候说明风险证据被显式暴露出来了，不等于 apply 能力退化
 - `L0/L1` 占比下降，很多时候说明低级别准入变严了，不等于工具变差
 - 真正健康的目标不是把样本都压进 `L0/L1`，而是让低级别只留给证据最强的样本
+- 如果出现 `base_level=L0` 很多、`final_level=L3` 也很多，不能只看两列分布；应同时看批量汇总里的 `promotion_summary`，确认到底是哪些规则在抬升
+- 当前实现已经补了 `promotion_matrix / top_promotion_rules`，可以直接回答“是哪个规则把样本从 `L0` 推到了 `L3/L4`”
 
 默认规则已经迁移到 `rules/` 目录下的 Python 模块：
 
@@ -306,6 +308,10 @@ final_level = max(base_level, 所有命中规则给出的 level_floor)
   `sizeof`、`likely`、`ARRAY_SIZE`、`__builtin_*` 这类伪调用不再进入 caller/callee 关系；`ops->helper()`、`obj.cb()` 也不会被当成普通符号调用。
 - **`p2_state_machine_control_flow` 现在必须看到状态语义。**
   纯 `if (ret) return -E...` 这类错误路径变化会停留在 `error_path`，不会再因为出现 `if / return` 就误判为状态机变化。
+- **`p2_lifecycle_resource` 不再因为裸 `goto err/out` 就直接抬到 `L3`。**
+  现在只有真正看到资源获取/释放、引用计数、持有关系或“回滚路径 + 资源线索”组合时，才会进入生命周期专项；单独的错误路径留在 `error_path/L2`。
+- **`p2_struct_field_data_path` 不再因为“任何成员访问”就触发。**
+  现在必须看到字段选择变化、结构体字段定义变化，或在锁/状态/错误路径语境下发生写路径漂移，才会命中字段/数据路径专项；同字段单纯改值不再被当成字段风险。
 - **L0 正向准入条件更硬了。**
   `strict` 不再天然等于“可直接回移候选”。现在还要求没有前置依赖、没有传播、没有 `special_risk` 命中、没有字段/状态/错误路径语义标记，才会命中 `direct_backport_candidate`。
 - **L1 不再只说“轻微漂移”，而是给出样本证据。**
@@ -545,6 +551,14 @@ python cli.py server --host 127.0.0.1 --port 8000 --config config.yaml
     "parallel_mode": true,
     "batch_summary": {
       "l0_l5": {},
+      "promotion_summary": {
+        "promotion_matrix": {
+          "L0->L3": 0
+        },
+        "top_promotion_rules": {
+          "p2_lifecycle_resource": 0
+        }
+      },
       "deterministic_exact_match": {
         "count": 0,
         "rate": 0.0
@@ -573,6 +587,18 @@ python cli.py server --host 127.0.0.1 --port 8000 --config config.yaml
 - `l0_l5`
 - `level_decision`
 - `validation_details`
+
+批量结果里建议优先同时看这三组字段：
+
+- `batch_summary.l0_l5`
+- `batch_summary.promotion_summary`
+- `batch_summary.special_risk`
+
+这样才能回答：
+
+- 为什么 `base_level` 和 `final_level` 差异这么大
+- 是哪些规则在抬升
+- 这些抬升是锁/生命周期/字段/错误路径这类真实风险，还是规则过宽导致的副作用
 
 `/api/batch-validate` 也支持可选参数 `workers`，推荐值与 CLI 一致：
 
