@@ -183,6 +183,162 @@ CVE-2024-26635
 python cli.py server --host 127.0.0.1 --port 8000
 ```
 
+### 6.7 CLI 参数模板
+
+如果你是把本项目接到脚本、流水线或平台任务里，建议按下面的字段模板准备命令参数：
+
+| 命令 | 必填参数 | 常用可选参数 | 返回产物 |
+| --- | --- | --- | --- |
+| `analyze` | `--target` + `--cve` 或 `--batch` | `--deep`、`--no-dryrun`、`--policy-profile`、`--enable-p2` / `--disable-p2` | TUI + `report.json` |
+| `check-intro` | `--target` + `--cve` 或 `--commit` | 无 | TUI |
+| `check-fix` | `--target` + `--cve` 或 `--commit` | 无 | TUI |
+| `validate` | `--target` + `--cve` + `--known-fix` | `--mainline-fix`、`--mainline-intro`、`--deep`、`--policy-profile`、`--enable-p2` / `--disable-p2` | TUI + `report.json` + patch artifacts |
+| `batch-validate` | `--target` + `--file` | `--offset`、`--limit`、`--workers`、`--deep`、`--policy-profile`、`--enable-p2` / `--disable-p2` | TUI + batch summary JSON |
+| `server` | 无 | `--host`、`--port` | HTTP API 服务 |
+
+推荐把命令参数整理成统一模板：
+
+```bash
+python cli.py analyze \
+  --cve <CVE-ID> \
+  --target <TARGET_ALIAS> \
+  --policy-profile <balanced|conservative> \
+  [--deep] \
+  [--no-dryrun]
+```
+
+```bash
+python cli.py validate \
+  --cve <CVE-ID> \
+  --target <TARGET_ALIAS> \
+  --known-fix <TARGET_FIX_COMMIT> \
+  [--mainline-fix <UPSTREAM_FIX_COMMIT>] \
+  [--mainline-intro <UPSTREAM_INTRO_COMMIT>] \
+  [--policy-profile <balanced|conservative>] \
+  [--deep]
+```
+
+```bash
+python cli.py batch-validate \
+  --file <CVE_DATA_JSON> \
+  --target <TARGET_ALIAS> \
+  [--workers 2] \
+  [--offset 0] \
+  [--limit 50] \
+  [--policy-profile <balanced|conservative>] \
+  [--deep]
+```
+
+### 6.8 CLI 输出模板
+
+CLI 会同时给你两类输出：
+
+| 输出形态 | 用途 | 说明 |
+| --- | --- | --- |
+| TUI 面板 | 人工阅读 | 适合工程师在终端直接看结论 |
+| JSON 文件 | 程序对接 | 默认写入 `analysis_results/<run-id>/...` |
+
+程序对接时，应以 JSON 文件为准。最小读取模板如下。
+
+#### `analyze` 的 `report.json`
+
+```json
+{
+  "cve_id": "CVE-2024-26633",
+  "target_version": "5.10-hulk",
+  "result_status": {
+    "state": "complete"
+  },
+  "analysis_framework": {
+    "process": {},
+    "evidence": {},
+    "conclusion": {}
+  },
+  "l0_l5": {
+    "current_level": "L2",
+    "base_level": "L1",
+    "base_method": "context-C1",
+    "review_mode": "controlled-review",
+    "next_action": "逐 hunk 审查后决定是否回移"
+  },
+  "traceability": {
+    "policy": {
+      "profile": "balanced"
+    }
+  }
+}
+```
+
+#### `validate` 的 `report.json`
+
+```json
+{
+  "cve_id": "CVE-2024-26633",
+  "target_version": "5.10-hulk",
+  "overall_pass": true,
+  "result_status": {
+    "state": "complete"
+  },
+  "analysis_framework": {
+    "process": {},
+    "evidence": {},
+    "conclusion": {}
+  },
+  "l0_l5": {
+    "current_level": "L1",
+    "base_level": "L1",
+    "base_method": "context-C1",
+    "review_mode": "quick-review",
+    "next_action": "快速人工复核"
+  },
+  "generated_vs_real": {
+    "verdict": "identical",
+    "deterministic_exact_match": true
+  },
+  "traceability": {
+    "policy": {
+      "profile": "balanced"
+    }
+  }
+}
+```
+
+#### `batch-validate` 的 summary JSON
+
+```json
+{
+  "summary": {
+    "l0_l5": {
+      "levels": ["L0", "L1", "L2", "L3", "L4", "L5"],
+      "current_level_distribution": {
+        "L0": 0,
+        "L1": 5,
+        "L2": 7,
+        "L3": 15,
+        "L4": 3,
+        "L5": 0
+      },
+      "base_level_distribution": {
+        "L0": 14,
+        "L1": 8,
+        "L2": 0,
+        "L3": 8,
+        "L4": 0,
+        "L5": 0
+      }
+    },
+    "strategy_effectiveness": {},
+    "level_accuracy": {}
+  }
+}
+```
+
+这里最重要的约束只有一条：
+
+| 对接要求 | 口径 |
+| --- | --- |
+| `L0-L5` 是否必须输出 | **是。单案例 JSON 必须包含 `l0_l5.current_level` 和 `l0_l5.base_level`；批量 summary 必须包含 `summary.l0_l5` 分布。缺失应视为对接不完整。** |
+
 ---
 
 ## 7. TUI 终端界面说明
@@ -225,7 +381,7 @@ python cli.py server --host 127.0.0.1 --port 8000
 | `POST /api/batch-validate` | 批量真值验证 | `target_version` + `items[]` |
 | `GET /health` | 存活检查 | 无 |
 
-### 8.3 请求示例
+### 8.3 最小请求模板
 
 #### `/api/analyze`
 
@@ -264,7 +420,205 @@ python cli.py server --host 127.0.0.1 --port 8000
 }
 ```
 
-### 8.4 API 返回里先看什么
+如需直接按字段对接，而不是照抄示例，可以按下面这张表准备请求体：
+
+| 路由 | 必填字段 | 可选字段 | 说明 |
+| --- | --- | --- | --- |
+| `POST /api/analyze` | `target_version` + `cve_id` | `deep`、`no_dryrun`、`enable_p2` / `disable_p2` | 支持 `cves` / `cve_ids` 批量 |
+| `POST /api/validate` | `target_version` + `cve_id` + `known_fix` | `known_fixes`、`known_prereqs`、`mainline_fix`、`mainline_intro`、`deep`、`enable_p2` / `disable_p2` | `known_fix` 可是单个 commit 或逗号分隔字符串 |
+| `POST /api/batch-validate` | `target_version` + `items[]` | `workers`、`deep`、`enable_p2` / `disable_p2` | `items[*]` 至少要有 `cve_id` + `known_fix` |
+
+### 8.4 返回模板与必要字段
+
+先说明一个对接约束：
+
+| 约束 | 当前口径 |
+| --- | --- |
+| 单案例结果必要字段 | `result_status`、`analysis_framework`、`l0_l5`、`traceability` |
+| `L0-L5` 是否必须输出 | **是。所有单案例结果都必须有 `l0_l5.current_level` 和 `l0_l5.base_level`；缺失应视为无效集成。** |
+| 批量统计必要字段 | `summary.l0_l5`、`summary.level_distribution`、`summary.risk_hit_summary`，以及报告文件里的 `strategy_effectiveness`、`level_accuracy` |
+
+其中 `l0_l5` 建议按下面这组字段读取：
+
+| 字段 | 是否必须 | 作用 |
+| --- | --- | --- |
+| `l0_l5.current_level` | 是 | 最终执行通道，平台分流时优先看它 |
+| `l0_l5.base_level` | 是 | DryRun 基线级别，解释“补丁是怎么落地的” |
+| `l0_l5.base_method` | 强烈建议 | 对应 `strict / 3way / regenerated ...` |
+| `l0_l5.review_mode` | 强烈建议 | 终端、平台 UI 都适合直接展示 |
+| `l0_l5.next_action` | 强烈建议 | 可直接映射到人工流程 |
+
+#### `/api/analyze` 返回模板
+
+```json
+{
+  "ok": true,
+  "operation": "analyze",
+  "p2_enabled": true,
+  "summary": {
+    "total": 1
+  },
+  "results": [
+    {
+      "cve_id": "CVE-2024-26633",
+      "target_version": "5.10-hulk",
+      "result_status": {
+        "state": "complete",
+        "user_message": "分析完成"
+      },
+      "analysis_framework": {
+        "process": {},
+        "evidence": {},
+        "conclusion": {}
+      },
+      "l0_l5": {
+        "current_level": "L2",
+        "base_level": "L1",
+        "base_method": "context-C1",
+        "review_mode": "controlled-review",
+        "next_action": "逐 hunk 审查后决定是否回移"
+      },
+      "traceability": {
+        "policy": {
+          "profile": "balanced"
+        }
+      }
+    }
+  ]
+}
+```
+
+#### `/api/validate` 返回模板
+
+```json
+{
+  "cve_id": "CVE-2024-26633",
+  "target_version": "5.10-hulk",
+  "overall_pass": true,
+  "summary": "验证通过",
+  "result_status": {
+    "state": "complete",
+    "user_message": "验证完成"
+  },
+  "analysis_framework": {
+    "process": {},
+    "evidence": {},
+    "conclusion": {}
+  },
+  "l0_l5": {
+    "current_level": "L1",
+    "base_level": "L1",
+    "base_method": "context-C1",
+    "review_mode": "quick-review",
+    "next_action": "快速人工复核"
+  },
+  "generated_vs_real": {
+    "verdict": "identical",
+    "deterministic_exact_match": true
+  },
+  "traceability": {
+    "policy": {
+      "profile": "balanced"
+    }
+  }
+}
+```
+
+#### `/api/batch-validate` 返回模板
+
+```json
+{
+  "ok": true,
+  "operation": "batch-validate",
+  "workers": 2,
+  "parallel_mode": true,
+  "results": [
+    {
+      "cve_id": "CVE-2024-26633",
+      "l0_l5": {
+        "current_level": "L3",
+        "base_level": "L2"
+      },
+      "overall_pass": true
+    }
+  ],
+  "summary": {
+    "total": 1,
+    "success": 1,
+    "error": 0,
+    "l0_l5": {
+      "levels": ["L0", "L1", "L2", "L3", "L4", "L5"],
+      "current_level_distribution": {
+        "L0": 0,
+        "L1": 0,
+        "L2": 0,
+        "L3": 1,
+        "L4": 0,
+        "L5": 0
+      },
+      "base_level_distribution": {
+        "L0": 0,
+        "L1": 0,
+        "L2": 1,
+        "L3": 0,
+        "L4": 0,
+        "L5": 0
+      }
+    },
+    "level_distribution": {
+      "levels": ["L0", "L1", "L2", "L3", "L4", "L5"],
+      "final_level_counts": {
+        "L0": 0,
+        "L1": 0,
+        "L2": 0,
+        "L3": 1,
+        "L4": 0,
+        "L5": 0
+      },
+      "base_level_counts": {
+        "L0": 0,
+        "L1": 0,
+        "L2": 1,
+        "L3": 0,
+        "L4": 0,
+        "L5": 0
+      }
+    },
+    "strategy_effectiveness": {
+      "counts": {
+        "Strict": 0,
+        "Context-C1/Whitespace": 0,
+        "3-Way": 1,
+        "Verified-Direct": 0,
+        "Regenerated": 0,
+        "Zero-Context": 0,
+        "Conflict-Adapted": 0,
+        "Unresolved": 0
+      }
+    },
+    "level_accuracy": {
+      "final_levels": {
+        "L3": {
+          "total": 1,
+          "passed": 1,
+          "acceptable_patch": 1,
+          "exact_match": 0,
+          "pass_rate": 1.0,
+          "acceptable_patch_rate": 1.0,
+          "exact_match_rate": 0.0
+        }
+      }
+    },
+    "risk_hit_summary": {
+      "any_special_risk": {
+        "count": 1
+      }
+    }
+  }
+}
+```
+
+### 8.5 API 返回里先看什么
 
 | 字段 | 作用 |
 | --- | --- |
@@ -273,6 +627,14 @@ python cli.py server --host 127.0.0.1 --port 8000
 | `l0_l5` | `base_level`、`current_level`、`review_mode` |
 | `analysis_narrative` | 面向人的过程说明 |
 | `traceability` | 规则 profile、目标仓 HEAD、数据源等追溯信息 |
+
+推荐对接顺序：
+
+| 场景 | 先看哪些字段 |
+| --- | --- |
+| 单条分析 | `results[0].l0_l5 -> results[0].result_status -> results[0].analysis_framework.conclusion` |
+| 单条验证 | `l0_l5 -> result_status -> generated_vs_real -> summary` |
+| 批量验证 | `summary.l0_l5 -> summary.strategy_effectiveness -> summary.level_accuracy -> results[*].l0_l5` |
 
 ---
 
@@ -362,4 +724,3 @@ python cli.py batch-validate --file cve_data.json --target 5.10-hulk --workers 2
 | DryRun 具体怎么尝试、怎么适配 | `docs/ADAPTIVE_DRYRUN.md` |
 | `L0-L5`、规则、调用链、LLM 使用边界、准确率高场景 | `docs/MULTI_LEVEL_ALGORITHM.md` |
 | 对外汇报怎么讲 | `docs/presentation.md` |
-

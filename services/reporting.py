@@ -3,6 +3,7 @@
 from datetime import datetime
 
 from core.output_serializers import (
+    build_l0_l5_view,
     collect_prereq_patches,
     collect_rules_metadata,
     serialize_commit_reference,
@@ -363,6 +364,7 @@ def build_analyze_payload(
             "data_sources": ["target_repo", "community_fix_patch", "analysis_pipeline"],
         },
     }
+    payload["l0_l5"] = build_l0_l5_view(payload)
     if deep_analysis is not None and deep_serializer is not None:
         payload["deep_analysis"] = deep_serializer(deep_analysis)
 
@@ -378,6 +380,7 @@ def prepare_analyze_json(payload: dict) -> dict:
         technical_details={
             "result_status": payload.get("result_status", {}),
             "analysis_framework": payload.get("analysis_framework", {}),
+            "l0_l5": payload.get("l0_l5", {}),
             "level_decision": payload.get("level_decision", {}),
             "validation_details": payload.get("validation_details", {}),
             "dependency_details": payload.get("dependency_details", {}),
