@@ -9,118 +9,82 @@
 </p>
 
 <p align="center">
-  <em>从 CVE ID 到可执行回移方案：搜索、判定、依赖、适配、解释一体化完成。</em>
+  <em>从 CVE 编号到可执行回移方案：搜索、依赖、补丁适配、L0-L5 分级、真值验证一体化完成。</em>
 </p>
 
 ---
 
-## 项目介绍
+## 1. 项目定位
 
-`CVE Backporting Engine` 是一个面向企业内核维护团队的端到端 CVE 回移（Backport）流水线。它将传统依赖专家经验、步骤分散、结果不稳定的处理方式，升级为可重复、可度量、可解释的工程流程。
+这个项目用来解决企业内核维护中的三个核心问题：
 
-系统围绕真实生产问题设计：
+| 现实问题 | 传统处理方式 | 本项目给出的能力 |
+| --- | --- | --- |
+| 找不到对应修复 | 人工查邮件、查 commit、比 subject | 三级搜索：`ID -> Subject -> Diff` |
+| 找到补丁但打不上 | 手工改 patch、反复 `git apply` 试错 | 多级 DryRun + 补丁重建 + 冲突适配 |
+| 打上了但不敢合 | 风险解释不统一、依赖判断靠经验 | `L0-L5` 分级 + 规则证据 + validate 闭环 |
 
-- 上游修复与下游分支差异大，`git apply` 经常失败
-- 企业仓库存在 squash、路径迁移、上下文漂移，导致常规检索漏检
-- 单条 CVE 分析耗时长，批量处理不具备一致性
-- 决策依据难沉淀，跨团队协同成本高
+项目的目标不是只回答“有没有补丁”，而是稳定交付以下结论：
 
-项目核心目标：**把“找到补丁”提升为“交付可执行回移策略”**。
-
----
-
-## 项目优势
-
-### 1) 端到端自动化闭环
-从 `CVE-ID` 输入开始，自动串联：
-
-1. 多源情报抓取（MITRE / 内核源 / 镜像源）
-2. 引入提交（intro）检测
-3. 修复提交（fix）定位
-4. hunk 级依赖分析
-5. 多级 DryRun 适配验证
-6. 结构化叙述输出（analysis narrative）
-
-### 2) 三级提交搜索，解决“找不到”
-搜索链路采用 `ID -> Subject -> Diff` 渐进策略：
-
-- **L1 ID 精确匹配**：最高置信度
-- **L2 Subject 语义匹配**：支持 backport 命名差异
-- **L3 Diff 级匹配/包含度**：适配 squash 场景
-
-### 3) 五层自适应 DryRun，解决“打不上”
-当标准补丁应用失败时，采用渐进降级策略自动适配：
-
-- **L0 Strict**：严格上下文匹配
-- **L1 Context-C1**：放宽上下文约束
-- **L2 3-Way**：三方合并
-- **L3 Regenerated**：重建上下文补丁
-- **L4 Conflict-Adapted**：冲突分析后适配生成
-
-> 可选扩展：在 AI 开启时可进入 **AI-Generated** 路径进行模型辅助补丁生成。
-
-### 4) 七层工程化算法能力，覆盖复杂差异
-在核心五层 DryRun 之外，工程实现整合了更细粒度策略（如 Verified-Direct、Zero-Context 等），形成多路径算法体系，显著提升在企业分支中的命中与适配成功率。
-
-### 5) 可解释输出，便于审查与复盘
-关键命令输出 `analysis_narrative`，包含：
-
-- 工作流轨迹（做了什么）
-- 前置依赖判断（为什么）
-- 可应用性判定（成功/失败原因）
-- 开发者动作建议（下一步怎么做）
-
-同时，`analyze / validate / batch-validate` 现在统一输出顶层 `analysis_framework`：
-
-- `process`：分析过程骨架
-- `evidence`：证据骨架
-- `conclusion`：结论骨架
-
-用户可以先看这三部分，再决定是否继续下钻 `level_decision` 和 `rule_hits`。
+| 结论 | 具体内容 |
+| --- | --- |
+| 搜索结论 | fix / intro / stable backport 是否可定位 |
+| 依赖结论 | 是否存在必须或建议一并评估的 prerequisite patches |
+| 适配结论 | 补丁能否直接落地，还是要走适配路径 |
+| 审查结论 | 最终该走自动、轻审、人审还是审批通道 |
 
 ---
 
-## 项目优势提炼（可直接用于汇报）
+## 2. 核心能力总览
 
-### 一句话版本
-**将 CVE 回移从“专家手工排查”升级为“算法驱动的标准化处置流水线”。**
-
-### 三点版本
-1. **更快**：自动化串联关键步骤，缩短单 CVE 处置周期。  
-2. **更准**：多级搜索 + 多策略适配，提高补丁定位与应用成功率。  
-3. **更稳**：过程可解释、结果可审计，降低个人经验依赖。
-
-### 业务价值版本（管理视角）
-- 降低安全修复 SLA 压力
-- 提升批量 CVE 处置吞吐
-- 降低核心工程师重复劳动
-- 形成可复用的组织级安全工程资产
+| 能力模块 | 解决什么问题 | 关键输出 |
+| --- | --- | --- |
+| `Crawler Agent` | 采集 CVE、上游 fix、introduced commit、版本映射 | `cve_info` |
+| `Analysis Agent` | 在目标仓定位修复或引入点 | 搜索候选、搜索策略证据 |
+| `Dependency Agent` | 判断 prerequisite patches | `independent / recommended / required` |
+| `DryRun Agent` | 评估补丁可应用性和适配路径 | `Strict / 3-Way / Regenerated / Conflict-Adapted ...` |
+| `Policy Engine` | 把证据转成 `L0-L5` 执行通道 | `base_level / final_level / next_action` |
+| `validate` | 用已知真值验证单案例 | `generated_vs_real`、`overall_pass` |
+| `batch-validate` | 聚合策略效果和分级准确率 | `strategy_effectiveness`、`level_accuracy` |
+| `TUI` | 在终端可视化分析过程与结果 | Stage 面板、单案例面板、批量统计表 |
+| `HTTP API` | 对接平台或自动化服务 | `/api/analyze`、`/api/validate`、`/api/batch-validate` |
 
 ---
 
-## 快速入门
+## 3. 文档怎么分工
 
-### 三分钟上手路径
+这次文档已经拆分，不再把所有内容塞进一处：
 
-1. 安装依赖。
-2. 在 `config.yaml` 里配置目标内核仓库路径。
-3. 对目标分支执行一次 `build-cache`。
-4. 先用 `analyze` 看单条 CVE 的回移结论和规则分级。
-5. 已知真实修复时，再用 `validate` 对照评估工具效果。
-6. 需要平台化接入时，再启动 `server` 走 HTTP API。
+| 文档 | 负责什么 | 适合谁看 |
+| --- | --- | --- |
+| `README_zh.md` | 总体介绍、安装配置、CLI/TUI/API 使用方法、文档导航 | 第一次接触项目的人 |
+| `docs/TECHNICAL.md` | 系统架构、代码模块、数据流、输出 schema、API/TUI 技术说明 | 开发者、维护者 |
+| `docs/ADAPTIVE_DRYRUN.md` | DryRun 策略家族、适配顺序、冲突适配、输出口径 | 关注补丁适配的人 |
+| `docs/MULTI_LEVEL_ALGORITHM.md` | `L0-L5`、规则体系、调用链、LLM 使用边界、准确率高场景 | 关注策略与判定质量的人 |
+| `docs/presentation.md` | 面向汇报的精简版总览 | 评审、管理层、汇报场景 |
 
-### 1. 环境要求
-- Python 3.8+
-- 本地可访问目标 Linux 内核仓库
+---
 
-### 2. 安装依赖
+## 4. 环境与安装
+
+### 4.1 环境要求
+
+| 项目 | 要求 |
+| --- | --- |
+| Python | `3.8+` |
+| Git | 本地可访问目标 Linux 内核仓库 |
+| 仓库状态 | 能执行 `git show`、`git log`，且分支配置正确 |
+| 可选 LLM | 只有在启用 AI 增强时需要 |
+
+### 4.2 安装依赖
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 3. 配置目标仓库
-在 `config.yaml` 中配置版本别名与路径：
+### 4.3 配置目标仓库
+
+最小 `config.yaml`：
 
 ```yaml
 repositories:
@@ -129,53 +93,49 @@ repositories:
     branch: "linux-5.10.y"
 ```
 
-如需配置 `L0-L5` 策略分级与规则插件，请把 [rules/policy.example.yaml](/Users/junxiaoqiong/Workplace/cve_backporting/rules/policy.example.yaml) 中的 `policy:` 段复制到你的 `config.yaml`。
+如需启用 LLM：
 
-### 4. 构建提交缓存（首次必做）
+```yaml
+llm:
+  enabled: true
+  provider: "openai"
+  api_key: "YOUR_KEY"
+  base_url: "https://api.openai.com/v1"
+  model: "gpt-4o"
+```
+
+### 4.4 首次构建缓存
 
 ```bash
 python cli.py build-cache --target 5.10-hulk
 ```
 
-### 5. 执行核心分析（analyze）
+---
 
-```bash
-python cli.py analyze --cve CVE-2024-26633 --target 5.10-hulk
+## 5. 先跑哪个命令
 
-# 保守风格：更早把样本推入人工复核通道
-python cli.py analyze --cve CVE-2024-26633 --target 5.10-hulk --policy-profile conservative
-```
-
-### 6. 命令如何选择
-
-| 目标 | 命令 | 适用场景 |
-|------|------|----------|
-| 判断补丁能否直接回移，是否需要关联补丁，风险在哪 | `analyze` | 日常单条或批量 CVE 研判 |
-| 判断漏洞引入提交是否已进入目标分支 | `check-intro` | 确认下游是否真正受影响 |
-| 判断修复是否已经被合入 | `check-fix` | 避免重复回移 |
-| 用已知真实修复验证工具输出 | `validate` | 单条样本精度验证 |
-| 统计规则分桶、依赖分桶与 L0-L5 分布 | `batch-validate` | 批量策略效果评估 |
-| 首次建立或刷新提交缓存 | `build-cache` | 初始化环境或仓库更新后 |
-| 通过 URL 调用分析能力 | `server` | 平台对接、服务化调用 |
+| 目标 | 命令 | 什么时候用 |
+| --- | --- | --- |
+| 看单个 CVE 是否需要回移、风险在哪 | `analyze` | 日常分析主入口 |
+| 检查漏洞引入提交是否存在 | `check-intro` | 确认目标分支是否真的受影响 |
+| 检查修复是否已经合入 | `check-fix` | 避免重复回移 |
+| 用单个案例做真值验证 | `validate` | 校验工具输出与真实 fix 的关系 |
+| 批量看策略效果与分级准确率 | `batch-validate` | 规则回归、汇报、样本评估 |
+| 启动服务接口 | `server` | 平台对接 |
+| 跑基准测试集 | `benchmark` | 持续回归 |
 
 ---
 
-## `analyze` 核心用法（重点）
+## 6. CLI 用法
 
-### 单条 CVE 分析
+### 6.1 `analyze`
 
-```bash
-python cli.py analyze --cve CVE-2024-26633 --target 5.10-hulk
-
-# 保守风格：更早把样本推入人工复核通道
-python cli.py analyze --cve CVE-2024-26633 --target 5.10-hulk --policy-profile conservative
-```
-
-### 批量 CVE 分析
-
-```bash
-python cli.py analyze --batch cve_list.txt --target 5.10-hulk
-```
+| 用途 | 命令 |
+| --- | --- |
+| 单条 CVE | `python cli.py analyze --cve CVE-2024-26633 --target 5.10-hulk` |
+| 批量 CVE 列表 | `python cli.py analyze --batch cve_list.txt --target 5.10-hulk` |
+| 深度分析 | `python cli.py analyze --cve CVE-2024-26633 --target 5.10-hulk --deep` |
+| 不执行 DryRun | `python cli.py analyze --cve CVE-2024-26633 --target 5.10-hulk --no-dryrun` |
 
 `cve_list.txt` 示例：
 
@@ -185,474 +145,221 @@ CVE-2024-26634
 CVE-2024-26635
 ```
 
-### 深度分析模式
+### 6.2 `check-intro`
+
+| 用途 | 命令 |
+| --- | --- |
+| 按 CVE 检查 | `python cli.py check-intro --cve CVE-2024-26633 --target 5.10-hulk` |
+| 按 commit 检查 | `python cli.py check-intro --commit <intro_commit> --target 5.10-hulk` |
+
+### 6.3 `check-fix`
+
+| 用途 | 命令 |
+| --- | --- |
+| 按 CVE 检查 | `python cli.py check-fix --cve CVE-2024-26633 --target 5.10-hulk` |
+| 按 commit 检查 | `python cli.py check-fix --commit <fix_commit> --target 5.10-hulk` |
+
+### 6.4 `validate`
+
+| 用途 | 命令 |
+| --- | --- |
+| 基本验证 | `python cli.py validate --cve CVE-2024-26633 --target 5.10-hulk --known-fix <commit>` |
+| 直接指定上游 fix | `python cli.py validate --cve CVE-2024-26633 --target 5.10-hulk --known-fix <commit> --mainline-fix <upstream_fix>` |
+| 同时指定 introduced commit | `python cli.py validate --cve CVE-2024-26633 --target 5.10-hulk --known-fix <commit> --mainline-fix <fix> --mainline-intro <intro>` |
+| 深度验证 | `python cli.py validate --cve CVE-2024-26633 --target 5.10-hulk --known-fix <commit> --deep` |
+
+### 6.5 `batch-validate`
+
+| 用途 | 命令 |
+| --- | --- |
+| 全量验证 | `python cli.py batch-validate --file cve_data.json --target 5.10-hulk` |
+| 截取样本 | `python cli.py batch-validate --file cve_data.json --target 5.10-hulk --offset 10 --limit 20` |
+| 推荐并行 | `python cli.py batch-validate --file cve_data.json --target 5.10-hulk --workers 2` |
+| 深度批量验证 | `python cli.py batch-validate --file cve_data.json --target 5.10-hulk --workers 2 --deep` |
+
+### 6.6 `server`
 
 ```bash
-python cli.py analyze --cve CVE-2024-26633 --target 5.10-hulk --deep
+python cli.py server --host 127.0.0.1 --port 8000
 ```
-
-### 仅做判定，不执行 DryRun
-
-```bash
-python cli.py analyze --cve CVE-2024-26633 --target 5.10-hulk --no-dryrun
-```
-
-### analyze 结果产物
-
-执行后会生成：
-- 终端可视化阶段报告（含关键判定）
-- JSON 报告（含 `analysis_narrative`）
-- 若适配成功，输出 `*_adapted.patch` 补丁文件
 
 ---
 
-## 五层自适应 DryRun（核心机制）
+## 7. TUI 终端界面说明
 
-```text
-Patch Input
-  ├─ L0 Strict           -> git apply --check
-  ├─ L1 Context-C1       -> git apply -C1 --check
-  ├─ L2 3-Way            -> git apply --3way --check
-  ├─ L3 Regenerated      -> 锚点定位 + 上下文重建
-  └─ L4 Conflict-Adapted -> 冲突分析 + 适配补丁生成
-```
+默认 CLI 输出不是单纯日志，而是 Rich 风格的 TUI 面板。
 
-### 为什么这五层有效
-- 先用最可靠的 Git 原生路径（L0-L2）
-- 再进入算法修复路径（L3-L4）处理企业分支差异
-- 保持“自动化优先 + 人工可审查兜底”
+| 场景 | 终端里会看到什么 | 作用 |
+| --- | --- | --- |
+| `analyze` | Stage 进度 + 单案例结论面板 | 看当前分析进度和最终结论 |
+| `check-intro` / `check-fix` | 多策略命中面板 | 看三级搜索的命中情况 |
+| `validate` | 单案例验证结论 + patch 对比 + 分级信息 | 看工具与真值的关系 |
+| `batch-validate` | 多级策略统计表 + `L0-L5` 准确率表 | 看策略分布和整体准确率 |
+| `--deep` | 漏洞分析 / 补丁检视 / 风险收益 / 合入建议面板 | 看更细的技术建议 |
 
-### L0-L5 策略分级与可扩展规则
-
-当前实现把“DryRun 如何成功”和“最终应走哪条审查通道”拆开了：
-
-- `level_decision.base_level` / `base_method`：DryRun 基线
-- `level_decision.level`：经过规则抬升后的最终 L0-L5 场景
-
-最终级别的核心公式是：
-
-```text
-final_level = max(base_level, 所有命中规则给出的 level_floor)
-```
-
-这意味着 `L0-L5` 不是“补丁难度分”，也不是单独的“语义风险分”，而是下面四件事合并后的执行结论：
-
-1. DryRun 是如何证明补丁可应用的
-2. 关联补丁判断是否稳定
-3. 是否命中关键语义风险
-4. 最终应该走哪种审查和审批路径
-
-需要特别统一三个口径：
-
-- `strict` 成功，不代表最终一定是 `L0`
-- `verified-direct` 当前属于 `L3` 的基线方法，不是 `L5`
-- `L0 -> L5` 必须按递进阶梯理解，`L5` 是最高难度、最高人工介入级别
-
-#### 当前代码中的默认定义
-
-| 级别 | 当前默认 `base_method` | 代码里的策略定义 | 审查模式 | 建议动作 |
-|------|------------------------|------------------|----------|----------|
-| `L0` | `strict` | 确定性无害，才允许 `harmless=true` | `auto-pass` | 可直接回移，只保留最小回归验证 |
-| `L1` | `ignore-ws` / `context-C1` / `C1-ignore-ws` | 轻微上下文漂移，不自动判无害 | `llm-review` | 做轻量人工/LLM 复核 |
-| `L2` | `3way` | 中等风险适配，证据不足以停留在低级别 | `targeted-review` | 逐 hunk 核对调用点、返回路径和依赖 |
-| `L3` | `regenerated` / `verified-direct` | 语义敏感变更，必须做聚焦审查 | `focused-review` | 重点审查锁、字段、状态机、回归测试 |
-| `L4` | `conflict-adapted` | 高风险牵连，已进入传播或冲突适配场景 | `manual-approval` | 资深维护者审批，显式看传播链 |
-| `L5` | unknown / missing | 已进入最高难度处理区，系统无法稳定自动拍板 | `expert-escalation` | 暂停自动决策，补齐证据，并由资深维护者主导复核与验证 |
-
-#### 汇报时建议这样解释
-
-| 级别 | 可以直接拿去汇报的一句话定义 |
-|------|----------------------------|
-| `L0` | 已有最强可应用性证明，且没有额外语义风险，可进入“直接回移”通道 |
-| `L1` | 只有轻微漂移，补丁意图仍清晰，但仍需轻量复核确认不是伪安全 |
-| `L2` | 已能适配，但证据不足以继续停在低风险区，需要人工逐 hunk 核对 |
-| `L3` | 已碰到关键语义风险，不能再按低风险回移处理，必须做聚焦审查和回归测试 |
-| `L4` | 风险已经从局部 patch 扩散到调用链或冲突适配，需要资深维护者审批 |
-| `L5` | 最难处理的级别，说明系统已经无法稳定自动拍板，必须由资深维护者接管 |
-
-#### 终端策略风格参数
-
-CLI 现在支持通过 `--policy-profile` 直接指定本次执行的策略风格。该参数只影响当前命令，且优先级高于 YAML 中的 `policy.profile`。
-
-| 风格 | 终端参数 | 行为特征 | 大改动阈值 | 大 hunk 阈值 | 调用链 fanout 阈值 | 适用场景 |
-|------|----------|----------|------------|--------------|--------------------|----------|
-| 保守风格 | `--policy-profile conservative` | 更早升档，宁可多进人工复核，也尽量不把高风险样本留在低级别 | `40` 行 | `4` 个 hunk | `4` | 发布前审查、敏感子系统、安全优先场景 |
-| 平衡风格 | `--policy-profile balanced` | 默认风格，在误抬升和漏抬升之间做折中 | `80` 行 | `8` 个 hunk | `6` | 日常分析、常规 validate / batch-validate |
-
-| 支持命令 | 示例 |
-|----------|------|
-| `analyze` | `python cli.py analyze --cve CVE-2024-26633 --target 5.10-hulk --policy-profile conservative` |
-| `validate` | `python cli.py validate --cve CVE-2024-26633 --target 5.10-hulk --known-fix da23bd709b46 --policy-profile balanced` |
-| `batch-validate` | `python cli.py batch-validate --file cve_data.json --target 5.10-hulk --policy-profile conservative` |
-| `benchmark` | `python cli.py benchmark --file benchmarks.yaml --target 5.10-hulk --policy-profile balanced` |
-
-#### `base_level`、`final_level`、`direct_backport` 为什么必须分开看
-
-- `base_level`：补丁是怎么 apply 上去的
-- `final_level`：综合规则后应该走哪条审查通道
-- `direct_backport`：是否允许输出“可直接回移”的结论
-
-真实样本会出现：
-
-- `base=L0, final=L3`：文本上可 `strict` 应用，但命中了锁、字段、状态机等语义风险
-- `base=L1, final=L1`：只是注释、日志、等价宏、局部变量 rename 这类轻微漂移
-- `base=L2, final=L4`：`3way` 可过，但风险已经沿调用链传播，或进入冲突适配
-- `base=L3, final=L3`：需要 `regenerated / verified-direct`，必须走聚焦审查
-
-看分布时也不要只看“级别数字”：
-
-- `L3/L4` 占比上升，很多时候说明风险证据被显式暴露出来了，不等于 apply 能力退化
-- `L0/L1` 占比下降，很多时候说明低级别准入变严了，不等于工具变差
-- 真正健康的目标不是把样本都压进 `L0/L1`，而是让低级别只留给证据最强的样本
-- 如果出现 `base_level=L0` 很多、`final_level=L3` 也很多，不能只看两列分布；应同时看批量汇总里的 `promotion_summary`，确认到底是哪些规则在抬升
-- 当前实现已经补了 `promotion_matrix / top_promotion_rules`，可以直接回答“是哪个规则把样本从 `L0` 推到了 `L3/L4`”
-
-默认规则已经迁移到 `rules/` 目录下的 Python 模块：
-
-- `rules/default_rules.py`：大改动、关键结构、调用链牵连、L1 API surface
-- `rules/level_policies.py`：L0-L5 默认策略与 `level_floor` 抬升逻辑
-- `rules/policy.example.yaml`：规则配置示例
-
-当前规则进一步收敛为四类：
-
-- `admission`：支持“可直接回移”或支持 L1 轻漂移判断的正向准入规则
-- `low_level_veto`：阻止误入低级别处理区
-- `direct_backport_veto`：阻止“可直接回移”结论
-- `risk_profile`：锁、生命周期、状态机、结构体字段、错误路径、调用链传播等高风险画像规则
-
-### 本轮新增：降低误抬升，同时继续收紧低级别准入
-
-当前规则的目标不是放松标准，而是让“证据 -> 结论”映射更稳定：
-
-- **`critical_structures` 不再因为任意 `struct` 文本就触发。**
-  普通 `struct foo *ctx` 这类指针/引用行不再被当成布局风险；只有结构体定义变化，或 `sizeof`、`offsetof`、`container_of` 这类布局敏感操作才会命中。
-- **调用链传播会过滤伪调用和成员访问伪 callee。**
-  `sizeof`、`likely`、`ARRAY_SIZE`、`__builtin_*` 这类伪调用不再进入 caller/callee 关系；`ops->helper()`、`obj.cb()` 也不会被当成普通符号调用。
-- **`p2_state_machine_control_flow` 现在必须看到状态语义。**
-  纯 `if (ret) return -E...` 这类错误路径变化会停留在 `error_path`，不会再因为出现 `if / return` 就误判为状态机变化。
-- **`p2_lifecycle_resource` 不再因为裸 `goto err/out` 就直接抬到 `L3`。**
-  现在只有真正看到资源获取/释放、引用计数、持有关系或“回滚路径 + 资源线索”组合时，才会进入生命周期专项；单独的错误路径留在 `error_path/L2`。
-- **`p2_struct_field_data_path` 不再因为“任何成员访问”就触发。**
-  现在必须看到字段选择变化、结构体字段定义变化，或在锁/状态/错误路径语境下发生写路径漂移，才会命中字段/数据路径专项；同字段单纯改值不再被当成字段风险。
-- **L0 正向准入条件更硬了。**
-  `strict` 不再天然等于“可直接回移候选”。现在还要求没有前置依赖、没有传播、没有 `special_risk` 命中、没有字段/状态/错误路径语义标记，才会命中 `direct_backport_candidate`。
-- **L1 不再只说“轻微漂移”，而是给出样本证据。**
-  `l1_light_drift_sample` 会把注释漂移、日志文本漂移、等价宏替换、局部变量重命名这类边界样本显式写进证据。
-- **关联补丁开始输出语义域证据。**
-  `PrerequisitePatch` 现在会带上 `shared_fields / shared_lock_domains / shared_state_points / evidence_lines`，让“为什么建议先看关联补丁”可以落到共享字段、锁域和状态点，而不只是 hunk/function overlap。
-
-这意味着：
-
-- `L3/L4` 更接近真正的语义风险暴露，而不是宽匹配副作用
-- `L0/L1` 的保留条件更清晰，只留给证据更强的样本
-- 关联补丁判断开始从“位置接近”升级到“语义域重叠”
-
-后续业务规则可直接放到 `rules/*.py`，并通过 `policy.extra_rule_modules` 以插件方式加载。
+| TUI 组件 | 代码位置 | 说明 |
+| --- | --- | --- |
+| `StageTracker` | `core/ui.py` | 统一阶段进度显示 |
+| `render_report` | `core/ui.py` | `analyze` 主报告 |
+| `render_validate_report` | `core/ui.py` | `validate` 主报告 |
+| `render_batch_validate_report` | `core/ui_batch.py` | `batch-validate` 汇总报告 |
+| `_render_deep_report` | `cli.py` | `--deep` 面板 |
 
 ---
 
-## 七层算法能力（工程实现视角）
+## 8. HTTP API 用法
 
-在复杂仓库中，系统通过多策略组合形成七层（及扩展）能力体系，典型包括：
-
-1. 严格应用检查
-2. 弱化上下文检查
-3. 三方合并检查
-4. 锚点行定位
-5. 七策略序列搜索
-6. 逐行投票定位
-7. 跨 hunk 偏移传播
-
-并可叠加：
-- 代码语义匹配（结构/标识符/关键词）
-- 路径映射（跨版本目录迁移）
-- 可选 AI 生成补丁路径
-
-> 详细算法说明见：`docs/ADAPTIVE_DRYRUN.md` 与 `docs/MULTI_LEVEL_ALGORITHM.md`
-
----
-
-## 常用命令
+### 8.1 启动服务
 
 ```bash
-# 检查漏洞引入提交是否在目标分支存在
-python cli.py check-intro --cve CVE-2024-26633 --target 5.10-hulk
-
-# 检查修复是否已合入
-python cli.py check-fix --cve CVE-2024-26633 --target 5.10-hulk
-
-# 单条验证（与已知修复对比）
-python cli.py validate --cve CVE-2024-26633 --target 5.10-hulk --known-fix <commit>
-
-# 单条验证，强制走保守风格
-python cli.py validate --cve CVE-2024-26633 --target 5.10-hulk --known-fix <commit> --policy-profile conservative
-
-# 批量验证
-python cli.py batch-validate --file cve_data.json --target 5.10-hulk
-
-# 单本地仓库的推荐并行方式
-python cli.py batch-validate --file cve_data.json --target 5.10-hulk --workers 2
-
-# 批量验证，显式指定平衡风格
-python cli.py batch-validate --file cve_data.json --target 5.10-hulk --workers 2 --policy-profile balanced
-
-# 启动 HTTP API 服务（analyze / validate / batch-validate）
-python cli.py server --host 0.0.0.0 --port 8000
-
-# 基准评估
-python cli.py benchmark --file benchmarks.yaml --target 5.10-hulk
+python cli.py server --host 127.0.0.1 --port 8000
 ```
 
-说明：`/api/analyze` 与 `/api/analyzer` 可互通，均支持 `target_version` 或 `target` 字段；所有返回均以 JSON 形式给出完整过程与规则详情。
+### 8.2 路由总览
 
-并行建议：
+| 路由 | 作用 | 最少必填字段 |
+| --- | --- | --- |
+| `POST /api/analyze` | 单条或多条 CVE 分析 | `target_version` + `cve_id` 或 `cves` / `cve_ids` |
+| `POST /api/analyzer` | `analyze` 兼容别名 | 同上 |
+| `POST /api/validate` | 单条真值验证 | `target_version` + `cve_id` + `known_fix` |
+| `POST /api/batch-validate` | 批量真值验证 | `target_version` + `items[]` |
+| `GET /health` | 存活检查 | 无 |
 
-- `--workers 1` 是最稳妥的默认值。
-- `--workers 2` 是单本地内核仓库下的推荐值。
-- 不建议一开始就超过 `4`，因为随后瓶颈通常会变成 `git worktree` 元数据、共享对象库和磁盘 I/O。
-- 使用 `--deep` 时，建议 `workers` 保持在 `1` 或 `2`。
-- 单仓也可以并行，因为每个 CVE 都在独立的临时 `git worktree` 中执行，不会共享同一个 checkout 工作树。
+### 8.3 请求示例
 
-## CLI 代码结构
-
-当前 CLI 已按命令拆分，用户命令保持不变，内部职责更清晰：
-
-- `cli.py`：保留统一入口、公共参数和共享 runtime helper
-- `commands/analyze.py`：`analyze`
-- `commands/checks.py`：`check-intro` / `check-fix`
-- `commands/validate.py`：`validate` / `benchmark` / `batch-validate`
-- `commands/maintenance.py`：`build-cache` / `search`
-- `commands/server.py`：`server`
-
-这意味着后续新增命令或调整某个命令时，不需要继续把所有逻辑堆进一个超大 `cli.py`。
-
-## HTTP API（server 模式）
-
-### 启动 API 服务
-
-```bash
-python cli.py server --host 127.0.0.1 --port 8000 --config config.yaml
-```
-
-- 通用参数包含 `--host`（监听地址，默认 `127.0.0.1`）、`--port`（监听端口，默认 `8000`）、`--config`（同 CLI 的配置文件，默认 `config.yaml`）
-- 路由：`GET /health`
-- 路由：`POST /api/analyze`
-- 路由：`POST /api/analyzer`（兼容别名）
-- 路由：`POST /api/validate`
-- 路由：`POST /api/batch-validate`
-
-成功响应统一返回：
-
-```json
-{
-  "ok": true,
-  "data": { ... }
-}
-```
-
-失败响应返回 HTTP `400/404/500`，并会补充“怎么改请求”的执行提示，例如：
-
-```json
-{
-  "ok": false,
-  "error": {
-    "error_code": "invalid_request",
-    "user_message": "缺少 CVE 标识。",
-    "route": "/api/validate",
-    "missing_input": ["cve_id"],
-    "hint": "请求体中补充 `cve_id`。",
-    "suggested_fix": {
-      "target_version": "5.10-hulk",
-      "cve_id": "CVE-2024-26633"
-    },
-    "absolute_date": "2026-04-02"
-  }
-}
-```
-
-### `POST /api/analyze` / `POST /api/analyzer`
+#### `/api/analyze`
 
 ```json
 {
   "target_version": "5.10-hulk",
   "cve_id": "CVE-2024-26633",
-  "deep": false,
-  "no_dryrun": false
+  "deep": false
 }
 ```
 
-或批量请求：
-
-```json
-{
-  "target": "5.10-hulk",
-  "cves": ["CVE-2024-26633", "CVE-2024-26634"],
-  "cve_ids": ["CVE-2024-26635"],
-  "deep": true
-}
-```
-
-`cve_id`、`cves`、`cve_ids` 会被合并并统一处理。
-
-关键返回字段：
-
-- `analysis_framework.process`
-- `analysis_framework.evidence`
-- `analysis_framework.conclusion`
-- `level_decision`
-- `validation_details`
-
-### `POST /api/validate`
+#### `/api/validate`
 
 ```json
 {
   "target_version": "5.10-hulk",
   "cve_id": "CVE-2024-26633",
   "known_fix": "da23bd709b46",
-  "known_prereqs": "abc111,def222",
-  "mainline_fix": "aaabbb000111",
-  "mainline_intro": "bbb222ccc333",
-  "deep": false,
-  "p2_enabled": true
+  "mainline_fix": "d375b98e0248",
+  "mainline_intro": "fbfa743a9d2a"
 }
 ```
 
-`known_prereqs` 也可传数组：
+#### `/api/batch-validate`
 
 ```json
 {
-  "known_prereqs": ["abc111", "def222"]
-}
-```
-
-关键返回字段：
-
-- `analysis_framework.process`
-- `analysis_framework.evidence`
-- `analysis_framework.conclusion`
-- `l0_l5.current_level`
-- `l0_l5.base_level`
-- `level_decision`
-- `validation_details`
-
-### `POST /api/batch-validate`
-
-```json
-{
-  "target": "5.10-hulk",
-  "deep": false,
+  "target_version": "5.10-hulk",
   "workers": 2,
-  "p2_enabled": true,
   "items": [
     {
       "cve_id": "CVE-2024-26633",
-      "known_fix": "da23bd709b46",
-      "known_prereqs": ["abc111"],
-      "mainline_fix": "aaabbb000111",
-      "mainline_intro": "bbb222ccc333"
-    },
-    {
-      "cve_id": "CVE-2024-26634",
-      "known_fix": "11aabbeff",
-      "known_prereqs": "111,222"
+      "known_fix": "da23bd709b46"
     }
   ]
 }
 ```
 
-返回结果包含 `results` / `errors` / `summary`，并补充与 CLI 同口径的 `batch_summary`：
+### 8.4 API 返回里先看什么
 
-```json
-{
-  "ok": true,
-  "data": {
-    "operation": "batch-validate",
-    "results": [],
-    "errors": [],
-    "summary": {
-      "total": 0,
-      "success": 0,
-      "error": 0
-    },
-    "p2_enabled": true,
-    "workers": 2,
-    "parallel_mode": true,
-    "batch_summary": {
-      "l0_l5": {},
-      "promotion_summary": {
-        "promotion_matrix": {
-          "L0->L3": 0
-        },
-        "top_promotion_rules": {
-          "p2_lifecycle_resource": 0
-        }
-      },
-      "deterministic_exact_match": {
-        "count": 0,
-        "rate": 0.0
-      },
-      "critical_structure_change": {
-        "count": 0,
-        "rate": 0.0
-      },
-      "manual_prerequisite_analysis": {
-        "count": 0,
-        "rate": 0.0
-      }
-    },
-    "l0_l5_summary": {
-      "levels": ["L0", "L1", "L2", "L3", "L4", "L5"],
-      "current_level_distribution": {},
-      "base_level_distribution": {}
-    }
-  }
-}
+| 字段 | 作用 |
+| --- | --- |
+| `result_status` | 当前结果是否完整、是否报错、是否不适用 |
+| `analysis_framework` | 过程 / 证据 / 结论骨架 |
+| `l0_l5` | `base_level`、`current_level`、`review_mode` |
+| `analysis_narrative` | 面向人的过程说明 |
+| `traceability` | 规则 profile、目标仓 HEAD、数据源等追溯信息 |
+
+---
+
+## 9. 策略风格参数
+
+CLI 当前主推两种用户可见风格，通过 `--policy-profile` 指定。它只影响当前命令，优先级高于 `config.yaml` 里的 `policy.profile`。
+
+| 风格 | 参数 | 大改动阈值 | 大 hunk 阈值 | 调用链 fanout 阈值 | 适合场景 |
+| --- | --- | --- | --- | --- | --- |
+| 保守风格 | `--policy-profile conservative` | `40` 行 | `4` | `4` | 发布前、敏感子系统、安全优先 |
+| 平衡风格 | `--policy-profile balanced` | `80` 行 | `8` | `6` | 日常分析、常规批量验证 |
+
+示例：
+
+```bash
+python cli.py analyze --cve CVE-2024-26633 --target 5.10-hulk --policy-profile conservative
+python cli.py batch-validate --file cve_data.json --target 5.10-hulk --workers 2 --policy-profile balanced
 ```
 
-`results` 中每条结果也都会包含：
+---
 
-- `analysis_framework`
-- `l0_l5`
-- `level_decision`
-- `validation_details`
+## 10. 哪些功能会用到 LLM
 
-批量结果里建议优先同时看这三组字段：
+项目的核心判定链路默认是确定性的。LLM 只负责增强或兜底。
 
-- `batch_summary.l0_l5`
-- `batch_summary.promotion_summary`
-- `batch_summary.special_risk`
+| 功能 | 是否依赖 LLM 才能运行 | 没有 LLM 时会怎样 |
+| --- | --- | --- |
+| 搜索、依赖、DryRun、分级、validate、batch-validate | 否 | 正常运行 |
+| 社区讨论摘要 | 否 | 只保留确定性抓取结果 |
+| 漏洞深度分析 | 否 | 输出确定性规则版 |
+| 补丁逻辑检视 | 否 | 输出确定性审查项 |
+| 风险收益评估 | 否 | 输出确定性评分与说明 |
+| 合入建议 | 否 | 输出确定性建议 |
+| validate 差异解释 | 否 | 不再生成 LLM 差异总结 |
+| AI 兜底补丁生成 | 是 | 不进入 AI-generated 路径 |
 
-这样才能回答：
+一句话总结：
 
-- 为什么 `base_level` 和 `final_level` 差异这么大
-- 是哪些规则在抬升
-- 这些抬升是锁/生命周期/字段/错误路径这类真实风险，还是规则过宽导致的副作用
-
-`/api/batch-validate` 也支持可选参数 `workers`，推荐值与 CLI 一致：
-
-- `1`：最稳妥
-- `2`：单本地仓库推荐
-- `deep=true` 时建议不超过 `2`
+- **核心判断不依赖 LLM**
+- **LLM 主要用于增强解释和 AI 兜底补丁生成**
 
 ---
 
-## 建议阅读顺序
+## 11. 哪些场景准确率高
 
-1. `README.md`（英文总览）
-2. `README_zh.md`（中文落地说明）
-3. `plan.md`（当前演进方向与验收标准）
-4. `docs/presentation.md`（汇报材料）
-5. `docs/TECHNICAL.md`（架构与模块）
-6. `docs/ADAPTIVE_DRYRUN.md`（五层 DryRun 原理）
-7. `docs/MULTI_LEVEL_ALGORITHM.md`（多级算法全景）
+这里只讲当前实现里证据最强的场景：
+
+| 场景 | 为什么证据强 | 应看字段 |
+| --- | --- | --- |
+| 搜索命中精确 ID | 不依赖模糊启发式 | 搜索策略 `L1` |
+| `Strict` 直接通过 | 原始补丁文本与目标仓高度一致 | `dryrun_detail.apply_method` |
+| `Context-C1/Whitespace` 通过且无风险规则命中 | 差异主要限于上下文或空白 | `apply_method` + `rule_hits` |
+| validate 中 `verdict = identical` | 工具补丁与真实修复完全一致 | `generated_vs_real.verdict` |
+| validate 中 `deterministic_exact_match = true` | 工具补丁与真实修复逐字等价 | `generated_vs_real.deterministic_exact_match` |
+| batch 中某个策略家族 `acceptable_patch_rate` 高 | 说明该策略家族在当前样本集里稳定产生可接受补丁 | `summary.strategy_effectiveness` |
+
+不应被解释成“高准确率自动化”的场景：
+
+| 场景 | 原因 |
+| --- | --- |
+| `3way` | 合并成功不等于语义安全 |
+| `conflict-adapted` | 已进入冲突重写 |
+| `AI-Generated` | 兜底路径，不是高置信主路径 |
+| `L3/L4/L5` | 风险或不确定性已经显著抬高 |
 
 ---
 
-## 下一步演进重点
+## 12. 输出目录与产物
 
-当前阶段的主任务不是继续叠加算法分支，而是把已有能力收敛成可运营体系：
+默认输出目录是 `analysis_results/<run-id>/...`。
 
-1. 把 `rules/` 变成规则代码、规则文档、规则配置样例的统一入口。
-2. 建立 20+ CVE 的标准样本验证清单，验证 `L0-L5` 与 warning 判定质量。
-3. 把 `level_decision` 输出真正用于人工审查、审批门禁和专家答辩材料。
-4. 删除不再作为主入口维护的冗余文档，避免文档继续分叉。
+| 模式 | 典型输出 |
+| --- | --- |
+| `analyze` | `report.json`、适配补丁、分析叙述 |
+| `validate` | `report.json`、`community.patch`、`real_fix.patch`、`adapted.patch` |
+| `batch-validate` | 批量汇总 JSON、每个 CVE 的 case 目录、策略/分级统计 |
+| `--deep` | 额外的 `deep_report.json` 与深度分析结构 |
+
+---
+
+## 13. 建议阅读顺序
+
+| 如果你想知道 | 去哪里 |
+| --- | --- |
+| 系统整体怎么用 | `README_zh.md` |
+| 系统架构、TUI、API、输出 schema | `docs/TECHNICAL.md` |
+| DryRun 具体怎么尝试、怎么适配 | `docs/ADAPTIVE_DRYRUN.md` |
+| `L0-L5`、规则、调用链、LLM 使用边界、准确率高场景 | `docs/MULTI_LEVEL_ALGORITHM.md` |
+| 对外汇报怎么讲 | `docs/presentation.md` |
+
