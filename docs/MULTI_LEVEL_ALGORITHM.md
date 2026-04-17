@@ -1,12 +1,13 @@
 # 多级算法与 L0-L5 分级手册
 
-本文只负责讲三件事：
+本文只负责讲四件事：
 
 1. 搜索 / 依赖 / 风险规则的核心算法口径
 2. `L0-L5` 是怎么从 `base_level` 推到 `final_level` 的
-3. 哪些功能用到 LLM、哪些场景准确率高、哪些场景必须保守处理
+3. 调用链、LLM 使用边界、准确率高场景
+4. 什么时候应该继续保守处理
 
-如果你想看 DryRun 的具体适配顺序，请看 `docs/ADAPTIVE_DRYRUN.md`；如果你想看系统架构和 API/TUI，请看 `docs/TECHNICAL.md`。
+规则逐条解释请看 `docs/RULEBOOK.md`；系统边界请看 `docs/BOUNDARIES.md`；DryRun 具体顺序请看 `docs/ADAPTIVE_DRYRUN.md`；接口和 schema 请看 `docs/API_CONTRACT.md` 与 `docs/OUTPUT_SCHEMA.md`。
 
 ---
 
@@ -51,6 +52,8 @@
 | `low_level_veto` | 阻止样本误落入 `L0/L1` |
 | `direct_backport_veto` | 阻止系统轻率给出“可直接回移” |
 | `risk_profile` | 显式抬升锁、生命周期、状态机、字段、错误路径、调用链等风险 |
+
+所有用户可见规则的逐条说明，请直接看 `docs/RULEBOOK.md`。
 
 ---
 
@@ -104,8 +107,6 @@ final_level = max(base_level, 所有命中规则给出的 level_floor)
 
 ## 5. 基线方法与级别映射
 
-### 5.1 基线方法表
-
 | `base_method` | 默认 `base_level` | 具体含义 |
 | --- | --- | --- |
 | `strict` | `L0` | 原始补丁直接通过 `git apply --check` |
@@ -115,7 +116,7 @@ final_level = max(base_level, 所有命中规则给出的 level_floor)
 | `conflict-adapted` | `L4` | 冲突上下文被改写后再尝试落地 |
 | unknown / none | `L5` | 方法未知或证据不足 |
 
-### 5.2 用户容易误解的三点
+用户容易误解的三点：
 
 | 常见误解 | 正确口径 |
 | --- | --- |
@@ -125,9 +126,7 @@ final_level = max(base_level, 所有命中规则给出的 level_floor)
 
 ---
 
-## 6. 常见升档规则
-
-### 6.1 规则与 floor 对照
+## 6. 核心升档规则总览
 
 | 规则 | 常见 floor | 触发意义 |
 | --- | --- | --- |
@@ -141,16 +140,10 @@ final_level = max(base_level, 所有命中规则给出的 level_floor)
 | `prerequisite_required` | `L3` | 强依赖，不应当单 patch 决策 |
 | `call_chain_fanout` | `L2` | 修改函数影响面较大 |
 | `call_chain_propagation` | `L2/L4` | 风险沿调用链扩散 |
+| `large_change` | `L2` | patch/hunk 规模明显变大 |
+| `single_line_high_impact` | `L2/L3` | 单行修改但影响控制流或同步语义 |
 
-### 6.2 常见升级场景
-
-| 场景 | 常见升级方向 | 为什么升级 |
-| --- | --- | --- |
-| `strict` 成功但命中中等依赖 | `L0 -> L1` | 不能只按单 patch 看 |
-| `L1` 漂移样本里出现 API 面变化 | `L1 -> L2` | 可能影响调用点或返回值语义 |
-| `strict` 成功但出现错误路径变化 | `L0 -> L2` | 失败分支风险被显式暴露 |
-| `strict` 成功但命中锁 / 生命周期 / 字段 | `L0 -> L3` | 已进入语义敏感区 |
-| 关键结构叠加传播链 | `L2/L3 -> L4` | 风险从局部扩散到链路级 |
+逐条规则请看 `docs/RULEBOOK.md`。
 
 ---
 
@@ -179,11 +172,11 @@ final_level = max(base_level, 所有命中规则给出的 level_floor)
 | `call_chain_fanout` | `fanout >= threshold` | `L2` | 影响面已经变宽 |
 | `call_chain_propagation` | 存在 caller/callee 牵连；无关键结构时通常要求 `fanout >= 2`；有关键结构时会更激进 | `L2` 或 `L4` | 风险已经沿链路扩散 |
 
+注意：当前调用链分析是局部图，不是全仓多跳传播分析。完整边界请看 `docs/BOUNDARIES.md`。
+
 ---
 
 ## 8. 哪些功能会用到 LLM
-
-### 8.1 LLM 使用矩阵
 
 | 功能 | 是否需要 LLM 才能运行 | 作用 |
 | --- | --- | --- |
@@ -198,7 +191,7 @@ final_level = max(base_level, 所有命中规则给出的 level_floor)
 | validate 差异解释 | 否 | LLM 仅补充“为什么偏差” |
 | AI 兜底补丁生成 | 是 | 只有这一路必须依赖 LLM |
 
-### 8.2 为什么这里强调“不依赖 LLM”
+为什么这里强调“不依赖 LLM”：
 
 | 原因 | 说明 |
 | --- | --- |
@@ -210,8 +203,6 @@ final_level = max(base_level, 所有命中规则给出的 level_floor)
 
 ## 9. 哪些场景准确率高
 
-### 9.1 高准确率场景表
-
 | 场景 | 为什么证据强 | 应看字段 |
 | --- | --- | --- |
 | 搜索命中 ID 精确匹配 | 不依赖模糊启发式 | 搜索策略 `L1` |
@@ -221,7 +212,7 @@ final_level = max(base_level, 所有命中规则给出的 level_floor)
 | `deterministic_exact_match = true` | 工具补丁与真实修复完全一致 | `generated_vs_real.deterministic_exact_match` |
 | `L0/L1` 且无 veto / risk 规则命中 | 文本证据和规则证据都干净 | `l0_l5` + `rule_class_summary` |
 
-### 9.2 不应宣传为高准确率的场景
+不应宣传为高准确率的场景：
 
 | 场景 | 原因 |
 | --- | --- |
@@ -241,6 +232,7 @@ final_level = max(base_level, 所有命中规则给出的 level_floor)
 | 状态机与字段路径同时变化 | 很容易引入隐性行为回归 |
 | 关键结构叠加调用链传播 | 风险已从局部放大到链路级 |
 | validate 样本里 `L0` 大量被抬到 `L3/L4` | 说明样本风险密度高，不能只看文本 apply |
+| 命中系统边界场景 | 如 kernel config、运行时依赖、长链传播、情报不足，应人工接管 |
 
 ---
 
@@ -248,20 +240,25 @@ final_level = max(base_level, 所有命中规则给出的 level_floor)
 
 | 字段 | 用来回答什么 |
 | --- | --- |
-| `level_distribution.base_level_counts` | 当前样本的 apply 能力基线如何 |
-| `level_distribution.final_level_counts` | 最终需要多少自动、多少人工审查 |
+| `summary.l0_l5` | 当前样本的主分级分布如何 |
+| `summary.level_distribution` | 兼容视角下的 `base_level / final_level` 分布 |
 | `strategy_effectiveness` | 各 DryRun 家族的通过率和补丁准确率如何 |
 | `level_accuracy` | 每个 `L0-L5` 自己的通过率和准确率如何 |
 | `promotion_matrix` | 样本主要从哪一级被抬到哪一级 |
 | `top_promotion_rules` | 是哪些规则在主导升级 |
 
+字段字典请看 `docs/OUTPUT_SCHEMA.md`。
+
 ---
 
-## 12. 该文档与其他文档的边界
+## 12. 文档边界
 
 | 如果你要看 | 去哪里 |
 | --- | --- |
+| 规则逐条说明 | `docs/RULEBOOK.md` |
+| 系统边界 | `docs/BOUNDARIES.md` |
 | DryRun 的具体尝试顺序、`apply_attempts`、冲突适配 | `docs/ADAPTIVE_DRYRUN.md` |
-| 系统目录、TUI/API、输出 schema | `docs/TECHNICAL.md` |
+| 系统目录、TUI、验证框架 | `docs/TECHNICAL.md` |
+| API 合同 | `docs/API_CONTRACT.md` |
+| 输出字段字典 | `docs/OUTPUT_SCHEMA.md` |
 | 面向汇报的版本 | `docs/presentation.md` |
-

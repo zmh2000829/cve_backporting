@@ -1,6 +1,8 @@
 # 技术架构与接口说明
 
-本文负责解释“系统怎么实现”，包括代码目录、数据流、TUI、HTTP API、输出 schema、验证框架。DryRun 细节请看 `docs/ADAPTIVE_DRYRUN.md`；`L0-L5` 与规则请看 `docs/MULTI_LEVEL_ALGORITHM.md`。
+本文负责解释“系统怎么实现”，包括代码目录、数据流、TUI 和验证框架。
+
+接口合同请看 `docs/API_CONTRACT.md`；输出字段字典请看 `docs/OUTPUT_SCHEMA.md`；系统边界请看 `docs/BOUNDARIES.md`；DryRun 细节请看 `docs/ADAPTIVE_DRYRUN.md`；`L0-L5` 与规则请看 `docs/MULTI_LEVEL_ALGORITHM.md` 和 `docs/RULEBOOK.md`。
 
 ---
 
@@ -130,98 +132,18 @@ services/reporting.py
 
 ---
 
-## 5. HTTP API 技术说明
+## 5. API 与输出的技术边界
 
-### 5.1 路由
+这两块已经拆成独立文档，避免技术架构文档再次膨胀。
 
-| 方法 | 路由 | 功能 |
-| --- | --- | --- |
-| `GET` | `/health` | 健康检查 |
-| `POST` | `/api/analyze` | analyze |
-| `POST` | `/api/analyzer` | analyze 兼容别名 |
-| `POST` | `/api/validate` | validate |
-| `POST` | `/api/batch-validate` | batch-validate |
-
-### 5.2 请求字段
-
-#### `/api/analyze`
-
-| 字段 | 必填 | 说明 |
-| --- | --- | --- |
-| `target_version` / `target` / `repo` | 是 | 目标仓别名 |
-| `cve_id` / `cves` / `cve_ids` | 是 | 单条或多条 CVE |
-| `deep` | 否 | 是否追加深度分析 |
-| `no_dryrun` | 否 | 是否跳过 DryRun |
-
-#### `/api/validate`
-
-| 字段 | 必填 | 说明 |
-| --- | --- | --- |
-| `target_version` | 是 | 目标仓别名 |
-| `cve_id` | 是 | CVE 编号 |
-| `known_fix` / `known_fixes` | 是 | 已知真实修复 commit |
-| `known_prereqs` | 否 | 已知前置依赖 |
-| `mainline_fix` | 否 | 显式指定上游 fix |
-| `mainline_intro` | 否 | 显式指定上游 introduced commit |
-| `deep` | 否 | 是否追加深度分析 |
-
-#### `/api/batch-validate`
-
-| 字段 | 必填 | 说明 |
-| --- | --- | --- |
-| `target_version` | 是 | 目标仓别名 |
-| `items[]` | 是 | 每项至少包含 `cve_id` 和 `known_fix` |
-| `workers` | 否 | 并发数，`deep` 时会压到 `<= 2` |
-| `deep` | 否 | 是否追加深度分析 |
-
-### 5.3 返回结构
-
-| 字段 | 作用 |
+| 主题 | 去哪里 |
 | --- | --- |
-| `ok` | 请求是否成功 |
-| `operation` | 当前操作名 |
-| `result_status` | 单条结果状态 |
-| `analysis_framework` | 结构化过程 / 证据 / 结论 |
-| `traceability` | 规则 profile、目标仓 HEAD、数据来源、schema 版本 |
-| `summary` | analyze / batch 的汇总结果 |
+| HTTP API 请求模板、响应模板、必要字段、错误返回 | `docs/API_CONTRACT.md` |
+| 单案例字段、batch summary、错误结构、字段字典 | `docs/OUTPUT_SCHEMA.md` |
 
 ---
 
-## 6. 输出 schema
-
-### 6.1 单案例字段
-
-| 字段 | 作用 | 来源 |
-| --- | --- | --- |
-| `result_status` | 结果状态、错误语义、不完整原因 | `core/report_schema.py` |
-| `analysis_framework` | 过程 / 证据 / 结论骨架 | `services/reporting.py` |
-| `analysis_narrative` | 面向人的过程叙述 | `cli.py` + `services/reporting.py` |
-| `l0_l5` | `base_level` / `current_level` / `review_mode` | `core/output_serializers.py` |
-| `traceability` | 数据来源、规则 profile、目标仓 HEAD | `services/reporting.py` |
-| `artifacts` | 输出文件与目录信息 | `services/output_support.py` |
-
-### 6.2 batch 字段
-
-| 字段 | 用来回答什么 |
-| --- | --- |
-| `summary.level_distribution` | 当前样本的 `base_level / final_level` 分布 |
-| `summary.strategy_effectiveness` | 各 DryRun 家族的数量、占比、通过率、补丁准确率 |
-| `summary.level_accuracy` | 每个 `L0-L5` 的单独通过率与准确率 |
-| `summary.risk_hit_summary` | 特殊风险命中统计 |
-| `summary.key_findings` | `deterministic_exact_match`、`solution_set` 等关键指标 |
-
-### 6.3 validate 对比口径
-
-| verdict | 含义 | 是否算可接受 |
-| --- | --- | --- |
-| `identical` | 工具补丁与真实修复完全一致 | 是 |
-| `essentially_same` | 文本可能不同，但语义等价 | 是 |
-| `different` | 差异明显，不等价 | 否 |
-| `no_data` | 无法形成有效对比 | 否 |
-
----
-
-## 7. LLM 集成边界
+## 6. LLM 集成边界
 
 | 模块 | 文件 | 是否必须依赖 LLM | 作用 |
 | --- | --- | --- | --- |
@@ -242,9 +164,9 @@ services/reporting.py
 
 ---
 
-## 8. validate / batch-validate 技术口径
+## 7. validate / batch-validate 技术口径
 
-### 8.1 为什么可信
+### 7.1 为什么可信
 
 | 设计点 | 作用 |
 | --- | --- |
@@ -253,7 +175,7 @@ services/reporting.py
 | 与真实修复对比 | 输出 `identical / essentially_same / different` |
 | batch 聚合 | 观察长期策略效果和 `L0-L5` 准确率 |
 
-### 8.2 推荐关注的指标
+### 7.2 推荐关注的指标
 
 | 指标 | 说明 |
 | --- | --- |
@@ -264,7 +186,7 @@ services/reporting.py
 
 ---
 
-## 9. 当前工程边界
+## 8. 当前工程边界
 
 | 边界 | 说明 |
 | --- | --- |
@@ -273,13 +195,18 @@ services/reporting.py
 | `AI-Generated` 不是主路径 | 它是兜底，而不是默认策略 |
 | 高等级不等于 apply 能力差 | 通常表示语义风险或不确定性高 |
 
+完整边界说明请看 `docs/BOUNDARIES.md`。
+
 ---
 
-## 10. 文档边界
+## 9. 文档边界
 
 | 如果你想看 | 去哪里 |
 | --- | --- |
+| API 请求/响应合同 | `docs/API_CONTRACT.md` |
+| 输出 schema 与字段字典 | `docs/OUTPUT_SCHEMA.md` |
 | DryRun 具体尝试顺序和补丁适配细节 | `docs/ADAPTIVE_DRYRUN.md` |
-| `L0-L5`、规则、调用链、LLM、准确率高场景 | `docs/MULTI_LEVEL_ALGORITHM.md` |
+| `L0-L5` 总表与算法地图 | `docs/MULTI_LEVEL_ALGORITHM.md` |
+| 规则手册 | `docs/RULEBOOK.md` |
+| 系统边界 | `docs/BOUNDARIES.md` |
 | 汇报版总览 | `docs/presentation.md` |
-

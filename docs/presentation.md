@@ -196,9 +196,13 @@ final_level = max(base_level, 所有命中规则给出的 level_floor)
 | 如果问题是 | 去哪里 |
 | --- | --- |
 | 怎么安装、怎么跑、怎么接 API | `README_zh.md` |
-| 系统目录、数据流、TUI/API 细节 | `docs/TECHNICAL.md` |
+| 系统目录、数据流、TUI、验证框架 | `docs/TECHNICAL.md` |
 | DryRun 家族和补丁适配顺序 | `docs/ADAPTIVE_DRYRUN.md` |
-| `L0-L5`、规则、LLM、准确率高场景 | `docs/MULTI_LEVEL_ALGORITHM.md` |
+| `L0-L5`、核心算法、LLM、准确率高场景 | `docs/MULTI_LEVEL_ALGORITHM.md` |
+| API 请求/响应合同 | `docs/API_CONTRACT.md` |
+| 输出字段字典 | `docs/OUTPUT_SCHEMA.md` |
+| 规则手册 | `docs/RULEBOOK.md` |
+| 系统边界与不适用场景 | `docs/BOUNDARIES.md` |
 
 ---
 
@@ -210,4 +214,3 @@ final_level = max(base_level, 所有命中规则给出的 level_floor)
 | 干净样本靠确定性路径解决 | `Strict / Context` 证据最强 |
 | 复杂样本靠规则把风险显式抬升 | `L0-L5` 负责分流而不是粉饰成功 |
 | LLM 不是主判定入口 | 核心能力必须可复现、可审计、可验证 |
-

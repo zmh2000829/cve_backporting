@@ -14,6 +14,20 @@
 
 ---
 
+## 快速导航
+
+| 如果你现在最关心 | 直接跳转 |
+| --- | --- |
+| 怎么安装和跑起来 | [环境与安装](#4-环境与安装) |
+| CLI 怎么用 | [CLI 用法](#6-cli-用法) |
+| HTTP API 怎么对接 | [API 快速说明](#8-http-api-用法)、[API 合同](docs/API_CONTRACT.md) |
+| 输出 JSON 有哪些字段 | [输出 Schema](docs/OUTPUT_SCHEMA.md) |
+| `L0-L5` 到底是什么意思 | [多级算法手册](docs/MULTI_LEVEL_ALGORITHM.md) |
+| 每条规则具体在说什么 | [规则手册](docs/RULEBOOK.md) |
+| 哪些场景系统本来就不该自动拍板 | [边界与不适用场景](docs/BOUNDARIES.md) |
+
+---
+
 ## 1. 项目定位
 
 这个项目用来解决企业内核维护中的三个核心问题：
@@ -49,6 +63,25 @@
 | `TUI` | 在终端可视化分析过程与结果 | Stage 面板、单案例面板、批量统计表 |
 | `HTTP API` | 对接平台或自动化服务 | `/api/analyze`、`/api/validate`、`/api/batch-validate` |
 
+### 2.1 当前不能稳定解决的场景
+
+这部分必须看清楚。本项目不是“所有 CVE 都能自动给出稳定回移结论”的工具。完整说明请直接看 [边界与不适用场景](docs/BOUNDARIES.md)。
+
+| 场景 | 为什么当前不能稳定解决 | 当前系统会怎么表现 |
+| --- | --- | --- |
+| 跨文件、多级、长链路传播的关键信号升级 | 当前调用链分析是局部图，主要覆盖“本次修改文件集合内”的 direct caller/callee 和有限跨文件唯一符号连接，不能稳定覆盖全仓多跳传播、跨子系统扩散和长链路数据流 | 只能部分命中 `call_chain_fanout` / `call_chain_propagation`；遇到关键结构时应按 `L3/L4` 人工审查，不应把“没继续升档”理解成全局安全 |
+| 涉及 `Kconfig` / `Makefile` / `CONFIG_*` / defconfig 的 CVE | 当前没有构建期配置模型，也不判断“某个修复是否依赖特定编译选项、子系统开关或发布配置” | 可能只能看到代码补丁本身，无法稳定回答“该 CVE 在你的发行配置里是否可触发、是否需要一并改 config”；应人工结合配置审查 |
+| 依赖运行时环境或外部配套的修复 | 例如依赖 sysctl、firmware、device tree、用户态协议、特定硬件初始化顺序的 CVE，单靠 patch 文本和静态代码无法完整建模 | 系统可能能找到补丁，但不能把结果当成“环境层面已闭环”；应人工补运行时验证 |
+| 上游情报不足或 fix / intro 不可稳定定位 | 若缺少可靠的 mainline fix、introduced commit、stable backport 线索，后续 DryRun 和分级都会失去稳定锚点 | `result_status` 可能进入 `incomplete`，或只能给出低置信搜索候选；这时不能继续依赖自动结论 |
+| 宏展开、生成代码、架构特定汇编主导语义的修复 | 当前主要分析 C 代码文本、diff、局部函数关系，对复杂宏语义、自动生成代码、汇编路径的行为变化没有稳定语义模型 | 可能只能得到文本级 apply 或局部规则命中；不应把它解释成“语义已被系统充分理解” |
+| AI 兜底补丁生成 | `AI-Generated` 不是确定性主路径，不能替代真实搜索、依赖、DryRun 和 validate 证据 | 只能作为最后兜底候选，默认不应直接进入自动回移通道 |
+
+一句话判断：
+
+| 如果看到这些特征 | 正确做法 |
+| --- | --- |
+| 跨文件长链传播、kernel config、运行时环境依赖、情报缺失 | 不要追求“自动给结论”，而要追求“自动把风险显式抬出来” |
+
 ---
 
 ## 3. 文档怎么分工
@@ -57,11 +90,15 @@
 
 | 文档 | 负责什么 | 适合谁看 |
 | --- | --- | --- |
-| `README_zh.md` | 总体介绍、安装配置、CLI/TUI/API 使用方法、文档导航 | 第一次接触项目的人 |
-| `docs/TECHNICAL.md` | 系统架构、代码模块、数据流、输出 schema、API/TUI 技术说明 | 开发者、维护者 |
-| `docs/ADAPTIVE_DRYRUN.md` | DryRun 策略家族、适配顺序、冲突适配、输出口径 | 关注补丁适配的人 |
-| `docs/MULTI_LEVEL_ALGORITHM.md` | `L0-L5`、规则体系、调用链、LLM 使用边界、准确率高场景 | 关注策略与判定质量的人 |
-| `docs/presentation.md` | 面向汇报的精简版总览 | 评审、管理层、汇报场景 |
+| [README_zh.md](README_zh.md) | 总体介绍、安装配置、CLI/TUI/API 快速入口、文档导航 | 第一次接触项目的人 |
+| [docs/TECHNICAL.md](docs/TECHNICAL.md) | 系统架构、代码模块、数据流、TUI 技术说明、验证框架 | 开发者、维护者 |
+| [docs/ADAPTIVE_DRYRUN.md](docs/ADAPTIVE_DRYRUN.md) | DryRun 策略家族、适配顺序、冲突适配、输出口径 | 关注补丁适配的人 |
+| [docs/MULTI_LEVEL_ALGORITHM.md](docs/MULTI_LEVEL_ALGORITHM.md) | `L0-L5`、核心算法地图、调用链、LLM 使用边界、准确率高场景 | 关注策略与判定质量的人 |
+| [docs/API_CONTRACT.md](docs/API_CONTRACT.md) | HTTP API 请求模板、响应模板、必要字段、错误返回、对接约束 | 平台、服务端对接者 |
+| [docs/OUTPUT_SCHEMA.md](docs/OUTPUT_SCHEMA.md) | 单案例 JSON、validate 字段、batch summary、错误结构、字段字典 | 平台、报表、数据接入方 |
+| [docs/RULEBOOK.md](docs/RULEBOOK.md) | 用户可见规则、level floor、触发条件、典型样本、常见误解、误判边界 | 规则维护者、评审者 |
+| [docs/BOUNDARIES.md](docs/BOUNDARIES.md) | 不适用场景、当前边界、系统如何退回人工、不可过度承诺的场景 | 维护者、管理者、对接方 |
+| [docs/presentation.md](docs/presentation.md) | 面向汇报的精简版总览 | 评审、管理层、汇报场景 |
 
 ---
 
@@ -238,106 +275,21 @@ CLI 会同时给你两类输出：
 | TUI 面板 | 人工阅读 | 适合工程师在终端直接看结论 |
 | JSON 文件 | 程序对接 | 默认写入 `analysis_results/<run-id>/...` |
 
-程序对接时，应以 JSON 文件为准。最小读取模板如下。
+README 里只保留最关键读取口径：
 
-#### `analyze` 的 `report.json`
+| 输出 | 最少先看什么 |
+| --- | --- |
+| `analyze/report.json` | `result_status`、`l0_l5`、`analysis_framework.conclusion` |
+| `validate/report.json` | `l0_l5`、`generated_vs_real`、`overall_pass` |
+| `batch summary` | `summary.l0_l5`、`summary.strategy_effectiveness`、`summary.level_accuracy` |
 
-```json
-{
-  "cve_id": "CVE-2024-26633",
-  "target_version": "5.10-hulk",
-  "result_status": {
-    "state": "complete"
-  },
-  "analysis_framework": {
-    "process": {},
-    "evidence": {},
-    "conclusion": {}
-  },
-  "l0_l5": {
-    "current_level": "L2",
-    "base_level": "L1",
-    "base_method": "context-C1",
-    "review_mode": "controlled-review",
-    "next_action": "逐 hunk 审查后决定是否回移"
-  },
-  "traceability": {
-    "policy": {
-      "profile": "balanced"
-    }
-  }
-}
-```
-
-#### `validate` 的 `report.json`
-
-```json
-{
-  "cve_id": "CVE-2024-26633",
-  "target_version": "5.10-hulk",
-  "overall_pass": true,
-  "result_status": {
-    "state": "complete"
-  },
-  "analysis_framework": {
-    "process": {},
-    "evidence": {},
-    "conclusion": {}
-  },
-  "l0_l5": {
-    "current_level": "L1",
-    "base_level": "L1",
-    "base_method": "context-C1",
-    "review_mode": "quick-review",
-    "next_action": "快速人工复核"
-  },
-  "generated_vs_real": {
-    "verdict": "identical",
-    "deterministic_exact_match": true
-  },
-  "traceability": {
-    "policy": {
-      "profile": "balanced"
-    }
-  }
-}
-```
-
-#### `batch-validate` 的 summary JSON
-
-```json
-{
-  "summary": {
-    "l0_l5": {
-      "levels": ["L0", "L1", "L2", "L3", "L4", "L5"],
-      "current_level_distribution": {
-        "L0": 0,
-        "L1": 5,
-        "L2": 7,
-        "L3": 15,
-        "L4": 3,
-        "L5": 0
-      },
-      "base_level_distribution": {
-        "L0": 14,
-        "L1": 8,
-        "L2": 0,
-        "L3": 8,
-        "L4": 0,
-        "L5": 0
-      }
-    },
-    "strategy_effectiveness": {},
-    "level_accuracy": {}
-  }
-}
-```
-
-这里最重要的约束只有一条：
+最硬的约束只有一条：
 
 | 对接要求 | 口径 |
 | --- | --- |
-| `L0-L5` 是否必须输出 | **是。单案例 JSON 必须包含 `l0_l5.current_level` 和 `l0_l5.base_level`；批量 summary 必须包含 `summary.l0_l5` 分布。缺失应视为对接不完整。** |
+| `L0-L5` 是否必须输出 | **是。单案例 JSON 必须包含 `l0_l5.current_level` 和 `l0_l5.base_level`；批量 summary 必须包含 `summary.l0_l5`。** |
+
+详细字段模板和完整 JSON 示例请直接看 [输出 Schema 手册](docs/OUTPUT_SCHEMA.md)。
 
 ---
 
@@ -364,6 +316,8 @@ CLI 会同时给你两类输出：
 ---
 
 ## 8. HTTP API 用法
+
+完整请求/响应合同、错误码和必要字段请直接看 [API 合同](docs/API_CONTRACT.md)。本章只保留 README 层面的快速接入说明。
 
 ### 8.1 启动服务
 
@@ -420,7 +374,7 @@ python cli.py server --host 127.0.0.1 --port 8000
 }
 ```
 
-如需直接按字段对接，而不是照抄示例，可以按下面这张表准备请求体：
+README 里只保留最小字段视图：
 
 | 路由 | 必填字段 | 可选字段 | 说明 |
 | --- | --- | --- | --- |
@@ -428,197 +382,7 @@ python cli.py server --host 127.0.0.1 --port 8000
 | `POST /api/validate` | `target_version` + `cve_id` + `known_fix` | `known_fixes`、`known_prereqs`、`mainline_fix`、`mainline_intro`、`deep`、`enable_p2` / `disable_p2` | `known_fix` 可是单个 commit 或逗号分隔字符串 |
 | `POST /api/batch-validate` | `target_version` + `items[]` | `workers`、`deep`、`enable_p2` / `disable_p2` | `items[*]` 至少要有 `cve_id` + `known_fix` |
 
-### 8.4 返回模板与必要字段
-
-先说明一个对接约束：
-
-| 约束 | 当前口径 |
-| --- | --- |
-| 单案例结果必要字段 | `result_status`、`analysis_framework`、`l0_l5`、`traceability` |
-| `L0-L5` 是否必须输出 | **是。所有单案例结果都必须有 `l0_l5.current_level` 和 `l0_l5.base_level`；缺失应视为无效集成。** |
-| 批量统计必要字段 | `summary.l0_l5`、`summary.level_distribution`、`summary.risk_hit_summary`，以及报告文件里的 `strategy_effectiveness`、`level_accuracy` |
-
-其中 `l0_l5` 建议按下面这组字段读取：
-
-| 字段 | 是否必须 | 作用 |
-| --- | --- | --- |
-| `l0_l5.current_level` | 是 | 最终执行通道，平台分流时优先看它 |
-| `l0_l5.base_level` | 是 | DryRun 基线级别，解释“补丁是怎么落地的” |
-| `l0_l5.base_method` | 强烈建议 | 对应 `strict / 3way / regenerated ...` |
-| `l0_l5.review_mode` | 强烈建议 | 终端、平台 UI 都适合直接展示 |
-| `l0_l5.next_action` | 强烈建议 | 可直接映射到人工流程 |
-
-#### `/api/analyze` 返回模板
-
-```json
-{
-  "ok": true,
-  "operation": "analyze",
-  "p2_enabled": true,
-  "summary": {
-    "total": 1
-  },
-  "results": [
-    {
-      "cve_id": "CVE-2024-26633",
-      "target_version": "5.10-hulk",
-      "result_status": {
-        "state": "complete",
-        "user_message": "分析完成"
-      },
-      "analysis_framework": {
-        "process": {},
-        "evidence": {},
-        "conclusion": {}
-      },
-      "l0_l5": {
-        "current_level": "L2",
-        "base_level": "L1",
-        "base_method": "context-C1",
-        "review_mode": "controlled-review",
-        "next_action": "逐 hunk 审查后决定是否回移"
-      },
-      "traceability": {
-        "policy": {
-          "profile": "balanced"
-        }
-      }
-    }
-  ]
-}
-```
-
-#### `/api/validate` 返回模板
-
-```json
-{
-  "cve_id": "CVE-2024-26633",
-  "target_version": "5.10-hulk",
-  "overall_pass": true,
-  "summary": "验证通过",
-  "result_status": {
-    "state": "complete",
-    "user_message": "验证完成"
-  },
-  "analysis_framework": {
-    "process": {},
-    "evidence": {},
-    "conclusion": {}
-  },
-  "l0_l5": {
-    "current_level": "L1",
-    "base_level": "L1",
-    "base_method": "context-C1",
-    "review_mode": "quick-review",
-    "next_action": "快速人工复核"
-  },
-  "generated_vs_real": {
-    "verdict": "identical",
-    "deterministic_exact_match": true
-  },
-  "traceability": {
-    "policy": {
-      "profile": "balanced"
-    }
-  }
-}
-```
-
-#### `/api/batch-validate` 返回模板
-
-```json
-{
-  "ok": true,
-  "operation": "batch-validate",
-  "workers": 2,
-  "parallel_mode": true,
-  "results": [
-    {
-      "cve_id": "CVE-2024-26633",
-      "l0_l5": {
-        "current_level": "L3",
-        "base_level": "L2"
-      },
-      "overall_pass": true
-    }
-  ],
-  "summary": {
-    "total": 1,
-    "success": 1,
-    "error": 0,
-    "l0_l5": {
-      "levels": ["L0", "L1", "L2", "L3", "L4", "L5"],
-      "current_level_distribution": {
-        "L0": 0,
-        "L1": 0,
-        "L2": 0,
-        "L3": 1,
-        "L4": 0,
-        "L5": 0
-      },
-      "base_level_distribution": {
-        "L0": 0,
-        "L1": 0,
-        "L2": 1,
-        "L3": 0,
-        "L4": 0,
-        "L5": 0
-      }
-    },
-    "level_distribution": {
-      "levels": ["L0", "L1", "L2", "L3", "L4", "L5"],
-      "final_level_counts": {
-        "L0": 0,
-        "L1": 0,
-        "L2": 0,
-        "L3": 1,
-        "L4": 0,
-        "L5": 0
-      },
-      "base_level_counts": {
-        "L0": 0,
-        "L1": 0,
-        "L2": 1,
-        "L3": 0,
-        "L4": 0,
-        "L5": 0
-      }
-    },
-    "strategy_effectiveness": {
-      "counts": {
-        "Strict": 0,
-        "Context-C1/Whitespace": 0,
-        "3-Way": 1,
-        "Verified-Direct": 0,
-        "Regenerated": 0,
-        "Zero-Context": 0,
-        "Conflict-Adapted": 0,
-        "Unresolved": 0
-      }
-    },
-    "level_accuracy": {
-      "final_levels": {
-        "L3": {
-          "total": 1,
-          "passed": 1,
-          "acceptable_patch": 1,
-          "exact_match": 0,
-          "pass_rate": 1.0,
-          "acceptable_patch_rate": 1.0,
-          "exact_match_rate": 0.0
-        }
-      }
-    },
-    "risk_hit_summary": {
-      "any_special_risk": {
-        "count": 1
-      }
-    }
-  }
-}
-```
-
-### 8.5 API 返回里先看什么
+### 8.4 API 返回里先看什么
 
 | 字段 | 作用 |
 | --- | --- |
@@ -635,6 +399,8 @@ python cli.py server --host 127.0.0.1 --port 8000
 | 单条分析 | `results[0].l0_l5 -> results[0].result_status -> results[0].analysis_framework.conclusion` |
 | 单条验证 | `l0_l5 -> result_status -> generated_vs_real -> summary` |
 | 批量验证 | `summary.l0_l5 -> summary.strategy_effectiveness -> summary.level_accuracy -> results[*].l0_l5` |
+
+详细请求模板、完整响应示例、错误码和必要字段约束请直接看 [API 合同](docs/API_CONTRACT.md) 和 [输出 Schema 手册](docs/OUTPUT_SCHEMA.md)。
 
 ---
 
@@ -719,8 +485,12 @@ python cli.py batch-validate --file cve_data.json --target 5.10-hulk --workers 2
 
 | 如果你想知道 | 去哪里 |
 | --- | --- |
-| 系统整体怎么用 | `README_zh.md` |
-| 系统架构、TUI、API、输出 schema | `docs/TECHNICAL.md` |
-| DryRun 具体怎么尝试、怎么适配 | `docs/ADAPTIVE_DRYRUN.md` |
-| `L0-L5`、规则、调用链、LLM 使用边界、准确率高场景 | `docs/MULTI_LEVEL_ALGORITHM.md` |
-| 对外汇报怎么讲 | `docs/presentation.md` |
+| 系统整体怎么用 | [README_zh.md](README_zh.md) |
+| 系统架构、数据流、TUI、验证框架 | [docs/TECHNICAL.md](docs/TECHNICAL.md) |
+| DryRun 具体怎么尝试、怎么适配 | [docs/ADAPTIVE_DRYRUN.md](docs/ADAPTIVE_DRYRUN.md) |
+| `L0-L5`、核心算法、调用链、LLM 使用边界、准确率高场景 | [docs/MULTI_LEVEL_ALGORITHM.md](docs/MULTI_LEVEL_ALGORITHM.md) |
+| API 请求/响应合同、错误返回、必要字段 | [docs/API_CONTRACT.md](docs/API_CONTRACT.md) |
+| 输出字段字典、batch summary、错误结构 | [docs/OUTPUT_SCHEMA.md](docs/OUTPUT_SCHEMA.md) |
+| 规则手册、level floor、误判边界 | [docs/RULEBOOK.md](docs/RULEBOOK.md) |
+| 不适用场景、系统边界、人工接管建议 | [docs/BOUNDARIES.md](docs/BOUNDARIES.md) |
+| 对外汇报怎么讲 | [docs/presentation.md](docs/presentation.md) |

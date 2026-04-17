@@ -1,6 +1,6 @@
 # CVE Backporting Engine 执行计划
 
-> 更新：2026-04-07
+> 更新：2026-04-09
 >
 > 目标：不改变现有核心算法主干，优先解决“用户看不懂为什么这么判”的问题，让工具稳定回答三件事：
 > 1. 哪些补丁可以直接回移
@@ -52,6 +52,17 @@
 | 置信度从静态标签变成经验校准 | 将 `validate / batch-validate` 的真实通过率、误抬升情况回灌到 confidence 分段 | 让“为什么这么判”之外，再补上“系统有多大把握” |
 | 基础设施失败与算法未命中分桶 | 把 cache miss、git 失败、branch 不匹配、diff 拉取失败与真正搜索未命中拆开统计 | 防止把环境问题误判成算法能力问题 |
 
+### 文档体系
+
+| 建议 | 具体抓手 | 预期价值 |
+|---|---|---|
+| API 合同从 README 继续拆分 | 增加独立 `docs/API_CONTRACT.md`，固化请求模板、响应模板、必要字段、错误码、对接约束 | 避免 README 既做产品介绍又背接口细节，减少平台对接靠猜字段 |
+| 规则说明从分级文档再拆一层 | 增加独立 `docs/RULEBOOK.md`，逐条解释 `rule_id / floor / 触发条件 / 典型样本 / 常见误解 / 误报边界` | 避免 `docs/MULTI_LEVEL_ALGORITHM.md` 再次膨胀成“大而全”文档 |
+| 输出 schema 独立成册 | 将 `result_status / analysis_framework / l0_l5 / traceability / batch summary` 拆成 `docs/OUTPUT_SCHEMA.md` | 让 CLI、API、历史兼容和平台接入共享同一份字段字典 |
+| 边界与不适用场景显式成册 | 增加 `docs/BOUNDARIES.md`，专门写“不解决什么、为什么不解决、系统会如何退回人工” | 防止用户把局部调用链、kernel config、运行时依赖等边界误读成算法失误 |
+| 维护者操作手册单独沉淀 | 增加 `docs/PLAYBOOK.md`，按“日常 analyze / 真实 validate / 批量回归 / 高风险审批”给出操作流程 | 让结果更像工作流手册，而不只是技术说明 |
+| 示例与样板集中沉淀 | 增加 `docs/EXAMPLES.md` 或 `docs/examples/`，收录真实请求/响应样板、典型 `L0-L5` case、TUI 截图和 batch 汇总样例 | 减少用户第一次接入时只能靠 README 大段文字拼理解 |
+
 ## 已完成
 
 | 编号 | 事项 | 状态 | 说明 |
@@ -70,6 +81,10 @@
 | D12 | `verified-direct` 内存直改路径 | ✅ | 已支持绕过 `git apply` 的内存级定位、验证和 diff 重建 |
 | D13 | 批量统计兼容 friendly JSON | ✅ | 已修复 `batch-validate` 汇总层对 friendly JSON 的兼容问题，避免真实结果被统计成全 0 |
 | D14 | P0 / P5 本轮真实回归 | ✅ | 2026-04-02 已完成 `unittest discover`、真实 `analyze / validate / batch-validate / invalid-request`、以及 `server --config` 启动验证 |
+| D15 | API 合同独立成册 | ✅ | 已新增 `docs/API_CONTRACT.md`，收敛请求模板、响应模板、错误返回和必要字段 |
+| D16 | 输出 schema 独立成册 | ✅ | 已新增 `docs/OUTPUT_SCHEMA.md`，统一字段字典和 batch summary 口径 |
+| D17 | 规则手册独立化 | ✅ | 已新增 `docs/RULEBOOK.md`，把规则逐条说明从分级文档拆出 |
+| D18 | 系统边界独立成册 | ✅ | 已新增 `docs/BOUNDARIES.md`，专门说明不适用场景与人工接管口径 |
 
 ## P0
 
@@ -175,6 +190,11 @@
 | P6-14 | API schema / 自描述能力 | ⏳ | 当前 API 已能返回结构化错误，但还缺请求/响应 schema、示例和 capability 描述；建议补 `/api/schema` 或 OpenAPI-lite 输出，减少调用方靠 README 猜字段 |
 | P6-15 | 单条结果决策卡 | ⏳ | CLI/TUI/API 首屏建议固定输出“当前状态 / 最终级别 / 主要阻塞 / 下一动作 / 三条关键证据”，让结果更像可执行判断而不是技术明细转储 |
 | P6-16 | 术语词典与展示协议单一真源 | ⏳ | `presentation`、README、`services/reporting.py`、`core/ui.py` 对 L0-L5 和历史 DryRun 层级仍可能存在双口径；建议抽统一术语词典和展示协议，减少解释漂移 |
+| P6-17 | README 与接口文档继续拆分 | ✅ | 已新增 `docs/API_CONTRACT.md`，将请求模板、响应模板、必要字段、错误返回和对接约束从 `README_zh.md` 中继续拆出；README 只保留快速接入说明和导航 |
+| P6-18 | 不适用场景文档化 | ✅ | 已新增 `docs/BOUNDARIES.md`，明确跨文件长链传播、kernel config、运行时依赖、情报缺失、宏/汇编主导语义等边界场景，并说明系统如何退回人工 |
+| P6-19 | 规则手册独立化 | ✅ | 已新增 `docs/RULEBOOK.md`，逐条说明用户可见核心规则、level floor、典型样本、常见误解和误判边界；`docs/MULTI_LEVEL_ALGORITHM.md` 回到总表和算法地图定位 |
+| P6-20 | 输出 schema 单一字典 | ✅ | 已新增 `docs/OUTPUT_SCHEMA.md`，独立维护 `result_status / analysis_framework / l0_l5 / traceability / batch summary / error body` 字段字典 |
+| P6-21 | 示例库与截图样板 | ⏳ | 需要把 analyze / validate / batch-validate 的请求模板、返回模板、典型 L0-L5 案例和 TUI 截图集中成样板库，降低首次接入成本 |
 
 ## 建议优先顺序
 
@@ -188,6 +208,7 @@
 | 第六阶段 | P5-13 / P5-14 / P5-15 / P5-16 / P5-17 | 继续拆分 orchestration、schema 和入口归一化层，避免职责交叉重新把输出和实现拖回双轨 |
 | 第七阶段 | P5-10 / P5-11 / P5-12 / P5-18 | 把远程情报、cache、worktree、telemetry 做成可审计的工程底座，保证真实批量跑数稳定 |
 | 第八阶段 | P6-4 / P6-8 / P6-9 / P6-13 / P6-14 / P6-15 / P6-16 | 把输出结果做成真正的维护者工作清单，并给 CLI/TUI/API 提供稳定展示层、统一术语和自描述接口 |
+| 第九阶段 | P6-17 / P6-18 / P6-19 / P6-20 / P6-21 | 继续把 README、接口合同、规则手册、边界说明、样板库拆开，防止文档重新长回单文件大杂烩 |
 
 ## 北极星结果
 
