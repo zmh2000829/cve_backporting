@@ -6,9 +6,10 @@ v2.0 扩展: --deep 模式触发深度分析 (Community/Vuln/PatchReview/RiskBen
 """
 
 import logging
+from collections import Counter
 from typing import Optional, Callable
 
-from core.models import AnalysisResult, AnalysisResultV2
+from core.models import AnalysisResult, AnalysisResultV2, SearchResult, PatchInfo
 from core.git_manager import GitRepoManager
 from core.matcher import PathMapper
 from core.llm_client import LLMClient
@@ -52,13 +53,14 @@ class Pipeline:
 
     def __init__(self, git_mgr: GitRepoManager, api_timeout: int = 30,
                  path_mappings: list = None, llm_config=None,
-                 policy_config=None):
+                 policy_config=None, analysis_config=None):
         pm = PathMapper(path_mappings) if path_mappings else PathMapper()
         self.crawler = CrawlerAgent(api_timeout=api_timeout, git_mgr=git_mgr)
         self.analysis = AnalysisAgent(git_mgr, path_mapper=pm)
         self.dependency = DependencyAgent(git_mgr, path_mapper=pm)
         self.dryrun = DryRunAgent(git_mgr, path_mapper=pm)
         self.git_mgr = git_mgr
+        self.analysis_config = analysis_config
 
         self.llm = LLMClient(llm_config) if llm_config else LLMClient()
         self.community_agent = CommunityAgent(self.llm)
@@ -67,6 +69,233 @@ class Pipeline:
         self.risk_benefit = RiskBenefitAnalyzer(git_mgr, self.llm)
         self.merge_advisor = MergeAdvisorAgent(self.llm)
         self.policy_engine = PolicyEngine(policy_config, llm_enabled=self.llm.enabled)
+
+    def _analysis_cfg(self, name: str, default):
+        if isinstance(self.analysis_config, dict):
+            return self.analysis_config.get(name, default)
+        return getattr(self.analysis_config, name, default)
+
+    def _handle_missing_intro(self, fix_patch: PatchInfo, target_version: str,
+                              result: AnalysisResult, stage_cb) -> None:
+        policy = str(self._analysis_cfg(
+            "missing_intro_policy", "patch_probe") or "patch_probe").strip().lower()
+
+        if policy in ("assume_vulnerable", "assume", "legacy"):
+            result.is_vulnerable = True
+            result.introduced_search = SearchResult(
+                found=True,
+                strategy="missing_intro_assume_vulnerable",
+                confidence=0.2,
+                target_subject="上游未提供引入 commit，按配置默认继续补丁回溯",
+            )
+            stage_cb("analysis_intro", "skip", "无引入commit，按配置默认受影响")
+            result.recommendations.append(
+                "上游未提供漏洞引入commit；当前配置按目标受影响处理，并继续补丁回溯。")
+            return
+
+        if policy in ("strict_unknown", "unknown", "disabled", "off"):
+            result.is_vulnerable = False
+            result.introduced_search = SearchResult(
+                found=False,
+                strategy="missing_intro_strict_unknown",
+                confidence=0.0,
+                target_subject="上游未提供引入 commit，配置为不做受影响假设",
+            )
+            stage_cb("analysis_intro", "warn", "无引入commit，配置为严格未知")
+            result.recommendations.append(
+                "上游未提供漏洞引入commit；当前配置不做受影响假设，建议人工确认是否需要回移。")
+            return
+
+        probe = self._probe_missing_intro_by_fix_patch(fix_patch, target_version)
+        result.is_vulnerable = probe.found
+        result.introduced_search = probe
+
+        if probe.found:
+            if probe.strategy == "missing_intro_patch_probe_uncertain_assume":
+                stage_cb("analysis_intro", "warn", "无引入commit，补丁探测不确定，按配置继续")
+            else:
+                stage_cb("analysis_intro", "success",
+                         f"无引入commit，补丁探测命中 ({probe.confidence:.0%})")
+            result.recommendations.append(
+                "上游未提供漏洞引入commit；已使用修复补丁的 removed/added 行探测目标代码形态，"
+                "当前按目标受影响继续补丁回溯。")
+        else:
+            stage_cb("analysis_intro", "warn",
+                     f"无引入commit，补丁探测未确认受影响 ({probe.confidence:.0%})")
+            result.recommendations.append(
+                "上游未提供漏洞引入commit；修复补丁形态探测未确认目标仍保留修复前代码，"
+                "建议人工确认影响范围。")
+
+    def _probe_missing_intro_by_fix_patch(self, patch: PatchInfo,
+                                          target_version: str) -> SearchResult:
+        changes_by_file = self._extract_changed_lines_by_file(patch.diff_code or "")
+        min_len = int(self._analysis_cfg("missing_intro_min_changed_line_length", 4) or 4)
+        min_removed = float(self._analysis_cfg(
+            "missing_intro_min_removed_line_match", 0.30) or 0.30)
+        min_coverage = float(self._analysis_cfg(
+            "missing_intro_min_file_coverage", 0.50) or 0.50)
+        fixed_threshold = float(self._analysis_cfg(
+            "missing_intro_fixed_line_threshold", 0.70) or 0.70)
+        assume_uncertain = bool(self._analysis_cfg(
+            "missing_intro_assume_on_uncertain", True))
+
+        total_files = 0
+        covered_files = 0
+        total_removed = matched_removed = 0
+        total_added = matched_added = 0
+        candidates = []
+
+        for file_path, changes in changes_by_file.items():
+            removed = self._filter_probe_lines(changes.get("removed", []), min_len)
+            added = self._filter_probe_lines(changes.get("added", []), min_len)
+            if not removed and not added:
+                continue
+            total_files += 1
+            resolved_path, content = self._read_target_file_variant(file_path, target_version)
+            if content is None:
+                candidates.append({
+                    "file": file_path,
+                    "status": "missing_file",
+                    "removed_match_rate": 0.0,
+                    "added_match_rate": 0.0,
+                })
+                continue
+
+            covered_files += 1
+            target_lines = Counter(
+                line.strip() for line in content.splitlines() if line.strip()
+            )
+            rm_match = self._count_probe_matches(removed, target_lines)
+            add_match = self._count_probe_matches(added, target_lines)
+
+            total_removed += len(removed)
+            matched_removed += rm_match
+            total_added += len(added)
+            matched_added += add_match
+
+            candidates.append({
+                "file": resolved_path or file_path,
+                "status": "checked",
+                "removed_lines": len(removed),
+                "removed_matched": rm_match,
+                "removed_match_rate": round(rm_match / len(removed), 3) if removed else 0.0,
+                "added_lines": len(added),
+                "added_matched": add_match,
+                "added_match_rate": round(add_match / len(added), 3) if added else 0.0,
+            })
+
+        file_coverage = covered_files / total_files if total_files else 0.0
+        removed_rate = matched_removed / total_removed if total_removed else 0.0
+        added_rate = matched_added / total_added if total_added else 0.0
+
+        evidence = {
+            "files_checked": covered_files,
+            "files_total": total_files,
+            "file_coverage": round(file_coverage, 3),
+            "removed_match_rate": round(removed_rate, 3),
+            "added_match_rate": round(added_rate, 3),
+            "thresholds": {
+                "min_removed_line_match": min_removed,
+                "min_file_coverage": min_coverage,
+                "fixed_line_threshold": fixed_threshold,
+            },
+        }
+        candidates.insert(0, evidence)
+
+        if total_files == 0:
+            found = assume_uncertain
+            strategy = "missing_intro_patch_probe_uncertain_assume" if found else "missing_intro_patch_probe_no_signal"
+            confidence = 0.0
+            subject = "fix patch 中缺少可用于探测的有效变更行"
+        elif file_coverage >= min_coverage and removed_rate >= min_removed:
+            found = True
+            strategy = "missing_intro_patch_probe"
+            confidence = min(1.0, (removed_rate * 0.8) + (file_coverage * 0.2))
+            subject = "目标代码命中修复补丁 removed 行，保留修复前代码形态"
+        elif file_coverage >= min_coverage and added_rate >= fixed_threshold and removed_rate < min_removed:
+            found = False
+            strategy = "missing_intro_patch_probe_fixed_like"
+            confidence = added_rate
+            subject = "目标代码更接近修复后形态，未确认仍受影响"
+        else:
+            found = assume_uncertain
+            strategy = "missing_intro_patch_probe_uncertain_assume" if found else "missing_intro_patch_probe_uncertain"
+            confidence = max(removed_rate, file_coverage * 0.5)
+            subject = "补丁形态探测证据不足，按配置处理不确定状态"
+
+        return SearchResult(
+            found=found,
+            strategy=strategy,
+            confidence=round(confidence, 3),
+            target_subject=subject,
+            candidates=candidates,
+        )
+
+    def _read_target_file_variant(self, file_path: str,
+                                  target_version: str) -> tuple:
+        variants = [file_path]
+        if self.analysis.path_mapper:
+            variants = self.analysis.path_mapper.translate(file_path)
+        seen = set()
+        for variant in variants:
+            if variant in seen:
+                continue
+            seen.add(variant)
+            content = self.git_mgr.get_file_content(variant, target_version)
+            if content is not None:
+                return variant, content
+        return "", None
+
+    @staticmethod
+    def _filter_probe_lines(lines, min_len: int) -> list:
+        filtered = []
+        for line in lines:
+            s = (line or "").strip()
+            if len(s) >= min_len:
+                filtered.append(s)
+        return filtered
+
+    @staticmethod
+    def _count_probe_matches(lines, target_lines: Counter) -> int:
+        bag = target_lines.copy()
+        matched = 0
+        for line in lines:
+            if bag[line] > 0:
+                matched += 1
+                bag[line] -= 1
+        return matched
+
+    @staticmethod
+    def _extract_changed_lines_by_file(diff_text: str) -> dict:
+        files = {}
+        current_file = ""
+        old_path = ""
+        for raw in (diff_text or "").splitlines():
+            if raw.startswith("diff --git "):
+                parts = raw.split()
+                old_path = parts[2][2:] if len(parts) >= 4 and parts[2].startswith("a/") else ""
+                current_file = parts[3][2:] if len(parts) >= 4 and parts[3].startswith("b/") else old_path
+                if current_file and current_file != "/dev/null":
+                    files.setdefault(current_file, {"removed": [], "added": []})
+                continue
+            if raw.startswith("--- "):
+                path = raw[4:].strip()
+                old_path = path[2:] if path.startswith("a/") else path
+                continue
+            if raw.startswith("+++ "):
+                path = raw[4:].strip()
+                new_path = path[2:] if path.startswith("b/") else path
+                current_file = old_path if new_path == "/dev/null" else new_path
+                if current_file and current_file != "/dev/null":
+                    files.setdefault(current_file, {"removed": [], "added": []})
+                continue
+            if not current_file or current_file == "/dev/null":
+                continue
+            if raw.startswith("-") and not raw.startswith("---"):
+                files.setdefault(current_file, {"removed": [], "added": []})["removed"].append(raw[1:])
+            elif raw.startswith("+") and not raw.startswith("+++"):
+                files.setdefault(current_file, {"removed": [], "added": []})["added"].append(raw[1:])
+        return files
 
     def analyze(self, cve_id: str, target_version: str,
                 enable_dryrun: bool = True,
@@ -138,8 +367,7 @@ class Pipeline:
                 _cb("analysis_intro", "warn", "未找到, 可能不受影响")
                 result.recommendations.append("未找到漏洞引入commit, 可能不受影响(建议人工确认)")
         else:
-            _cb("analysis_intro", "skip", "无引入commit信息")
-            result.is_vulnerable = True
+            self._handle_missing_intro(fix_patch, target_version, result, _cb)
 
         # ── Step 4: Analysis - 修复commit ────────────────────────────
         _cb("analysis_fix", "running")

@@ -191,7 +191,8 @@ def run_analyze_payload(cve_id: str, target_version: str, config, *,
     git_mgr = _make_git_mgr(config, target_version)
     pipe = Pipeline(git_mgr, path_mappings=config.path_mappings,
                     llm_config=config.llm,
-                    policy_config=getattr(config, "policy", None))
+                    policy_config=getattr(config, "policy", None),
+                    analysis_config=getattr(config, "analysis", None))
 
     stage_events, record_stage = _make_stage_trace_tracker(
         stage_callback=stage_callback)
@@ -1024,7 +1025,18 @@ def _build_analysis_narrative(result, dryrun_detail: dict,
     # Step 3: 引入检测
     if result.introduced_search:
         s = result.introduced_search
-        if s.found:
+        if s.strategy.startswith("missing_intro"):
+            if s.found:
+                workflow.append(
+                    f"3. 漏洞引入检测: 上游未提供引入 commit，"
+                    f"使用修复补丁代码形态探测后按受影响处理 "
+                    f"(策略={s.strategy}, 置信度={s.confidence:.0%})")
+            else:
+                workflow.append(
+                    f"3. 漏洞引入检测: 上游未提供引入 commit，"
+                    f"修复补丁代码形态探测未确认目标受影响 "
+                    f"(策略={s.strategy}, 置信度={s.confidence:.0%})")
+        elif s.found:
             workflow.append(
                 f"3. 漏洞引入检测: 目标仓库中找到了引入 commit "
                 f"({s.target_commit[:12]}), "
@@ -1746,7 +1758,8 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
         )
         pipe = Pipeline(wt_mgr, path_mappings=config.path_mappings,
                         llm_config=config.llm if deep else None,
-                        policy_config=getattr(config, "policy", None))
+                        policy_config=getattr(config, "policy", None),
+                        analysis_config=getattr(config, "analysis", None))
 
         if show_stages:
             tracker = StageTracker(STAGES)
@@ -2104,6 +2117,17 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
 
         serialized_validation_details = serialize_validation_details(result.validation_details)
         dependency_details = serialize_dependency_details(result.dependency_details)
+        intro_analysis = {}
+        if result.introduced_search:
+            intro = result.introduced_search
+            intro_analysis = {
+                "found": intro.found,
+                "strategy": intro.strategy,
+                "confidence": intro.confidence,
+                "target_commit": intro.target_commit,
+                "target_subject": intro.target_subject,
+                "candidates": intro.candidates,
+            }
 
         out = {
             "cve_id": cve_id, "known_fix": primary_known_fix, "known_fix_commits": known_fix_commits, "target": tv,
@@ -2143,6 +2167,7 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
             "community_patch_file": community_patch_file,
             "real_fix_patch_file": real_fix_patch_file,
             "analysis_stages": stage_events,
+            "intro_analysis": intro_analysis,
             "known_prereqs": known_prereqs,
             "run_id": run_id,
             "output_dir": output_dir,

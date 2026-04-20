@@ -409,7 +409,10 @@ def ensure_analysis_framework(payload: Dict[str, Any], mode: str) -> Dict[str, A
 
     evidence = {
         "compatibility_mode": "inferred",
-        "introduced": {"found": payload.get("is_vulnerable")},
+        "introduced": {
+            "found": payload.get("is_vulnerable"),
+            "analysis": payload.get("intro_analysis") or {},
+        },
         "fixed": {"found": payload.get("is_fixed")},
         "prerequisite_patches": list(payload.get("prerequisite_patches") or payload.get("tool_prereqs") or []),
         "dryrun_detail": payload.get("dryrun_detail") or {},

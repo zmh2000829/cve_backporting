@@ -329,6 +329,17 @@ def build_analyze_payload(
 
     valid_details = serialize_validation_details(result.validation_details)
     dependency_details = serialize_dependency_details(result.dependency_details)
+    intro_analysis = {}
+    if result.introduced_search:
+        intro = result.introduced_search
+        intro_analysis = {
+            "found": intro.found,
+            "strategy": intro.strategy,
+            "confidence": intro.confidence,
+            "target_commit": intro.target_commit,
+            "target_subject": intro.target_subject,
+            "candidates": intro.candidates,
+        }
     payload = {
         "cve_id": result.cve_id,
         "target_version": target,
@@ -347,6 +358,7 @@ def build_analyze_payload(
         "analysis_framework": valid_details.get("decision_skeleton", {}) if isinstance(valid_details, dict) else {},
         "recommendations": dedupe_strings(result.recommendations or []),
         "analysis_stages": stage_events or [],
+        "intro_analysis": intro_analysis,
         "fix_patch_detail": fix_patch_detail,
         "level_decision": serialize_level_decision(result.level_decision),
         "validation_details": valid_details,

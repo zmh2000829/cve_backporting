@@ -72,7 +72,7 @@
 | 跨文件、多级、长链路传播的关键信号升级 | 当前调用链分析是局部图，主要覆盖“本次修改文件集合内”的 direct caller/callee 和有限跨文件唯一符号连接，不能稳定覆盖全仓多跳传播、跨子系统扩散和长链路数据流 | 只能部分命中 `call_chain_fanout` / `call_chain_propagation`；遇到关键结构时应按 `L3/L4` 人工审查，不应把“没继续升档”理解成全局安全 |
 | 涉及 `Kconfig` / `Makefile` / `CONFIG_*` / defconfig 的 CVE | 当前没有构建期配置模型，也不判断“某个修复是否依赖特定编译选项、子系统开关或发布配置” | 可能只能看到代码补丁本身，无法稳定回答“该 CVE 在你的发行配置里是否可触发、是否需要一并改 config”；应人工结合配置审查 |
 | 依赖运行时环境或外部配套的修复 | 例如依赖 sysctl、firmware、device tree、用户态协议、特定硬件初始化顺序的 CVE，单靠 patch 文本和静态代码无法完整建模 | 系统可能能找到补丁，但不能把结果当成“环境层面已闭环”；应人工补运行时验证 |
-| 上游情报不足或 fix / intro 不可稳定定位 | 若缺少可靠的 mainline fix、introduced commit、stable backport 线索，后续 DryRun 和分级都会失去稳定锚点 | `result_status` 可能进入 `incomplete`，或只能给出低置信搜索候选；这时不能继续依赖自动结论 |
+| 上游情报不足或 fix / intro 不可稳定定位 | 若缺少可靠的 mainline fix 或 stable backport 线索，后续 DryRun 和分级会失去稳定锚点；若仅缺少 introduced commit，可启用 `analysis.missing_intro_policy=patch_probe` 用 fix patch 的 removed/added 行探测目标代码形态 | 有 fix patch 时系统会输出 `intro_analysis` 证据；无有效探测信号时仍会进入不确定或人工确认通道，不能把低置信结论当成自动闭环 |
 | 宏展开、生成代码、架构特定汇编主导语义的修复 | 当前主要分析 C 代码文本、diff、局部函数关系，对复杂宏语义、自动生成代码、汇编路径的行为变化没有稳定语义模型 | 可能只能得到文本级 apply 或局部规则命中；不应把它解释成“语义已被系统充分理解” |
 | AI 兜底补丁生成 | `AI-Generated` 不是确定性主路径，不能替代真实搜索、依赖、DryRun 和 validate 证据 | 只能作为最后兜底候选，默认不应直接进入自动回移通道 |
 
@@ -140,6 +140,22 @@ llm:
   base_url: "https://api.openai.com/v1"
   model: "gpt-4o"
 ```
+
+如果上游 CVE 没有提供 introduced commit，可以通过 `analysis` 配置选择处理策略：
+
+```yaml
+analysis:
+  # patch_probe: 用 fix patch 的 removed/added 行探测目标代码形态
+  # assume_vulnerable: 保持旧行为，默认按受影响继续回溯
+  # strict_unknown: 不做受影响假设，交给人工确认
+  missing_intro_policy: "patch_probe"
+  missing_intro_assume_on_uncertain: true
+  missing_intro_min_removed_line_match: 0.30
+  missing_intro_min_file_coverage: 0.50
+  missing_intro_fixed_line_threshold: 0.70
+```
+
+`patch_probe` 的判断逻辑是：目标分支命中修复补丁的 `- removed` 行，说明仍保留修复前代码形态，继续补丁回溯；目标分支高度命中 `+ added` 行且未命中 removed 行，说明更接近修复后形态，不再盲目判定受影响。该证据会写入 `intro_analysis`。
 
 ### 4.4 首次构建缓存
 
@@ -388,6 +404,7 @@ README 里只保留最小字段视图：
 | --- | --- |
 | `result_status` | 当前结果是否完整、是否报错、是否不适用 |
 | `analysis_framework` | 过程 / 证据 / 结论骨架 |
+| `intro_analysis` | introduced commit 缺失或检测时的受影响判断证据，包含策略、置信度、文件覆盖率和 removed/added 行命中率 |
 | `l0_l5` | `base_level`、`current_level`、`review_mode` |
 | `analysis_narrative` | 面向人的过程说明 |
 | `traceability` | 规则 profile、目标仓 HEAD、数据源等追溯信息 |

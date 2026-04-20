@@ -35,6 +35,9 @@
 | L1 | ID 精确匹配 | commit ID 已知、上下游没有改 ID | 最强 |
 | L2 | Subject 语义匹配 | backport commit 改了 subject，但仍能看出语义对应 | 中等偏强 |
 | L3 | Diff 级匹配 / 包含度 | squash、改 subject、合并提交 | 中等 |
+| missing-intro probe | fix patch 代码形态探测 | 上游没有 introduced commit，但有 fix patch | 启发式证据 |
+
+`missing-intro probe` 不会伪造 introduced commit。它只把 fix patch 的 removed/added 行与目标分支当前文件对比，输出 `intro_analysis`，用于判断是否继续后续依赖分析和 DryRun。
 
 ### 2.2 前置依赖算法
 

@@ -396,7 +396,11 @@ def render_report(result, policy_config=None) -> Panel:
         report_parts.append(checklist_panel)
 
     # 搜索结果 + 步骤
-    if r.introduced_search and r.introduced_search.found:
+    if r.introduced_search and r.introduced_search.strategy.startswith("missing_intro"):
+        s = r.introduced_search
+        status = "[red bold]按受影响处理[/]" if s.found else "[yellow]未确认受影响[/]"
+        grid.add_row("引入判断", f"{status} via {s.strategy} ({s.confidence:.0%})")
+    elif r.introduced_search and r.introduced_search.found:
         s = r.introduced_search
         grid.add_row("引入定位", f"[cyan]{s.target_commit[:12]}[/] via {s.strategy} ({s.confidence:.0%})")
     if r.fix_search:

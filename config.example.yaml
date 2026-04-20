@@ -36,6 +36,24 @@ llm:
   temperature: 0.3
   timeout: 60
 
+# ─── 基础分析策略 ────────────────────────────────────────────
+analysis:
+  # 上游 CVE 未提供 introduced commit 时如何判断目标是否受影响:
+  #   patch_probe       使用 fix patch 的 removed/added 行探测目标代码形态
+  #   assume_vulnerable 保持旧行为：默认受影响并继续补丁回溯
+  #   strict_unknown    不做受影响假设，仅输出未知/需人工确认
+  missing_intro_policy: "patch_probe"
+  # patch_probe 证据不足时是否仍继续后续依赖分析和 DryRun
+  missing_intro_assume_on_uncertain: true
+  # 目标文件中命中多少 removed 行，认为仍保留修复前代码形态
+  missing_intro_min_removed_line_match: 0.30
+  # 至少有多少补丁涉及文件能在目标分支中找到，探测结果才可信
+  missing_intro_min_file_coverage: 0.50
+  # added 行高度命中且 removed 行不命中时，认为目标更接近修复后形态
+  missing_intro_fixed_line_threshold: 0.70
+  # 过滤过短噪声变更行，如单独的 "}" / "};"
+  missing_intro_min_changed_line_length: 4
+
 # ─── 路径映射 ────────────────────────────────────────────────
 # 内核版本演进中目录结构会发生变化，导致社区补丁的文件路径
 # 在低版本仓库中不存在。配置映射规则后工具会自动双向翻译：

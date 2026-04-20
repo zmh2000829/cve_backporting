@@ -23,7 +23,7 @@
 | 跨文件、多级、长链路传播的关键信号升级 | 当前调用链分析是局部图，主要覆盖修改文件集合内的 direct caller/callee 和有限跨文件唯一符号连接，不是全仓多跳传播和全局数据流分析 | 不应过度承诺“全局调用链安全”；若命中关键结构或局部传播，应升到 `L3/L4` 并人工审查 |
 | 涉及 `Kconfig` / `Makefile` / `CONFIG_*` / defconfig 的 CVE | 当前没有构建期配置模型，也不判断某个修复是否依赖特定编译选项、发行配置或 build target | 不应把代码 patch 命中解释成“发行配置层面已闭环”；应人工补配置审查 |
 | 依赖运行时环境或外部配套的修复 | 如 sysctl、firmware、device tree、用户态协议、特定硬件初始化顺序，静态 patch 和代码文本无法完整覆盖 | 系统最多给出代码层面判断；用户必须补运行时验证 |
-| 上游情报不足或 `fix / intro` 无法稳定定位 | 缺少稳定的上游 fix、introduced commit 或 stable backport 锚点时，搜索、DryRun、validate 都会失去稳定基准 | 应进入 `incomplete` 或高等级人工通道，而不是强行给低级别结论 |
+| 上游情报不足或 `fix / intro` 无法稳定定位 | 缺少稳定的上游 fix 或 stable backport 锚点时，搜索、DryRun、validate 都会失去稳定基准；仅缺少 introduced commit 时，可用 `patch_probe` 从 fix patch 的 removed/added 行探测目标代码形态，但这仍是受影响性启发式而不是上游 intro 真值 | 有效探测时输出 `intro_analysis` 证据；信号不足时应进入不确定或人工确认通道，而不是强行给低级别结论 |
 | 宏展开、生成代码、架构特定汇编主导语义的修复 | 当前主要基于 C 代码文本、diff、局部函数关系，缺少复杂宏语义、代码生成结果和汇编行为的稳定模型 | 即使 apply 成功也不能自动宣称“语义已理解”；应人工复核关键路径 |
 | `AI-Generated` 兜底补丁 | 这一路不是确定性主链路，结果受模型输出波动影响 | 只能作为最后兜底候选，不应直接进入自动回移通道 |
 
@@ -48,6 +48,7 @@
 | `strict` 成功，但补丁涉及 `CONFIG_*` 或构建开关 | “已经自动解决” | 只说明代码 patch 文本可落地，不说明发行配置层面已闭环 |
 | `call_chain_fanout` 没命中 | “全局影响面很小” | 只能说明局部调用图里没有看到明显扩散 |
 | `result_status = incomplete` | “工具坏了” | 往往是在明确告诉你上游情报、证据骨架或真值不足 |
+| `intro_analysis.strategy = missing_intro_patch_probe` | “系统找到了真实 introduced commit” | 不是。它只说明目标代码命中 fix patch 的修复前 removed 行，可作为继续回溯的证据 |
 | `AI-Generated` 命中 | “系统给出了最终修复” | 只说明确定性链路已到边界，仍需专家确认 |
 
 ---
@@ -58,7 +59,7 @@
 | --- | --- |
 | kernel config / build 相关 | 审查 `Kconfig`、`Makefile`、发行配置、编译矩阵 |
 | 运行时依赖相关 | 补运行时复现、回归测试、硬件或协议环境验证 |
-| 上游情报不足 | 补 mainline fix、introduced commit、stable backport 线索 |
+| 上游情报不足 | 优先补 mainline fix、introduced commit、stable backport 线索；若仅缺 intro，可复核 `intro_analysis` 的文件覆盖率和 removed/added 行命中率 |
 | 宏 / 汇编 / 生成代码相关 | 让熟悉对应子系统或架构的维护者主导复核 |
 | `L4/L5` | 走审批或专家接管流程 |
 

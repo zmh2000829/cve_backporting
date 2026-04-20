@@ -23,9 +23,9 @@
 
 | 文件 | 作用 |
 | --- | --- |
-| `pipeline.py` | 主编排器，串联 crawl / search / dependency / dryrun / deep analysis |
-| `core/config.py` | 加载配置，合并 `policy.profile` 预设 |
-| `core/git_manager.py` | 统一 Git 访问与 worktree 操作 |
+| `pipeline.py` | 主编排器，串联 crawl / search / dependency / dryrun / deep analysis；包含缺失 introduced commit 时的 `patch_probe` 受影响探测 |
+| `core/config.py` | 加载配置，合并 `policy.profile` 预设，并提供 `analysis.missing_intro_*` 策略开关 |
+| `core/git_manager.py` | 统一 Git 访问与 worktree 操作；支持按目标分支读取文件内容用于代码形态探测 |
 | `core/models.py` | `PatchInfo`、`DryRunResult`、`LevelDecision` 等数据模型 |
 | `core/policy_engine.py` | 汇总规则命中并生成 `L0-L5` |
 | `core/output_serializers.py` | 单案例 / batch 的结构化输出与聚合统计 |
@@ -49,6 +49,7 @@ commands/*
 Pipeline.analyze(...)
   ├─ Crawler Agent
   ├─ Analysis Agent
+  │   └─ missing-intro patch probe
   ├─ Dependency Agent
   ├─ DryRun Agent
   └─ Policy Engine
@@ -70,7 +71,27 @@ services/reporting.py
 | 对比真实修复 | 形成 `generated_vs_real` 与 `solution_set_vs_real` |
 | 聚合 batch 统计 | 生成策略效果、级别准确率、风险命中统计 |
 
-### 2.3 深度分析流
+### 2.3 无 introduced commit 的智能回溯
+
+当上游 CVE 没有提供 introduced commit，但已经有 mainline fix patch 时，`Pipeline` 可按配置执行 `missing_intro_policy`：
+
+| 策略 | 行为 | 适用场景 |
+| --- | --- | --- |
+| `patch_probe` | 解析 fix patch 的 removed/added 行，读取目标分支对应文件，计算文件覆盖率、removed 命中率、added 命中率 | 默认策略。适合只有 fix、没有 intro 的上游情报 |
+| `assume_vulnerable` | 保持旧行为：无 intro 时直接按受影响继续依赖分析和 DryRun | 内部流程倾向“宁可多回溯，不漏补丁” |
+| `strict_unknown` | 不做受影响假设，输出需人工确认 | 高保守流程，不希望自动推进低证据补丁 |
+
+`patch_probe` 的判定口径：
+
+| 条件 | 结论 |
+| --- | --- |
+| `file_coverage >= missing_intro_min_file_coverage` 且 `removed_match_rate >= missing_intro_min_removed_line_match` | 目标仍保留修复前代码形态，按受影响继续补丁回溯 |
+| `added_match_rate >= missing_intro_fixed_line_threshold` 且 removed 未命中 | 目标更接近修复后形态，不再盲目判定受影响 |
+| 探测信号不足 | 由 `missing_intro_assume_on_uncertain` 决定是否继续 |
+
+探测证据会进入 `SearchResult.candidates`，并在 JSON 中暴露为 `intro_analysis`。
+
+### 2.4 深度分析流
 
 `--deep` 会在基础分析完成后追加以下阶段：
 

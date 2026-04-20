@@ -45,6 +45,26 @@ class LLMConfig:
     timeout: int = 60
 
 
+@dataclass
+class AnalysisConfig:
+    """基础分析策略配置"""
+    # 上游 CVE 没有 introduced commit 时的处理策略:
+    # assume_vulnerable: 保持旧行为，默认目标受影响并继续补丁回溯
+    # patch_probe:      用 fix patch 的 removed/added 行探测目标代码形态
+    # strict_unknown:   不做受影响假设，仅输出未知/不适用判断
+    missing_intro_policy: str = "patch_probe"
+    # patch_probe 无法稳定判断时是否仍按受影响继续后续回溯/DryRun
+    missing_intro_assume_on_uncertain: bool = True
+    # 判断目标仍保留修复前代码所需的 removed 行命中率
+    missing_intro_min_removed_line_match: float = 0.30
+    # 判断有效探测所需的目标文件覆盖率
+    missing_intro_min_file_coverage: float = 0.50
+    # added 行高度命中且 removed 行不命中时，认为目标可能已有等价修复
+    missing_intro_fixed_line_threshold: float = 0.70
+    # 过滤过短的噪声变更行，如单独的 "}" / "};"
+    missing_intro_min_changed_line_length: int = 4
+
+
 # policy.profile 预设：显式写在 YAML 中的阈值始终覆盖此处
 POLICY_PROFILE_PRESETS: Dict[str, Dict[str, int]] = {
     "conservative": {
@@ -99,6 +119,7 @@ class Config:
     repositories: Dict[str, Dict[str, str]] = field(default_factory=dict)
     cache: CacheConfig = field(default_factory=CacheConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
+    analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     policy: PolicyConfig = field(default_factory=PolicyConfig)
     path_mappings: list = field(default_factory=lambda: list(DEFAULT_PATH_MAPPINGS))
@@ -132,6 +153,18 @@ class ConfigLoader:
                     k: v for k, v in data["llm"].items()
                     if k in ("enabled", "provider", "api_key", "base_url",
                              "model", "max_tokens", "temperature", "timeout")
+                })
+            if "analysis" in data and isinstance(data["analysis"], dict):
+                cfg.analysis = AnalysisConfig(**{
+                    k: v for k, v in data["analysis"].items()
+                    if k in (
+                        "missing_intro_policy",
+                        "missing_intro_assume_on_uncertain",
+                        "missing_intro_min_removed_line_match",
+                        "missing_intro_min_file_coverage",
+                        "missing_intro_fixed_line_threshold",
+                        "missing_intro_min_changed_line_length",
+                    )
                 })
             if "policy" in data and isinstance(data["policy"], dict):
                 raw_policy: Dict[str, Any] = dict(data["policy"])

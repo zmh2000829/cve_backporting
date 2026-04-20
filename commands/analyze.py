@@ -31,6 +31,7 @@ def run(args, config, runtime):
         path_mappings=config.path_mappings,
         llm_config=config.llm,
         policy_config=getattr(config, "policy", None),
+        analysis_config=getattr(config, "analysis", None),
     )
 
     cves = [args.cve_id] if args.cve_id else []

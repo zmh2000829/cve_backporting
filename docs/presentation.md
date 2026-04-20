@@ -30,7 +30,7 @@ backgroundColor: #ffffff
 
 | 能力链路 | 负责什么 | 关键输出 |
 | --- | --- | --- |
-| 搜索链路 | 找 fix / intro / stable backport | 搜索命中、候选 commit |
+| 搜索链路 | 找 fix / intro / stable backport；缺 intro 时可用 `patch_probe` 探测代码形态 | 搜索命中、候选 commit、`intro_analysis` |
 | 依赖链路 | 判断 prerequisite patches | `independent / recommended / required` |
 | DryRun 链路 | 评估补丁可应用性和适配路径 | `Strict / 3-Way / Regenerated / Conflict-Adapted ...` |
 | 分级链路 | 把 apply 能力和风险证据转成执行通道 | `L0-L5`、`next_action` |

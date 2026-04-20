@@ -110,6 +110,8 @@
 | `deep` | 否 | 是否追加深度分析 |
 | `enable_p2` / `disable_p2` | 否 | 是否启用专项高风险规则 |
 
+如果未传 `mainline_intro`，且上游 CVE 也没有 introduced commit，服务端按配置文件中的 `analysis.missing_intro_policy` 处理。默认 `patch_probe` 会使用 fix patch 的 removed/added 行探测目标代码形态，并把证据写入响应的 `intro_analysis`。
+
 ### 4.2 最小请求模板
 
 ```json
@@ -253,6 +255,7 @@
 | --- | --- | --- |
 | `result_status` | 是 | 当前结果状态，不允许靠空字段猜测 |
 | `analysis_framework` | 是 | 过程 / 证据 / 结论骨架 |
+| `intro_analysis` | 建议 | introduced commit 缺失或检测时的受影响判断证据；`missing_intro_patch_probe` 表示基于 fix patch 代码形态探测，不等于找到了真实 intro commit |
 | `l0_l5.current_level` | 是 | 最终执行通道 |
 | `l0_l5.base_level` | 是 | DryRun 基线级别 |
 | `traceability` | 是 | 规则 profile、schema 版本、目标仓追溯 |

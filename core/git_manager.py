@@ -170,6 +170,14 @@ class GitRepoManager:
         out = self.run_git(["git", "show", "--name-only", "--format=", cid], rv)
         return [l.strip() for l in (out or "").strip().split("\n") if l.strip()]
 
+    def get_file_content(self, filepath: str, rv: str, ref: str = None) -> Optional[str]:
+        """读取目标分支中的文件内容。"""
+        target_ref = ref or self._get_repo_branch(rv) or "HEAD"
+        path = (filepath or "").strip()
+        if not path:
+            return None
+        return self.run_git(["git", "show", f"{target_ref}:{path}"], rv, timeout=30)
+
     def get_cache_count(self, rv: str = None) -> int:
         try:
             conn = sqlite3.connect(self.cache_db_path)

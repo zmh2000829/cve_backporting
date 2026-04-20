@@ -25,6 +25,7 @@
 | `target_version` | 是 | 目标仓别名 |
 | `result_status` | 是 | 状态、错误语义、不完整原因 |
 | `analysis_framework` | 是 | 过程 / 证据 / 结论骨架 |
+| `intro_analysis` | 建议 | introduced commit 缺失或检测时的受影响判断证据 |
 | `l0_l5` | 是 | 最终级别与 DryRun 基线级别 |
 | `traceability` | 是 | 规则 profile、schema 版本、目标仓 HEAD 等追溯信息 |
 | `analysis_narrative` | 建议 | 面向人的过程说明 |
@@ -79,9 +80,37 @@
 
 ---
 
-## 5. `l0_l5`
+## 5. `intro_analysis`
 
-### 5.1 必要字段
+`intro_analysis` 描述目标仓是否受影响的证据来源。常规有 introduced commit 时，它记录搜索策略；没有 introduced commit 时，默认 `patch_probe` 会用 fix patch 的 removed/added 行探测目标代码形态。
+
+### 5.1 字段字典
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `found` | bool | 当前是否按目标受影响处理 |
+| `strategy` | string | `exact_id / subject_match / diff_match / missing_intro_patch_probe / missing_intro_patch_probe_fixed_like / missing_intro_patch_probe_uncertain_assume ...` |
+| `confidence` | number | 0 到 1 的置信度 |
+| `target_commit` | string | 命中的目标 commit；`missing_intro_*` 通常为空 |
+| `target_subject` | string | 策略说明 |
+| `candidates[0].file_coverage` | number | patch_probe 中可读取到的补丁涉及文件覆盖率 |
+| `candidates[0].removed_match_rate` | number | 目标分支命中修复前 removed 行的比例 |
+| `candidates[0].added_match_rate` | number | 目标分支命中修复后 added 行的比例 |
+
+### 5.2 读取口径
+
+| 策略 | 解释 |
+| --- | --- |
+| `missing_intro_patch_probe` | 目标命中 removed 行，说明仍保留修复前代码形态，可继续回溯 |
+| `missing_intro_patch_probe_fixed_like` | 目标更接近修复后形态，不应盲目判定受影响 |
+| `missing_intro_patch_probe_uncertain_assume` | 证据不足，但配置允许在不确定时继续 |
+| `missing_intro_strict_unknown` | 配置要求不做受影响假设 |
+
+---
+
+## 6. `l0_l5`
+
+### 6.1 必要字段
 
 | 字段 | 是否必须 | 作用 |
 | --- | --- | --- |
@@ -93,7 +122,7 @@
 | `reason` | 建议 | 等级结论说明 |
 | `dependency_bucket` | 建议 | `independent / recommended / required` |
 
-### 5.2 最小模板
+### 6.2 最小模板
 
 ```json
 {
@@ -113,7 +142,7 @@
 
 ---
 
-## 6. `traceability`
+## 7. `traceability`
 
 | 字段 | 作用 |
 | --- | --- |
@@ -128,9 +157,9 @@
 
 ---
 
-## 7. validate 专有字段
+## 8. validate 专有字段
 
-### 7.1 `generated_vs_real`
+### 8.1 `generated_vs_real`
 
 | 字段 | 作用 |
 | --- | --- |
@@ -138,7 +167,7 @@
 | `deterministic_exact_match` | 是否逐字等价 |
 | `analysis` | 若存在，解释为什么有差异 |
 
-### 7.2 `overall_pass`
+### 8.2 `overall_pass`
 
 | 值 | 含义 |
 | --- | --- |
@@ -147,9 +176,9 @@
 
 ---
 
-## 8. batch summary
+## 9. batch summary
 
-### 8.1 必要字段
+### 9.1 必要字段
 
 | 字段 | 是否必须 | 作用 |
 | --- | --- | --- |
@@ -159,7 +188,7 @@
 | `summary.risk_hit_summary` | 是 | 风险命中汇总 |
 | `summary.level_distribution` | 建议 | 与旧调用方兼容 |
 
-### 8.2 `summary.l0_l5`
+### 9.2 `summary.l0_l5`
 
 | 字段 | 作用 |
 | --- | --- |
@@ -167,7 +196,7 @@
 | `current_level_distribution` | 最终级别分布 |
 | `base_level_distribution` | DryRun 基线分布 |
 
-### 8.3 `summary.strategy_effectiveness`
+### 9.3 `summary.strategy_effectiveness`
 
 | 字段 | 作用 |
 | --- | --- |
@@ -176,7 +205,7 @@
 | `automation` | 自动化完成占比与 unresolved 占比 |
 | `definition` | 每个策略家族的归类定义 |
 
-### 8.4 `summary.level_accuracy`
+### 9.4 `summary.level_accuracy`
 
 | 字段 | 作用 |
 | --- | --- |
@@ -184,7 +213,7 @@
 | `base_levels` | 每个基线级别的同类统计 |
 | `definitions` | `pass_rate / acceptable_patch_rate / exact_match_rate` 的定义 |
 
-### 8.5 `summary.risk_hit_summary`
+### 9.5 `summary.risk_hit_summary`
 
 | 字段 | 作用 |
 | --- | --- |
@@ -196,7 +225,7 @@
 
 ---
 
-## 9. 错误结构
+## 10. 错误结构
 
 | 顶层字段 | 说明 |
 | --- | --- |
@@ -214,7 +243,7 @@
 
 ---
 
-## 10. 推荐集成约束
+## 11. 推荐集成约束
 
 | 约束 | 当前口径 |
 | --- | --- |
