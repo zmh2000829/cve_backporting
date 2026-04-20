@@ -106,6 +106,19 @@ final_level = max(base_level, 所有命中规则给出的 level_floor)
 | 是否必须人工看代码 | 通常否 | 建议是 | 是 | 是 | 是 | 必须 |
 | 是否需要审批 | 否 | 否 | 否 | 视场景 | 是 | 是 |
 
+### 4.2 每个等级通常用了哪些补丁算法
+
+| 等级 | 常见 `apply_method` | 为什么落在这个等级 | 用户重点检查 |
+| --- | --- | --- | --- |
+| `L0` | `strict` | 原始 patch 在目标仓直接 `git apply --check` 通过，且没有依赖 / 风险规则抬升 | 最小编译和回归验证 |
+| `L1` | `ignore-ws`、`context-C1`、`C1-ignore-ws`、`verified-direct-exact` | 主要是空白、行号或轻微 context 漂移 | 确认核心 `+/-` 行是否未变 |
+| `L2` | `3way` 常见，也可能由 `strict/L1` 被规则抬升 | Git 能三方合并，或存在中等风险信号 | 逐 hunk 看合并结果、错误路径和 API 变化 |
+| `L3` | `regenerated`、`verified-direct`，或被强依赖 / 高风险规则抬升 | context 已经需要重建，或命中锁、生命周期、状态机、字段等语义风险 | 聚焦语义正确性和回归测试 |
+| `L4` | `conflict-adapted` 常见，或关键结构叠加调用链传播 | 已经改写冲突 hunk，或风险扩散到调用链 | 资深维护者审批，必要时手工重写 |
+| `L5` | 无稳定方法、unknown、unresolved、AI 兜底候选 | 自动化证据不足或上游情报断裂 | 补证据，专家主导 |
+
+注意：上表是“常见映射”，不是硬编码唯一来源。最终等级一定还会叠加规则命中结果。
+
 ---
 
 ## 5. 基线方法与级别映射
@@ -179,7 +192,41 @@ final_level = max(base_level, 所有命中规则给出的 level_floor)
 
 ---
 
-## 8. 哪些功能会用到 LLM
+## 8. 前置和后置关联补丁算法
+
+### 8.1 前置关联补丁
+
+前置关联补丁由主链路的 `Dependency Agent` 分析，目标是回答“当前 fix 是否依赖其他补丁先存在”。
+
+| 步骤 | 算法 | 说明 |
+| --- | --- | --- |
+| 候选召回 | `git log -- <files>` | 在 fix patch 修改文件的历史中找相关 commit，路径会经过 PathMapper 扩展 |
+| 时间窗口 | introduced commit 时间 -> HEAD | 有 intro 时从 intro 时间开始；无 intro 时退化为仓库初始到 HEAD |
+| 候选过滤 | 排除 merge、当前 fix、intro、Fixes 引用 | 避免把锚点误判为依赖 |
+| 结构比较 | hunk 重叠、50 行内相邻 hunk、函数交集 | 找文本和局部结构上的交叉 |
+| 语义标记 | 共享字段、锁域、状态点 | 捕捉文本不完全重叠但语义域相同的依赖 |
+| 分级 | `strong / medium / weak` | 给 Policy Engine 和人工 review 使用 |
+
+| 依赖等级 | 进入条件的直观理解 | 对 `L0-L5` 的影响 |
+| --- | --- | --- |
+| `strong` | 同 hunk 或同函数/字段/锁/状态强重叠，缺失可能导致编译或语义错误 | 常触发 `prerequisite_required`，可抬到 `L3` |
+| `medium` | 相邻 hunk、函数交集或共享语义域，建议一并看 | 常触发 `prerequisite_recommended`，可抬到 `L1/L2` |
+| `weak` | 仅有弱相关信号 | 通常不阻断，只作为背景线索 |
+
+### 8.2 后置关联补丁
+
+后置关联补丁主要在 `--deep` 链路中用于风险收益和合入建议，目标是回答“社区 fix 之后是否还有补漏或同函数后续修改”。
+
+| 关系 | 查找方式 | 用户理解 |
+| --- | --- | --- |
+| `followup_fix` | `git log --grep "Fixes: <fix_id>"` 反查引用当前 fix 的后续 commit | 优先复核，可能需要一起带入 |
+| `same_function` | 对 fix 修改函数做 `git log -S<func> -- <file>` | 同函数后续变化，可能是补漏、重构或语义调整 |
+
+后置补丁不是自动“必须合入”，但它会进入 `--deep` 的关联补丁分析和合入建议。
+
+---
+
+## 9. 哪些功能会用到 LLM
 
 | 功能 | 是否需要 LLM 才能运行 | 作用 |
 | --- | --- | --- |
@@ -204,7 +251,7 @@ final_level = max(base_level, 所有命中规则给出的 level_floor)
 
 ---
 
-## 9. 哪些场景准确率高
+## 10. 哪些场景准确率高
 
 | 场景 | 为什么证据强 | 应看字段 |
 | --- | --- | --- |
@@ -226,7 +273,7 @@ final_level = max(base_level, 所有命中规则给出的 level_floor)
 
 ---
 
-## 10. 哪些场景应该保守处理
+## 11. 哪些场景应该保守处理
 
 | 场景 | 为什么必须保守 |
 | --- | --- |
@@ -239,7 +286,7 @@ final_level = max(base_level, 所有命中规则给出的 level_floor)
 
 ---
 
-## 11. 如何看 batch 统计
+## 12. 如何看 batch 统计
 
 | 字段 | 用来回答什么 |
 | --- | --- |
@@ -254,10 +301,11 @@ final_level = max(base_level, 所有命中规则给出的 level_floor)
 
 ---
 
-## 12. 文档边界
+## 13. 文档边界
 
 | 如果你要看 | 去哪里 |
 | --- | --- |
+| 用户如何读懂等级、算法、索引和关联补丁 | `docs/USER_DECISION_GUIDE.md` |
 | 规则逐条说明 | `docs/RULEBOOK.md` |
 | 系统边界 | `docs/BOUNDARIES.md` |
 | DryRun 的具体尝试顺序、`apply_attempts`、冲突适配 | `docs/ADAPTIVE_DRYRUN.md` |

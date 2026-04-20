@@ -129,9 +129,56 @@ services/reporting.py
 
 ---
 
-## 4. TUI 技术说明
+## 4. 缓存索引的目的
 
-### 4.1 TUI 组件
+`build-cache` 会把目标分支的 commit 元信息写入本地 SQLite，并建立 FTS 索引。它解决的是“大仓库重复搜索太慢”的问题，不是替代 Git，也不是完整代码语义索引。
+
+| 存储内容 | 主要用途 |
+| --- | --- |
+| `commit_id` / `short_id` | 快速判断 commit 是否在目标分支 |
+| `subject` | 支撑 subject 精确搜索和关键词搜索 |
+| `author` / `timestamp` | 输出证据、排序、依赖分析时间窗口 |
+| FTS 虚拟表 | 加速关键词候选召回 |
+
+| 链路 | 是否使用缓存索引 |
+| --- | --- |
+| `check-fix` / `check-intro` 的 ID 命中 | 优先使用缓存，未命中再查 Git 对象库 |
+| `Analysis Agent` 的 subject / keyword 搜索 | 优先使用缓存和 FTS |
+| `batch-validate` | 复用缓存避免每个样本重复扫全仓 |
+| diff 读取、文件历史、DryRun apply、3-way merge | 不使用缓存，直接调用真实 Git 仓库 |
+
+---
+
+## 5. 关联补丁技术口径
+
+### 5.1 前置关联补丁
+
+主链路的 `Dependency Agent` 只负责前置依赖分析。它先用 fix patch 修改文件召回候选，再按文本和语义证据分级。
+
+| 阶段 | 实现位置 | 技术口径 |
+| --- | --- | --- |
+| 文件扩展 | `PathMapper.expand_files()` | 同时搜索上游路径和本地迁移路径 |
+| 候选召回 | `GitRepoManager.search_by_files()` | `git log -- <files>`，排除 merge，默认最多 50 个 |
+| 时间窗口 | `intro_search.target_commit.timestamp` | 有 intro 时从 intro 时间开始，否则从仓库初始开始 |
+| hunk 分析 | `extract_hunks_from_diff()` / `compute_hunk_overlap()` | 直接重叠和 50 行内相邻 hunk |
+| 函数分析 | `extract_functions_from_diff()` | 比较 hunk header 中函数签名 |
+| 语义域分析 | `_extract_semantic_markers()` | 字段、锁域、状态点交集 |
+| 分级 | `strong / medium / weak` | 分数和证据类型共同决定 |
+
+### 5.2 后置关联补丁
+
+后置关联补丁属于 `--deep` 的风险收益 / 合入建议链路，不是主链路 prerequisite。
+
+| 关系 | 实现位置 | 技术口径 |
+| --- | --- | --- |
+| `followup_fix` | `RiskBenefitAnalyzer._find_fixes_tag_followers()` | `git log --grep "Fixes: <fix_id>"` 反查后续补漏 |
+| `same_function` | `RiskBenefitAnalyzer._find_same_function_followers()` | 对 fix 修改函数做 `git log -S<func> -- <file>` |
+
+---
+
+## 6. TUI 技术说明
+
+### 6.1 TUI 组件
 
 | 组件 | 代码位置 | 用途 |
 | --- | --- | --- |
@@ -141,7 +188,7 @@ services/reporting.py
 | `render_batch_validate_report` | `core/ui_batch.py` | `batch-validate` 汇总表 |
 | `_render_deep_report` | `cli.py` | `--deep` 的额外面板 |
 
-### 4.2 TUI 分层
+### 6.2 TUI 分层
 
 | 层级 | 作用 | 常见内容 |
 | --- | --- | --- |
@@ -153,7 +200,7 @@ services/reporting.py
 
 ---
 
-## 5. API 与输出的技术边界
+## 7. API 与输出的技术边界
 
 这两块已经拆成独立文档，避免技术架构文档再次膨胀。
 
@@ -164,7 +211,7 @@ services/reporting.py
 
 ---
 
-## 6. LLM 集成边界
+## 8. LLM 集成边界
 
 | 模块 | 文件 | 是否必须依赖 LLM | 作用 |
 | --- | --- | --- | --- |
@@ -185,9 +232,9 @@ services/reporting.py
 
 ---
 
-## 7. validate / batch-validate 技术口径
+## 9. validate / batch-validate 技术口径
 
-### 7.1 为什么可信
+### 9.1 为什么可信
 
 | 设计点 | 作用 |
 | --- | --- |
@@ -196,7 +243,7 @@ services/reporting.py
 | 与真实修复对比 | 输出 `identical / essentially_same / different` |
 | batch 聚合 | 观察长期策略效果和 `L0-L5` 准确率 |
 
-### 7.2 推荐关注的指标
+### 9.2 推荐关注的指标
 
 | 指标 | 说明 |
 | --- | --- |
@@ -207,7 +254,7 @@ services/reporting.py
 
 ---
 
-## 8. 当前工程边界
+## 10. 当前工程边界
 
 | 边界 | 说明 |
 | --- | --- |
@@ -220,10 +267,11 @@ services/reporting.py
 
 ---
 
-## 9. 文档边界
+## 11. 文档边界
 
 | 如果你想看 | 去哪里 |
 | --- | --- |
+| 用户如何读懂等级、算法、索引和关联补丁 | `docs/USER_DECISION_GUIDE.md` |
 | API 请求/响应合同 | `docs/API_CONTRACT.md` |
 | 输出 schema 与字段字典 | `docs/OUTPUT_SCHEMA.md` |
 | DryRun 具体尝试顺序和补丁适配细节 | `docs/ADAPTIVE_DRYRUN.md` |

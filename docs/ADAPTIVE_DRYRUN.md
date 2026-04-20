@@ -116,6 +116,28 @@ strict
 | `regenerated-zero/*` | 进一步去除 context 依赖，只保留核心变更 |
 | `conflict-adapted` | 识别真实冲突 hunk 后，用目标文件实际 `-` 行重写冲突补丁 |
 
+### 5.4 Git 3-way merge 到底是什么
+
+`3way` 最容易被误解成“Git 判断补丁语义正确”。实际不是。
+
+它只做三方文本合并：
+
+```text
+base   = 上游补丁基于的旧代码
+theirs = 上游应用修复后的代码
+ours   = 目标分支当前代码
+
+Git 尝试把 base -> theirs 的变化搬到 ours 上
+```
+
+它比 `strict` 更宽松，因为它允许目标分支和上游补丁基线之间已经有一些差异；但它也更需要 review，因为 Git 不理解锁、状态机、错误路径、对象生命周期等语义。
+
+| 结论 | 说明 |
+| --- | --- |
+| `3way` 成功 | Git 找到了可合并的文本结果 |
+| `3way` 失败 | 文本冲突太强，无法自动拼接 |
+| `3way` 成功但最终升到 `L3/L4` | 合并能过，但风险规则发现语义风险 |
+
 ---
 
 ## 6. `verified-direct` 的实现含义
@@ -234,6 +256,6 @@ DryRun 主链路本身默认是确定性的。
 | 如果你要看 | 去哪里 |
 | --- | --- |
 | DryRun 成功后为什么还会被升到 `L3/L4` | `docs/MULTI_LEVEL_ALGORITHM.md` |
+| 用户如何把等级、算法、索引和关联补丁串起来读 | `docs/USER_DECISION_GUIDE.md` |
 | 整个系统的 API/TUI/输出 schema | `docs/TECHNICAL.md` |
 | 面向汇报的讲法 | `docs/presentation.md` |
-

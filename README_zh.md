@@ -22,6 +22,7 @@
 | CLI 怎么用 | [CLI 用法](#6-cli-用法) |
 | HTTP API 怎么对接 | [API 快速说明](#8-http-api-用法)、[API 合同](docs/API_CONTRACT.md) |
 | 输出 JSON 有哪些字段 | [输出 Schema](docs/OUTPUT_SCHEMA.md) |
+| 用户怎么看懂等级、算法、索引和关联补丁 | [用户决策指南](docs/USER_DECISION_GUIDE.md) |
 | `L0-L5` 到底是什么意思 | [多级算法手册](docs/MULTI_LEVEL_ALGORITHM.md) |
 | 每条规则具体在说什么 | [规则手册](docs/RULEBOOK.md) |
 | 哪些场景系统本来就不该自动拍板 | [边界与不适用场景](docs/BOUNDARIES.md) |
@@ -63,7 +64,30 @@
 | `TUI` | 在终端可视化分析过程与结果 | Stage 面板、单案例面板、批量统计表 |
 | `HTTP API` | 对接平台或自动化服务 | `/api/analyze`、`/api/validate`、`/api/batch-validate` |
 
-### 2.1 当前不能稳定解决的场景
+### 2.1 用户应该怎么读懂一条结果
+
+不要只看“补丁能不能打上”。建议按这个顺序读：
+
+| 顺序 | 字段 / 面板 | 回答的问题 |
+| --- | --- | --- |
+| 1 | `result_status` | 这次分析完整吗，是否已修复、错误或不适用 |
+| 2 | `intro_analysis` / 修复定位 | 目标仓是否可能受影响，修复是否已经存在 |
+| 3 | `dryrun_detail.apply_method` | 补丁是通过哪种算法落地，还是为什么失败 |
+| 4 | `dependency_details` / `prerequisite_patches` | 是否存在必须或建议一并评估的前置补丁 |
+| 5 | `l0_l5.base_level` | 仅从补丁适配方式看，基线难度是多少 |
+| 6 | `l0_l5.current_level` | 结合规则风险后，最终该走哪条处理通道 |
+| 7 | `rule_hits` / `manual_review_checklist` | 为什么升档，人工重点看什么 |
+
+最关键的区别：
+
+| 字段 | 含义 |
+| --- | --- |
+| `base_level` | DryRun 基线，表示“补丁怎么打上去” |
+| `current_level` | 最终执行通道，表示“结合依赖和风险后该怎么处理” |
+
+所以 `strict` 成功不一定是 `L0`；如果同时命中锁、生命周期、状态机、强依赖等规则，最终仍可能被抬到 `L3/L4`。完整解释见 [用户决策指南](docs/USER_DECISION_GUIDE.md)。
+
+### 2.2 当前不能稳定解决的场景
 
 这部分必须看清楚。本项目不是“所有 CVE 都能自动给出稳定回移结论”的工具。完整说明请直接看 [边界与不适用场景](docs/BOUNDARIES.md)。
 
@@ -91,6 +115,7 @@
 | 文档 | 负责什么 | 适合谁看 |
 | --- | --- | --- |
 | [README_zh.md](README_zh.md) | 总体介绍、安装配置、CLI/TUI/API 快速入口、文档导航 | 第一次接触项目的人 |
+| [docs/USER_DECISION_GUIDE.md](docs/USER_DECISION_GUIDE.md) | 用户如何读懂等级、DryRun 算法、索引目的、前后置关联补丁 | 使用者、评审者、平台对接方 |
 | [docs/TECHNICAL.md](docs/TECHNICAL.md) | 系统架构、代码模块、数据流、TUI 技术说明、验证框架 | 开发者、维护者 |
 | [docs/ADAPTIVE_DRYRUN.md](docs/ADAPTIVE_DRYRUN.md) | DryRun 策略家族、适配顺序、冲突适配、输出口径 | 关注补丁适配的人 |
 | [docs/MULTI_LEVEL_ALGORITHM.md](docs/MULTI_LEVEL_ALGORITHM.md) | `L0-L5`、核心算法地图、调用链、LLM 使用边界、准确率高场景 | 关注策略与判定质量的人 |
@@ -162,6 +187,16 @@ analysis:
 ```bash
 python cli.py build-cache --target 5.10-hulk
 ```
+
+建立缓存索引的目的不是替代 Git，也不是做完整代码语义索引，而是把目标分支的 commit 元信息放进本地 SQLite/FTS，避免每次分析都扫全仓。
+
+| 缓存内容 | 用途 |
+| --- | --- |
+| commit ID / short ID | 快速判断 fix / intro 是否在目标分支 |
+| subject | 加速 subject 和关键词候选搜索 |
+| author / timestamp | 输出证据、排序、限定依赖分析时间窗口 |
+
+真实 diff、文件历史、`git apply`、3-way merge 仍然直接在本地 Git 仓库上执行。更多说明见 [用户决策指南：为什么要建立缓存索引](docs/USER_DECISION_GUIDE.md#4-为什么要建立缓存索引)。
 
 ---
 
@@ -503,6 +538,7 @@ python cli.py batch-validate --file cve_data.json --target 5.10-hulk --workers 2
 | 如果你想知道 | 去哪里 |
 | --- | --- |
 | 系统整体怎么用 | [README_zh.md](README_zh.md) |
+| 用户如何读懂等级、算法、索引、前后置关联补丁 | [docs/USER_DECISION_GUIDE.md](docs/USER_DECISION_GUIDE.md) |
 | 系统架构、数据流、TUI、验证框架 | [docs/TECHNICAL.md](docs/TECHNICAL.md) |
 | DryRun 具体怎么尝试、怎么适配 | [docs/ADAPTIVE_DRYRUN.md](docs/ADAPTIVE_DRYRUN.md) |
 | `L0-L5`、核心算法、调用链、LLM 使用边界、准确率高场景 | [docs/MULTI_LEVEL_ALGORITHM.md](docs/MULTI_LEVEL_ALGORITHM.md) |
