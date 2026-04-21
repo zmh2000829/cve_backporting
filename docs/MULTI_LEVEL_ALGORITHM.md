@@ -251,12 +251,13 @@ final_level = max(base_level, 所有命中规则给出的 level_floor)
 | 依赖分析 | 否 | 全确定性 |
 | DryRun | 否 | 全确定性，AI 生成仅兜底 |
 | `L0-L5` 分级 | 否 | 全确定性规则 |
+| AI advisory task | 是 | 低信号裁决、前置补丁 triage、风险语义解释；默认只写 `ai_evidence` |
 | 深度漏洞分析 | 否 | LLM 只增强解释 |
 | 深度补丁检视 | 否 | LLM 只增强描述与 checklist |
 | 风险收益评估 | 否 | LLM 只增强文本表达 |
 | 合入建议 | 否 | LLM 只增强建议文本 |
 | validate 差异解释 | 否 | LLM 仅补充“为什么偏差” |
-| AI 兜底补丁生成 | 是 | 只有这一路必须依赖 LLM |
+| AI 兜底补丁生成 | 是 | 只有确定性 DryRun 失败后才可生成 `ai-generated` 高风险候选 |
 
 为什么这里强调“不依赖 LLM”：
 

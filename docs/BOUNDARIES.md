@@ -25,7 +25,8 @@
 | 依赖运行时环境或外部配套的修复 | 如 sysctl、firmware、device tree、用户态协议、特定硬件初始化顺序，静态 patch 和代码文本无法完整覆盖 | 系统最多给出代码层面判断；用户必须补运行时验证 |
 | 上游情报不足或 `fix / intro` 无法稳定定位 | 缺少稳定的上游 fix 或 stable backport 锚点时，搜索、DryRun、validate 都会失去稳定基准；仅缺少 introduced commit 时，可用 `patch_probe` 从 fix patch 的 removed/added 行探测目标代码形态，但这仍是受影响性启发式而不是上游 intro 真值 | 有效探测时输出 `intro_analysis` 证据；信号不足时应进入不确定或人工确认通道，而不是强行给低级别结论 |
 | 宏展开、生成代码、架构特定汇编主导语义的修复 | 当前主要基于 C 代码文本、diff、局部函数关系，缺少复杂宏语义、代码生成结果和汇编行为的稳定模型 | 即使 apply 成功也不能自动宣称“语义已理解”；应人工复核关键路径 |
-| `AI-Generated` 兜底补丁 | 这一路不是确定性主链路，结果受模型输出波动影响 | 只能作为最后兜底候选，不应直接进入自动回移通道 |
+| `AI-Generated` 兜底补丁 | 这一路不是确定性主链路，结果受模型输出波动影响；通过 `git apply --check` 也只证明文本可应用 | 只能作为最后兜底候选，必须进入高风险/L5 和人工审批通道 |
+| AI advisory 证据 | `low_signal_adjudication`、`dependency_triage`、`risk_semantic_explainer` 是模型建议，不是真值 | 只能作为审查辅助和 batch 校准输入；默认不直接改最终级别 |
 
 ---
 
@@ -49,7 +50,8 @@
 | `call_chain_fanout` 没命中 | “全局影响面很小” | 只能说明局部调用图里没有看到明显扩散 |
 | `result_status = incomplete` | “工具坏了” | 往往是在明确告诉你上游情报、证据骨架或真值不足 |
 | `intro_analysis.strategy = missing_intro_patch_probe` | “系统找到了真实 introduced commit” | 不是。它只说明目标代码命中 fix patch 的修复前 removed 行，可作为继续回溯的证据 |
-| `AI-Generated` 命中 | “系统给出了最终修复” | 只说明确定性链路已到边界，仍需专家确认 |
+| `AI-Generated` 命中 | “系统给出了最终修复” | 只说明 AI 候选 diff 通过了确定性 apply check，仍需专家确认语义 |
+| `ai_evidence.decision = likely_low_signal` | “可以自动降级” | 当前只是 advisory 证据；是否降级仍由规则、真值回放和人工审查决定 |
 
 ---
 

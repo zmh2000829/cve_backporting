@@ -70,7 +70,7 @@ TUI / JSON / API Response / Batch Summary
 | `Regenerated` | 用目标文件重建 patch context | 原始 context 已过期 |
 | `Zero-Context` | 去掉 context，只保留核心 `+/-` 变更 | context 被大面积改写 |
 | `Conflict-Adapted` | 结合目标文件实际内容重写冲突 hunk | 真实冲突但修复意图可保留 |
-| `AI-Generated` | LLM 兜底生成补丁 | 全部确定性路径失败 |
+| `AI-Generated` | LLM 兜底生成候选补丁并再次 apply check | 全部确定性路径失败 |
 
 `Verified-Direct` 的关键点：它先定位 hunk，再在内存中应用，复核后输出标准 diff；普通 `verified-direct` 是 `L3` 强适配基线，`verified-direct-exact` 才是可进入 `L1` 的低漂移精确重建证据。
 
@@ -154,11 +154,12 @@ final_level = max(base_level, 所有命中规则给出的 level_floor)
 | 风险收益评估 | 否 | 增强表达 |
 | 合入建议 | 否 | 增强建议与 checklist |
 | validate 差异解释 | 否 | 解释“工具结果为什么和真值不同” |
-| AI 兜底补丁生成 | 是 | 只在确定性链路失败时兜底 |
+| AI advisory 证据 | 是 | 低信号、前置候选、风险语义解释，只写 `ai_evidence` |
+| AI 兜底补丁生成 | 是 | 只在确定性链路失败时生成高风险候选 |
 
 项目的原则是：
 
-> 核心判定链路必须不依赖 LLM，LLM 只做增强与兜底。
+> 核心判定链路必须不依赖 LLM，LLM 只做增强与兜底；`ai-generated` 即使通过 apply check，也仍需人工审批。
 
 ---
 

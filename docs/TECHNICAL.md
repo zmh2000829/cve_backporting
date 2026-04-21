@@ -2,7 +2,7 @@
 
 本文负责解释“系统怎么实现”，包括代码目录、数据流、TUI 和验证框架。
 
-接口合同请看 `docs/API_CONTRACT.md`；输出字段字典请看 `docs/OUTPUT_SCHEMA.md`；系统边界请看 `docs/BOUNDARIES.md`；DryRun 细节请看 `docs/ADAPTIVE_DRYRUN.md`；`L0-L5` 与规则请看 `docs/MULTI_LEVEL_ALGORITHM.md` 和 `docs/RULEBOOK.md`。
+接口合同请看 `docs/API_CONTRACT.md`；输出字段字典请看 `docs/OUTPUT_SCHEMA.md`；系统边界请看 `docs/BOUNDARIES.md`；DryRun 细节请看 `docs/ADAPTIVE_DRYRUN.md`；AI 增强请看 `docs/AI_ENHANCEMENT.md`；`L0-L5` 与规则请看 `docs/MULTI_LEVEL_ALGORITHM.md` 和 `docs/RULEBOOK.md`。
 
 ---
 
@@ -14,7 +14,7 @@
 | --- | --- | --- |
 | `commands/` | CLI 命令入口、参数解析、运行模式分流 | `analyze.py`、`validate.py`、`checks.py`、`server.py` |
 | `agents/` | 具体分析动作的执行体 | `crawler.py`、`analysis.py`、`dependency.py`、`dryrun.py` |
-| `core/` | 配置、模型、UI、规则引擎、序列化、LLM 客户端 | `config.py`、`policy_engine.py`、`ui.py`、`output_serializers.py` |
+| `core/` | 配置、模型、UI、规则引擎、序列化、LLM/AI 客户端 | `config.py`、`policy_engine.py`、`ai_assistant.py`、`output_serializers.py` |
 | `services/` | 报告组装、输出路径、历史兼容 | `reporting.py`、`output_support.py`、`history_loader.py` |
 | `rules/` | `L0-L5` 策略和规则实现 | `default_rules.py`、`level_policies.py` |
 | `tests/` | 回归测试和 golden fixtures | `test_policy_engine.py`、`test_reports.py` |
@@ -24,10 +24,11 @@
 | 文件 | 作用 |
 | --- | --- |
 | `pipeline.py` | 主编排器，串联 crawl / search / dependency / dryrun / deep analysis；包含缺失 introduced commit 时的 `patch_probe` 受影响探测 |
-| `core/config.py` | 加载配置，合并 `policy.profile` 预设，并提供 `analysis.missing_intro_*` 策略开关 |
+| `core/config.py` | 加载配置，合并 `policy.profile` 预设，并提供 `analysis.missing_intro_*` 和 `ai.*` 策略开关 |
 | `core/git_manager.py` | 统一 Git 访问与 worktree 操作；支持按目标分支读取文件内容用于代码形态探测 |
 | `core/models.py` | `PatchInfo`、`DryRunResult`、`LevelDecision` 等数据模型 |
 | `core/policy_engine.py` | 汇总规则命中并生成 `L0-L5` |
+| `core/ai_assistant.py` | 运行 GLM5 advisory task，生成 `validation_details.ai_evidence` |
 | `core/output_serializers.py` | 单案例 / batch 的结构化输出与聚合统计 |
 | `core/ui.py` | `analyze` / `validate` 的 TUI |
 | `core/ui_batch.py` | `benchmark` / `batch-validate` 的 TUI |
@@ -222,20 +223,32 @@ services/reporting.py
 
 | 模块 | 文件 | 是否必须依赖 LLM | 作用 |
 | --- | --- | --- | --- |
+| LLMClient | `core/llm_client.py` | 否 | 统一 OpenAI-compatible/GLM5 调用、环境变量密钥解析、JSON 抽取 |
+| AIAssistant | `core/ai_assistant.py` | 是 | 运行结构化 advisory task，输出 `validation_details.ai_evidence` |
 | CommunityAgent | `agents/community.py` | 否 | 生成社区讨论摘要 |
 | VulnAnalysisAgent | `agents/vuln_analysis.py` | 否 | 增强漏洞解释 |
 | PatchReviewAgent | `agents/patch_review.py` | 否 | 增强代码审查描述 |
 | RiskBenefitAnalyzer | `core/risk_benefit.py` | 否 | 增强风险收益文本 |
 | MergeAdvisorAgent | `agents/merge_advisor.py` | 否 | 增强建议文本与 checklist |
 | LLMAnalyzer | `core/llm_analyzer.py` | 否 | 解释 validate 偏差根因 |
-| AIPatchGenerator | `core/ai_patch_generator.py` | 是 | AI 兜底生成补丁 |
+| AIPatchGenerator | `core/ai_patch_generator.py` | 是 | DryRun 确定性路径失败后的 AI 候选补丁生成 |
+
+当前 AI task：
+
+| Task | 输入 | 输出 | 边界 |
+| --- | --- | --- | --- |
+| `low_signal_adjudication` | diff、规则命中、变更规模 | 是否可能为低信号误升级 | advisory，不直接降级 |
+| `dependency_triage` | strong/medium/weak 前置候选证据 | `required/helpful/background/unrelated` | 不把 weak 自动升为 required |
+| `risk_semantic_explainer` | 风险规则和专项命中 | 风险对象和人工核对重点 | 不凭空创建高风险 |
+| `ai_patch_suggestion` | 上游 diff、目标文件上下文、冲突分析 | unified diff 候选 | 必须通过 `git apply --check`，仍为高风险 |
 
 必须强调：
 
 | 结论 | 原因 |
 | --- | --- |
 | 搜索、依赖、DryRun、分级、validate、batch 统计都不依赖 LLM | 核心链路必须可复现、可验证、可审计 |
-| LLM 只负责增强或兜底 | 不能让核心结论依赖模型波动 |
+| 分析类 AI task 默认只写证据 | `used_for_final_decision=false`，便于审计和 batch 校准 |
+| `ai-generated` 只是 DryRun 兜底候选 | 它通过 apply check 后仍按 L5/人工审批通道处理 |
 
 ---
 

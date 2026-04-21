@@ -62,7 +62,7 @@ strict
 | `Regenerated` | `regenerated` | 重新生成 context 后再做 `git apply --check` |
 | `Zero-Context` | `regenerated-zero/*` 成功 | 直接消掉 context，把定位退化到核心 `+/-` 变更 |
 | `Conflict-Adapted` | `conflict-adapted` | 结合目标文件实际内容改写 hunk |
-| `AI-Generated` | `ai-generated` | AI 兜底生成补丁 |
+| `AI-Generated` | `ai-generated` | AI 兜底生成候选补丁，必须已通过 apply check |
 | `Unresolved` | 无法归类或整体失败 | 没有稳定适配到任何策略家族 |
 
 ---
@@ -78,7 +78,7 @@ strict
 | `Regenerated` | 用目标文件当前内容重建 context | 中等 | 原始 context 已过期，但 `+/-` 核心仍清楚 | 如果定位锚点本身可疑，必须人工复核 |
 | `Zero-Context` | 去掉 context，只保留核心变更 | 中等偏弱 | context 已经被大面积改写，但核心行还可对应 | 很容易误解成“修复成功”，实际只是应用约束进一步放松 |
 | `Conflict-Adapted` | 用目标文件实际行替换原 hunk 的 `-` 行 | 弱于上述策略 | 已出现真实冲突，但仍希望保留 `+` 行修复意图 | 默认应进入审批/人工审查通道 |
-| `AI-Generated` | 让 LLM 结合目标代码语义生成补丁 | 最弱、仅兜底 | 所有确定性路径都失败 | 不能替代确定性链路，不应当作高置信结果 |
+| `AI-Generated` | 让 LLM 结合目标代码语义生成补丁，再跑确定性 apply check | 最弱、仅兜底 | 所有确定性路径都失败且显式开启 | 不能替代确定性链路，不应当作高置信结果 |
 
 ---
 
@@ -254,6 +254,7 @@ DryRun 主链路本身默认是确定性的。
 
 - **DryRun 的主价值来自确定性适配**
 - **LLM 只在全部确定性路径都不稳时才属于兜底候选**
+- **`ai-generated` 通过 apply check 后仍是高风险候选，不进入 L0/L1 自动通道**
 
 ---
 
@@ -265,6 +266,7 @@ DryRun 主链路本身默认是确定性的。
 | `dryrun_detail.apply_attempts` | 依次尝试过哪些路径，以及是否成功 |
 | `adapted_patch` | 供后续对比或落地的 patch 文本 |
 | `search_reports` | 冲突/定位阶段的搜索证据 |
+| `dryrun_detail.ai_evidence` | AI 候选补丁的生成、拒绝、接受和语义差异摘要 |
 | `generated_vs_real` | validate 场景下与真实修复的对比结果 |
 
 ---

@@ -780,6 +780,7 @@ cve_backporting/
 │   ├── matcher.py                 #   Similarity algorithms + PathMapper
 │   ├── code_matcher.py            #   Code semantic matching (Level 8)
 │   ├── search_report.py           #   Detailed search process reports
+│   ├── ai_assistant.py            #   GLM5 advisory tasks + ai_evidence
 │   ├── ai_patch_generator.py      #   AI-assisted patch generation (Level 5)
 │   ├── function_analyzer.py       #   C function definition + call chain analysis
 │   ├── llm_analyzer.py            #   LLM-powered root cause analysis
@@ -853,24 +854,30 @@ Multi-dimensional similarity (structure + identifiers + keywords) — independen
 
 | Component | Technology | Purpose | Default |
 |-----------|-----------|---------|---------|
-| **AI-Generated (optional)** | LLM (GPT-4o / DeepSeek / etc.) | Generate adapted patches when rules fail | Disabled |
+| **GLM5/OpenAI-compatible client** | `provider=glm`, `base_url`, `model=GLM-5` | Shared model client for structured AI tasks | Disabled |
+| **AI Advisory Tasks** | GLM5 structured JSON | Low-signal adjudication, prerequisite triage, risk semantic explanation | Disabled |
+| **AI-Generated (optional)** | GLM5/OpenAI-compatible LLM | Generate high-risk candidate patches only after deterministic DryRun fails | Disabled |
 | **LLM Root-Cause Analysis** | LLM | Analyze validation failures | Disabled |
 | **Code Semantic Matching** | SequenceMatcher + Set ops | Multi-dimensional code similarity | Enabled (pure algorithm) |
 | **Diff Containment** | Multiset counting | Detect patches in squash commits | Enabled (pure algorithm) |
 
-Core non-AI algorithms are **fully deterministic** — no model inference, complete reproducibility and explainability. AI features are opt-in enhancements.
+Core non-AI algorithms are **fully deterministic** — no model inference, complete reproducibility and explainability. AI features are opt-in enhancements. Advisory tasks write `validation_details.ai_evidence`; AI patch suggestions write `dryrun_detail.ai_evidence` and remain high-risk `ai-generated` candidates even when they pass `git apply --check`.
 
 ```yaml
 # config.yaml — AI configuration
 llm:
   enabled: true
-  provider: "openai"
-  api_key: ""                    # or LLM_API_KEY env var
-  base_url: "https://api.openai.com/v1"
-  model: "gpt-4o"
+  provider: "glm"
+  api_key: "${GLM_API_KEY}"      # or LLM_API_KEY env var
+  base_url: "http://<glm5-host>:8888/v1"
+  model: "GLM-5"
 
-ai_patch_generation:
-  enabled: false
+ai:
+  mode: "advisory"               # off / advisory / gated
+  enable_dependency_triage: true
+  enable_low_signal_adjudication: true
+  enable_risk_explainer: true
+  enable_conflict_patch_suggestion: false
 ```
 
 ---
@@ -881,6 +888,7 @@ ai_patch_generation:
 |----------|-------------|
 | **[TECHNICAL.md](docs/TECHNICAL.md)** | Complete architecture, algorithms, data models, agent specifications |
 | **[ADAPTIVE_DRYRUN.md](docs/ADAPTIVE_DRYRUN.md)** | Multi-level adaptive DryRun engine — algorithm principles and formal specification |
+| **[AI_ENHANCEMENT.md](docs/AI_ENHANCEMENT.md)** | GLM5 configuration, AI advisory tasks, `ai_evidence`, and AI patch suggestion guardrails |
 | **[MULTI_LEVEL_ALGORITHM.md](docs/MULTI_LEVEL_ALGORITHM.md)** | Multi-level algorithm reference with mathematical foundations |
 | **[presentation.md](docs/presentation.md)** | Current presentation deck for expert review / internal reporting |
 | **[plan.md](plan.md)** | Current roadmap, gaps, milestones, and acceptance criteria |

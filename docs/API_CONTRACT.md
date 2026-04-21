@@ -26,6 +26,7 @@
 | CVE 字段 | 单条用 `cve_id`，批量也兼容 `cves`、`cve_ids` |
 | P2 风险规则开关 | 接受 `enable_p2` / `disable_p2` |
 | 深度分析 | `deep=true` 时追加 community / vuln analysis / patch review / risk benefit / merge advisor |
+| AI 增强 | 当前由服务端 `config.yaml` 控制；API 请求暂不直接传密钥、endpoint 或 `ai.mode` |
 | 策略风格 | API 当前不直接暴露 `policy-profile` 字符串；按配置文件和开关行为运行 |
 
 ---
@@ -258,6 +259,8 @@
 | `intro_analysis` | 建议 | introduced commit 缺失或检测时的受影响判断证据；`missing_intro_patch_probe` 表示基于 fix patch 代码形态探测，不等于找到了真实 intro commit |
 | `l0_l5.current_level` | 是 | 最终执行通道 |
 | `l0_l5.base_level` | 是 | DryRun 基线级别 |
+| `validation_details.ai_evidence` | 可选 | GLM5/LLM advisory task 输出；未启用 AI 时为空 |
+| `dryrun_detail.ai_evidence` | 可选 | AI patch suggestion 的生成与 apply-check 证据 |
 | `traceability` | 是 | 规则 profile、schema 版本、目标仓追溯 |
 
 ### 6.2 批量汇总

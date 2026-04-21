@@ -102,7 +102,7 @@
 | 依赖运行时环境或外部配套的修复 | 例如依赖 sysctl、firmware、device tree、用户态协议、特定硬件初始化顺序的 CVE，单靠 patch 文本和静态代码无法完整建模 | 系统可能能找到补丁，但不能把结果当成“环境层面已闭环”；应人工补运行时验证 |
 | 上游情报不足或 fix / intro 不可稳定定位 | 若缺少可靠的 mainline fix 或 stable backport 线索，后续 DryRun 和分级会失去稳定锚点；若仅缺少 introduced commit，可启用 `analysis.missing_intro_policy=patch_probe` 用 fix patch 的 removed/added 行探测目标代码形态 | 有 fix patch 时系统会输出 `intro_analysis` 证据；无有效探测信号时仍会进入不确定或人工确认通道，不能把低置信结论当成自动闭环 |
 | 宏展开、生成代码、架构特定汇编主导语义的修复 | 当前主要分析 C 代码文本、diff、局部函数关系，对复杂宏语义、自动生成代码、汇编路径的行为变化没有稳定语义模型 | 可能只能得到文本级 apply 或局部规则命中；不应把它解释成“语义已被系统充分理解” |
-| AI 兜底补丁生成 | `AI-Generated` 不是确定性主路径，不能替代真实搜索、依赖、DryRun 和 validate 证据 | 只能作为最后兜底候选，默认不应直接进入自动回移通道 |
+| AI 兜底补丁生成 | `AI-Generated` 不是确定性主路径，不能替代真实搜索、依赖、DryRun 和 validate 证据 | 只能作为最后兜底候选，必须进入高风险/L5 和人工审批通道 |
 
 一句话判断：
 
@@ -122,6 +122,7 @@
 | [docs/USER_DECISION_GUIDE.md](docs/USER_DECISION_GUIDE.md) | 用户如何读懂等级、DryRun 算法、索引目的、前后置关联补丁 | 使用者、评审者、平台对接方 |
 | [docs/TECHNICAL.md](docs/TECHNICAL.md) | 系统架构、代码模块、数据流、TUI 技术说明、验证框架 | 开发者、维护者 |
 | [docs/ADAPTIVE_DRYRUN.md](docs/ADAPTIVE_DRYRUN.md) | DryRun 策略家族、适配顺序、冲突适配、输出口径 | 关注补丁适配的人 |
+| [docs/AI_ENHANCEMENT.md](docs/AI_ENHANCEMENT.md) | GLM5 配置、AI advisory task、`ai_evidence`、AI 补丁候选门禁 | 关注 AI 增强和安全边界的人 |
 | [docs/MULTI_LEVEL_ALGORITHM.md](docs/MULTI_LEVEL_ALGORITHM.md) | `L0-L5`、核心算法地图、调用链、LLM 使用边界、准确率高场景 | 关注策略与判定质量的人 |
 | [docs/API_CONTRACT.md](docs/API_CONTRACT.md) | HTTP API 请求模板、响应模板、必要字段、错误返回、对接约束 | 平台、服务端对接者 |
 | [docs/OUTPUT_SCHEMA.md](docs/OUTPUT_SCHEMA.md) | 单案例 JSON、validate 字段、batch summary、错误结构、字段字典 | 平台、报表、数据接入方 |
@@ -164,11 +165,20 @@ repositories:
 ```yaml
 llm:
   enabled: true
-  provider: "openai"
-  api_key: "YOUR_KEY"
-  base_url: "https://api.openai.com/v1"
-  model: "gpt-4o"
+  provider: "glm"
+  api_key: "${GLM_API_KEY}"
+  base_url: "http://<glm5-host>:8888/v1"
+  model: "GLM-5"
+
+ai:
+  mode: "advisory"        # off / advisory / gated
+  enable_dependency_triage: true
+  enable_low_signal_adjudication: true
+  enable_risk_explainer: true
+  enable_conflict_patch_suggestion: false
 ```
+
+`ai.mode=advisory` 时，低信号裁决、前置补丁 triage、风险语义解释只写入 `validation_details.ai_evidence`，不会直接改最终级别。`enable_conflict_patch_suggestion=true` 会允许 DryRun 失败后生成 AI 候选补丁；即使候选通过 `git apply --check`，仍按 `ai-generated` 高风险/L5 通道处理。
 
 如果上游 CVE 没有提供 introduced commit，可以通过 `analysis` 配置选择处理策略：
 
@@ -493,12 +503,14 @@ python cli.py batch-validate --file cve_data.json --target 5.10-hulk --workers 2
 | 风险收益评估 | 否 | 输出确定性评分与说明 |
 | 合入建议 | 否 | 输出确定性建议 |
 | validate 差异解释 | 否 | 不再生成 LLM 差异总结 |
+| AI advisory 证据 | 是 | 不输出 `validation_details.ai_evidence.tasks` |
 | AI 兜底补丁生成 | 是 | 不进入 AI-generated 路径 |
 
 一句话总结：
 
 - **核心判断不依赖 LLM**
-- **LLM 主要用于增强解释和 AI 兜底补丁生成**
+- **LLM 主要用于结构化证据增强和 AI 兜底补丁生成**
+- **AI 生成补丁即使通过 apply check，也不等于可自动合入**
 
 ---
 

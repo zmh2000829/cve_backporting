@@ -27,6 +27,7 @@
 | `analysis_framework` | 是 | 过程 / 证据 / 结论骨架 |
 | `intro_analysis` | 建议 | introduced commit 缺失或检测时的受影响判断证据 |
 | `l0_l5` | 是 | 最终级别与 DryRun 基线级别 |
+| `validation_details` | 建议 | 规则、人工清单、专项风险和 AI advisory 证据 |
 | `traceability` | 是 | 规则 profile、schema 版本、目标仓 HEAD 等追溯信息 |
 | `analysis_narrative` | 建议 | 面向人的过程说明 |
 | `artifacts` | 建议 | 输出目录、patch 文件路径 |
@@ -142,7 +143,47 @@
 
 ---
 
-## 7. `traceability`
+## 7. `validation_details.ai_evidence`
+
+当 `llm.enabled=true` 且 `ai.mode` 不是 `off` 时，分析类 AI task 的输出写入 `validation_details.ai_evidence`。没有启用 AI 时该字段可以为空对象。
+
+| 字段 | 作用 |
+| --- | --- |
+| `enabled` | 本次是否启用 AI task runner |
+| `mode` | `off / advisory / gated` |
+| `provider` / `model` | 例如 `glm` / `GLM-5` |
+| `prompt_version` | prompt/schema 版本，便于回放 |
+| `tasks[]` | 每个 task 的结构化结果 |
+| `summary[]` | 面向人阅读的摘要 |
+
+`tasks[]` 常见字段：
+
+| 字段 | 作用 |
+| --- | --- |
+| `task` | `low_signal_adjudication / dependency_triage / risk_semantic_explainer / ai_patch_suggestion` |
+| `status` | `success / no_response / disabled / rejected_by_apply_check ...` |
+| `decision` | 模型给出的结构化建议 |
+| `confidence` | 0 到 1 的置信度 |
+| `evidence_lines` | 模型引用的输入证据行 |
+| `used_for_final_decision` | 是否实际参与最终路径选择；分析类 task 默认 `false` |
+
+---
+
+## 8. `dryrun_detail.ai_evidence`
+
+AI patch suggestion 的证据写入 `dryrun_detail.ai_evidence`。它只说明 AI 候选补丁的生成和 apply check 情况，不代表语义已安全。
+
+| 字段 | 作用 |
+| --- | --- |
+| `tasks[].semantic_delta` | AI patch 与上游 patch 的 `+` 行保留情况和差异样本 |
+| `tasks[].decision_guard` | 当前 AI 候选必须满足的确定性门禁 |
+| `tasks[].apply_method` | AI 候选通过的 apply check 方式，例如 `strict / ignore-ws / context-C1` |
+
+如果最终 `dryrun_detail.apply_method = ai-generated`，调用方应把它视为高风险/L5 候选，而不是自动修复结论。
+
+---
+
+## 9. `traceability`
 
 | 字段 | 作用 |
 | --- | --- |
@@ -157,9 +198,9 @@
 
 ---
 
-## 8. validate 专有字段
+## 10. validate 专有字段
 
-### 8.1 `generated_vs_real`
+### 10.1 `generated_vs_real`
 
 | 字段 | 作用 |
 | --- | --- |
@@ -167,7 +208,7 @@
 | `deterministic_exact_match` | 是否逐字等价 |
 | `analysis` | 若存在，解释为什么有差异 |
 
-### 8.2 `overall_pass`
+### 10.2 `overall_pass`
 
 | 值 | 含义 |
 | --- | --- |
@@ -176,9 +217,9 @@
 
 ---
 
-## 9. batch summary
+## 11. batch summary
 
-### 9.1 必要字段
+### 11.1 必要字段
 
 | 字段 | 是否必须 | 作用 |
 | --- | --- | --- |
@@ -191,7 +232,7 @@
 
 `batch-validate --xlsx` 会额外输出 `batch_validate_summary.xlsx`。工作簿包含“总览 / 全部明细 / 完全一致 / 有升级 / 失败”工作表，用于快速筛选主补丁完全一致、最终级别较 DryRun 基线升级、以及验证失败的 CVE。
 
-### 9.2 `summary.l0_l5`
+### 11.2 `summary.l0_l5`
 
 | 字段 | 作用 |
 | --- | --- |
@@ -199,7 +240,7 @@
 | `current_level_distribution` | 最终级别分布 |
 | `base_level_distribution` | DryRun 基线分布 |
 
-### 9.3 `summary.strategy_effectiveness`
+### 11.3 `summary.strategy_effectiveness`
 
 | 字段 | 作用 |
 | --- | --- |
@@ -208,7 +249,7 @@
 | `automation` | 自动化完成占比与 unresolved 占比 |
 | `definition` | 每个策略家族的归类定义 |
 
-### 9.4 `summary.level_accuracy`
+### 11.4 `summary.level_accuracy`
 
 | 字段 | 作用 |
 | --- | --- |
@@ -216,7 +257,7 @@
 | `base_levels` | 每个基线级别的同类统计 |
 | `definitions` | `pass_rate / acceptable_patch_rate / exact_match_rate` 的定义 |
 
-### 9.5 `summary.risk_hit_summary`
+### 11.5 `summary.risk_hit_summary`
 
 | 字段 | 作用 |
 | --- | --- |
@@ -228,7 +269,7 @@
 
 ---
 
-## 10. 错误结构
+## 12. 错误结构
 
 | 顶层字段 | 说明 |
 | --- | --- |
@@ -246,7 +287,7 @@
 
 ---
 
-## 11. 推荐集成约束
+## 13. 推荐集成约束
 
 | 约束 | 当前口径 |
 | --- | --- |
