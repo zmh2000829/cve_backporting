@@ -1,6 +1,6 @@
 from core.models import (
     CveInfo, PatchInfo, GitCommit, CommitInfo, MatchResult,
-    SearchResult, SearchStep, StrategyResult, MultiStrategyResult,
+    SearchResult, SearchFailure, SearchStep, StrategyResult, MultiStrategyResult,
     PrerequisitePatch, AnalysisResult, DryRunResult,
 )
 from core.config import ConfigLoader, Config

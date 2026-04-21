@@ -21,6 +21,7 @@ from core.output_serializers import (
 from core.report_schema import make_result_status
 
 import cli
+from core.config import SEARCH_PROFILE_PRESETS
 
 logger = logging.getLogger("cve_api")
 
@@ -99,6 +100,12 @@ def _build_mainline_cve_info(payload: Dict[str, Any], cve_id: str) -> CveInfo:
 
 def _config_with_request_overrides(config, payload: Dict[str, Any]):
     cfg = copy.deepcopy(config)
+    search_profile = payload.get("search_profile")
+    if search_profile and getattr(cfg, "search", None):
+        cfg.search.profile = str(search_profile)
+        for key, value in (SEARCH_PROFILE_PRESETS.get(cfg.search.profile) or {}).items():
+            setattr(cfg.search, key, value)
+
     if not getattr(cfg, "policy", None):
         return cfg
 

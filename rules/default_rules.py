@@ -714,7 +714,7 @@ class SingleLineHighImpactRule(PolicyRule):
     rule_scope = "risk"
 
     CATEGORY_PATTERNS = {
-        "locking": re.compile(r"\b(spin_lock|spin_unlock|mutex_lock|mutex_unlock|read_lock|write_lock|rcu_|rwlock|down_write|up_write)\b"),
+        "locking": re.compile(r"\b(spin_lock\w*|spin_unlock\w*|mutex_\w+|read_lock|write_lock|rcu_\w+|rwlock|down_write|up_write)\b"),
         "lifetime": re.compile(r"\b(refcount|kref|atomic_|kfree|kvfree|kmalloc|kzalloc|list_del|list_add)\b"),
         "control_flow": re.compile(r"\b(if|else|switch|goto|break|continue)\b"),
         "error_path": re.compile(r"\b(NULL|ERR_|IS_ERR|PTR_ERR|WARN_ON|BUG_ON)\b"),
@@ -724,6 +724,21 @@ class SingleLineHighImpactRule(PolicyRule):
     def __init__(self, max_changed_lines: int):
         self.max_changed_lines = max_changed_lines
 
+    @staticmethod
+    def _low_signal_control_flow(body: str) -> bool:
+        text = body.strip()
+        if not re.search(r"\b(if|else|switch|goto|break|continue)\b", text):
+            return False
+        strong_control_markers = (
+            r"\bgoto\b|"
+            r"\bswitch\b|"
+            r"\breturn\s+(?:-[A-Z0-9_]+|NULL|ERR_PTR|PTR_ERR|IS_ERR)|"
+            r"\b(state|status|mode|phase|flag|flags)\b|"
+            r"(?:->|\.)[A-Za-z_]\w*|"
+            r"\b(spin_lock\w*|spin_unlock\w*|mutex_\w+|rcu_\w+|refcount\w*|kref\w*|atomic_\w+)\b"
+        )
+        return not re.search(strong_control_markers, text, re.IGNORECASE)
+
     def evaluate(self, ctx: RuleContext) -> Optional[Dict]:
         if ctx.changed_lines == 0 or ctx.changed_lines > self.max_changed_lines:
             return None
@@ -732,6 +747,8 @@ class SingleLineHighImpactRule(PolicyRule):
         for body in _changed_bodies(ctx.patch.diff_code or ""):
             for name, pattern in self.CATEGORY_PATTERNS.items():
                 if pattern.search(body):
+                    if name == "control_flow" and self._low_signal_control_flow(body):
+                        continue
                     matched_categories.append(name)
                     if len(sample_lines) < 4:
                         sample_lines.append(body)

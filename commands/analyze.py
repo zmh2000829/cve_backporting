@@ -3,7 +3,12 @@
 import os
 import sys
 
-from commands.policy_cli import add_p2_toggle, add_policy_profile_arg, apply_policy_cli_overrides
+from commands.policy_cli import (
+    add_p2_toggle,
+    add_policy_profile_arg,
+    add_search_profile_arg,
+    apply_policy_cli_overrides,
+)
 from services.output_support import make_run_id
 
 
@@ -19,6 +24,7 @@ def register(subparsers, parent):
         help="深度分析模式: 漏洞分析+社区讨论+补丁检视+风险收益+合入建议",
     )
     add_policy_profile_arg(parser)
+    add_search_profile_arg(parser)
     add_p2_toggle(parser)
     return {"analyze": run}
 
@@ -32,6 +38,7 @@ def run(args, config, runtime):
         llm_config=config.llm,
         policy_config=getattr(config, "policy", None),
         analysis_config=getattr(config, "analysis", None),
+        search_config=getattr(config, "search", None),
     )
 
     cves = [args.cve_id] if args.cve_id else []

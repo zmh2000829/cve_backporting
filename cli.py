@@ -47,6 +47,7 @@ from core.output_serializers import (
     serialize_dependency_details,
     serialize_function_impacts,
     serialize_level_decision,
+    serialize_search_result,
     serialize_validation_details,
 )
 from core.ui import (
@@ -192,7 +193,8 @@ def run_analyze_payload(cve_id: str, target_version: str, config, *,
     pipe = Pipeline(git_mgr, path_mappings=config.path_mappings,
                     llm_config=config.llm,
                     policy_config=getattr(config, "policy", None),
-                    analysis_config=getattr(config, "analysis", None))
+                    analysis_config=getattr(config, "analysis", None),
+                    search_config=getattr(config, "search", None))
 
     stage_events, record_stage = _make_stage_trace_tracker(
         stage_callback=stage_callback)
@@ -1759,7 +1761,8 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
         pipe = Pipeline(wt_mgr, path_mappings=config.path_mappings,
                         llm_config=config.llm if deep else None,
                         policy_config=getattr(config, "policy", None),
-                        analysis_config=getattr(config, "analysis", None))
+                        analysis_config=getattr(config, "analysis", None),
+                        search_config=getattr(config, "search", None))
 
         if show_stages:
             tracker = StageTracker(STAGES)
@@ -2119,15 +2122,10 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
         dependency_details = serialize_dependency_details(result.dependency_details)
         intro_analysis = {}
         if result.introduced_search:
-            intro = result.introduced_search
-            intro_analysis = {
-                "found": intro.found,
-                "strategy": intro.strategy,
-                "confidence": intro.confidence,
-                "target_commit": intro.target_commit,
-                "target_subject": intro.target_subject,
-                "candidates": intro.candidates,
-            }
+            intro_analysis = serialize_search_result(result.introduced_search)
+        fix_analysis = {}
+        if result.fix_search:
+            fix_analysis = serialize_search_result(result.fix_search)
 
         out = {
             "cve_id": cve_id, "known_fix": primary_known_fix, "known_fix_commits": known_fix_commits, "target": tv,
@@ -2168,6 +2166,7 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
             "real_fix_patch_file": real_fix_patch_file,
             "analysis_stages": stage_events,
             "intro_analysis": intro_analysis,
+            "fix_analysis": fix_analysis,
             "known_prereqs": known_prereqs,
             "run_id": run_id,
             "output_dir": output_dir,
@@ -2195,6 +2194,7 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
                     "rule_version": serialized_validation_details.get("rule_version", ""),
                     "rule_switches": (collect_rules_metadata(getattr(config, "policy", None)).get("policy_overrides") if getattr(config, "policy", None) else {}),
                 },
+                "search": getattr(getattr(pipe, "analysis", None), "search_profile", {}),
                 "data_sources": ["target_repo", "known_fix_local", "community_fix_patch", "validate_pipeline"],
             },
         }

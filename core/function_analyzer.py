@@ -18,12 +18,16 @@ class FunctionInfo:
     name: str
     file_path: str
     line_number: int
+    end_line: int = 0
     signature: str = ""
     return_type: str = ""
     parameters: List[str] = field(default_factory=list)
     callers: List[str] = field(default_factory=list)  # 调用者函数名
     callees: List[str] = field(default_factory=list)  # 被调用者函数名
+    indirect_calls: List[str] = field(default_factory=list)  # 函数指针/间接调用
     modified_lines: List[int] = field(default_factory=list)  # 被修改的行号
+    parse_uncertain: bool = False
+    parse_warnings: List[str] = field(default_factory=list)
 
 
 class FunctionAnalyzer:
@@ -58,19 +62,92 @@ class FunctionAnalyzer:
 
         i = 0
         while i < len(lines):
-            line = lines[i]
+            collected = self._collect_function_signature(lines, i)
+            if not collected:
+                i += 1
+                continue
 
-            # 简单的函数定义检测：行末有 { 或下一行有 {
-            if self._is_function_definition(line, lines, i):
-                func_info = self._parse_function_definition(
-                    line, lines, i, file_path
-                )
-                if func_info:
-                    functions.append(func_info)
+            signature, brace_idx = collected
+            func_info = self._parse_function_definition(
+                signature, lines, i, file_path
+            )
+            if not func_info:
+                i += 1
+                continue
 
-            i += 1
+            _, end_idx = self.extract_function_body(lines, i)
+            func_info.end_line = end_idx + 1
+            if end_idx >= min(i + 500, len(lines)) - 1:
+                func_info.parse_uncertain = True
+                func_info.parse_warnings.append("function_body_scan_limit")
+            if brace_idx != i and "{" not in lines[i]:
+                func_info.parse_warnings.append("multi_line_signature")
+            functions.append(func_info)
+            i = max(i + 1, end_idx + 1)
 
         return functions
+
+    def _collect_function_signature(self, lines: List[str],
+                                    line_idx: int) -> Optional[Tuple[str, int]]:
+        """收集可能跨多行的 C 函数签名，返回 (signature, brace_line_idx)。"""
+        first = lines[line_idx].strip()
+        if self._skip_signature_start(first):
+            return None
+
+        parts: List[str] = []
+        paren_depth = 0
+        saw_paren = False
+        max_signature_lines = 12
+
+        for j in range(line_idx, min(line_idx + max_signature_lines, len(lines))):
+            raw = lines[j].strip()
+            if not raw:
+                if parts:
+                    return None
+                continue
+            if raw.startswith("#") or raw.startswith("//") or raw.startswith("/*") or raw.startswith("*"):
+                return None
+
+            parts.append(raw)
+            paren_depth += raw.count("(") - raw.count(")")
+            saw_paren = saw_paren or "(" in raw
+            signature = " ".join(parts)
+
+            if saw_paren and paren_depth <= 0:
+                if self._looks_like_declaration_or_macro(signature):
+                    return None
+                if "{" in raw:
+                    return signature, j
+                if j + 1 < len(lines) and lines[j + 1].strip() == "{":
+                    return signature + " {", j + 1
+                if raw.endswith(";"):
+                    return None
+
+            if not saw_paren and raw.endswith(";"):
+                return None
+
+        return None
+
+    def _skip_signature_start(self, line: str) -> bool:
+        if not line:
+            return True
+        if line.startswith(("//", "/*", "*", "#")):
+            return True
+        if re.match(r"^(if|for|while|switch|return|else|do|case)\b", line):
+            return True
+        return False
+
+    def _looks_like_declaration_or_macro(self, signature: str) -> bool:
+        sig = re.sub(r"\s+", " ", signature or "").strip()
+        if not sig or sig.endswith(";"):
+            return True
+        if re.search(r"\(\s*\*\s*[A-Za-z_]\w*\s*\)", sig):
+            return True
+        if re.match(r"^[A-Z_][A-Z0-9_]*\s*\(", sig):
+            return True
+        if "=" in sig and "{" not in sig:
+            return True
+        return False
 
     def analyze_patch_impact(self, patch_diff: str,
                             file_content: str,
@@ -96,16 +173,23 @@ class FunctionAnalyzer:
 
         # 提取所有函数
         all_functions = self.extract_functions(file_content, file_path)
+        source_lines = file_content.split("\n")
+        for func in all_functions:
+            body, _ = self.extract_function_body(source_lines, func.line_number - 1)
+            func.callees = self.extract_callees(body)
+            func.indirect_calls = self.extract_indirect_calls(body)
+            if func.indirect_calls:
+                func.parse_uncertain = True
+                func.parse_warnings.append("indirect_function_pointer_call")
 
         # 找出被修改的函数
         modified_funcs = []
         for func in all_functions:
-            if any(line in modified_lines for line in range(
-                    func.line_number,
-                    func.line_number + 100)):  # 简化：假设函数不超过 100 行
+            end_line = func.end_line or func.line_number
+            if any(func.line_number <= line <= end_line for line in modified_lines):
                 func.modified_lines = [
                     l for l in modified_lines
-                    if func.line_number <= l < func.line_number + 100
+                    if func.line_number <= l <= end_line
                 ]
                 modified_funcs.append(func)
 
@@ -130,27 +214,7 @@ class FunctionAnalyzer:
                                 lines: List[str],
                                 line_idx: int) -> bool:
         """检测是否是函数定义行"""
-        line = line.strip()
-
-        # 跳过注释、空行、预处理指令
-        if not line or line.startswith("//") or line.startswith("/*") or line.startswith("#"):
-            return False
-
-        # 检查是否包含 ( 和 )
-        if "(" not in line or ")" not in line:
-            return False
-
-        # 检查是否是函数指针或宏
-        if "*" in line.split("(")[0]:
-            return False
-
-        # 检查是否有 { 或下一行有 {
-        has_brace = "{" in line
-        if not has_brace and line_idx + 1 < len(lines):
-            next_line = lines[line_idx + 1].strip()
-            has_brace = next_line == "{"
-
-        return has_brace
+        return self._collect_function_signature(lines, line_idx) is not None
 
     def _parse_function_definition(self, line: str,
                                    lines: List[str],
@@ -158,20 +222,23 @@ class FunctionAnalyzer:
                                    file_path: str) -> Optional[FunctionInfo]:
         """解析函数定义"""
         try:
+            line = re.sub(r"\s+", " ", line.replace("{", " { ")).strip()
             # 提取函数名
-            match = re.search(r'(\w+)\s*\(', line)
-            if not match:
+            paren_start = line.find("(")
+            if paren_start == -1:
                 return None
-
-            func_name = match.group(1)
+            before_func = line[:paren_start]
+            name_tokens = re.findall(r"[A-Za-z_]\w*", before_func)
+            if not name_tokens:
+                return None
+            func_name = name_tokens[-1]
 
             # 跳过 C 关键字
             if func_name in self.c_keywords:
                 return None
 
             # 提取参数
-            paren_start = line.find("(")
-            paren_end = line.find(")")
+            paren_end = self._find_matching_paren(line, paren_start)
             if paren_start == -1 or paren_end == -1:
                 return None
 
@@ -179,9 +246,8 @@ class FunctionAnalyzer:
             parameters = [p.strip() for p in params_str.split(",") if p.strip()]
 
             # 提取返回类型
-            before_func = line[:paren_start]
-            tokens = before_func.split()
-            return_type = tokens[-2] if len(tokens) >= 2 else ""
+            return_type = before_func[:before_func.rfind(func_name)].strip()
+            return_type = re.sub(r"\s+", " ", return_type).strip()
 
             return FunctionInfo(
                 name=func_name,
@@ -195,6 +261,19 @@ class FunctionAnalyzer:
         except Exception as e:
             logger.debug(f"解析函数定义失败: {e}")
             return None
+
+    @staticmethod
+    def _find_matching_paren(text: str, start: int) -> int:
+        depth = 0
+        for idx in range(start, len(text)):
+            ch = text[idx]
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    return idx
+        return -1
 
     def _extract_modified_lines(self, patch_diff: str) -> Set[int]:
         """从 patch 中提取修改的行号"""
@@ -226,6 +305,9 @@ class FunctionAnalyzer:
 
     def extract_callees(self, func_body: str) -> List[str]:
         """从函数体中提取被调用的函数名"""
+        brace = (func_body or "").find("{")
+        if brace >= 0:
+            func_body = func_body[brace + 1:]
         callees = set()
         for m in re.finditer(r'\b([a-zA-Z_]\w*)\s*\(', func_body):
             name = m.group(1)
@@ -233,8 +315,10 @@ class FunctionAnalyzer:
                 continue
 
             # 跳过成员访问/函数指针字段等“看起来像调用、实际上不是符号调用”的场景。
-            prefix = func_body[max(0, m.start() - 4):m.start()].rstrip()
+            prefix = func_body[max(0, m.start() - 8):m.start()].rstrip()
             if prefix.endswith(("->", ".")):
+                continue
+            if re.search(r"\(\s*\*\s*$", prefix):
                 continue
 
             # 跳过 GCC/Clang builtin 与 __ 开头的伪调用。
@@ -244,6 +328,19 @@ class FunctionAnalyzer:
             if name not in self.c_keywords and not name.isupper():
                 callees.add(name)
         return sorted(callees)
+
+    def extract_indirect_calls(self, func_body: str) -> List[str]:
+        """提取 `(*fn)(...)` 形式的函数指针调用，用于标记不确定调用边。"""
+        brace = (func_body or "").find("{")
+        if brace >= 0:
+            func_body = func_body[brace + 1:]
+        calls = set()
+        for m in re.finditer(
+            r"\(\s*\*\s*([A-Za-z_]\w*(?:(?:->|\.)[A-Za-z_]\w*)*)\s*\)\s*\(",
+            func_body or "",
+        ):
+            calls.add(re.split(r"->|\.", m.group(1))[-1])
+        return sorted(calls)
 
     def extract_function_body(self, lines: List[str],
                               start_idx: int) -> Tuple[str, int]:
@@ -347,12 +444,20 @@ class FunctionAnalyzer:
         for func in functions:
             body, _ = self.extract_function_body(lines, func.line_number - 1)
             callees = self.extract_callees(body)
+            indirect_calls = self.extract_indirect_calls(body)
             func.callees = callees
+            func.indirect_calls = indirect_calls
+            if indirect_calls:
+                func.parse_uncertain = True
+                func.parse_warnings.append("indirect_function_pointer_call")
             topo[func.name] = {
                 "callees": callees,
                 "callers": [],
                 "line": func.line_number,
+                "end_line": func.end_line,
                 "signature": func.signature,
+                "indirect_calls": indirect_calls,
+                "parse_uncertain": func.parse_uncertain,
             }
 
         all_names = set(topo.keys())
@@ -436,6 +541,7 @@ class FunctionAnalyzer:
         for func in functions:
             body, _ = self.extract_function_body(lines, func.line_number - 1)
             raw_callees = self.extract_callees(body)
+            indirect_calls = self.extract_indirect_calls(body)
             linked = sorted(
                 {
                     c
@@ -444,12 +550,19 @@ class FunctionAnalyzer:
                 }
             )
             func.callees = linked
+            func.indirect_calls = indirect_calls
+            if indirect_calls:
+                func.parse_uncertain = True
+                func.parse_warnings.append("indirect_function_pointer_call")
             topo[func.name] = {
                 "callees": linked,
                 "callers": [],
                 "line": func.line_number,
+                "end_line": func.end_line,
                 "signature": func.signature,
                 "file": file_path,
+                "indirect_calls": indirect_calls,
+                "parse_uncertain": func.parse_uncertain,
             }
 
         for fname, info in topo.items():

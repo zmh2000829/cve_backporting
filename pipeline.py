@@ -53,14 +53,16 @@ class Pipeline:
 
     def __init__(self, git_mgr: GitRepoManager, api_timeout: int = 30,
                  path_mappings: list = None, llm_config=None,
-                 policy_config=None, analysis_config=None):
+                 policy_config=None, analysis_config=None,
+                 search_config=None):
         pm = PathMapper(path_mappings) if path_mappings else PathMapper()
         self.crawler = CrawlerAgent(api_timeout=api_timeout, git_mgr=git_mgr)
-        self.analysis = AnalysisAgent(git_mgr, path_mapper=pm)
+        self.analysis = AnalysisAgent(git_mgr, path_mapper=pm, search_config=search_config)
         self.dependency = DependencyAgent(git_mgr, path_mapper=pm)
         self.dryrun = DryRunAgent(git_mgr, path_mapper=pm)
         self.git_mgr = git_mgr
         self.analysis_config = analysis_config
+        self.search_config = search_config
 
         self.llm = LLMClient(llm_config) if llm_config else LLMClient()
         self.community_agent = CommunityAgent(self.llm)

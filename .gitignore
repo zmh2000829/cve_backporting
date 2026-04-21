@@ -51,3 +51,5 @@ config.yaml
 # Test outputs
 *.log
 tests/
+!tests/
+!tests/test_search_and_function.py

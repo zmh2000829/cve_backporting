@@ -187,6 +187,9 @@
 | `summary.level_accuracy` | 是 | 每级别准确率统计 |
 | `summary.risk_hit_summary` | 是 | 风险命中汇总 |
 | `summary.level_distribution` | 建议 | 与旧调用方兼容 |
+| `artifacts.xlsx_report_file` | 可选 | 仅当 CLI 使用 `batch-validate --xlsx` 时出现，指向批量 Excel 明细表 |
+
+`batch-validate --xlsx` 会额外输出 `batch_validate_summary.xlsx`。工作簿包含“总览 / 全部明细 / 完全一致 / 有升级 / 失败”工作表，用于快速筛选主补丁完全一致、最终级别较 DryRun 基线升级、以及验证失败的 CVE。
 
 ### 9.2 `summary.l0_l5`
 

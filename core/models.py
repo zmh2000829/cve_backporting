@@ -86,7 +86,19 @@ class SearchResult:
     target_commit: str = ""
     target_subject: str = ""
     candidates: List[Dict] = field(default_factory=list)
+    near_misses: List[Dict] = field(default_factory=list)
     steps: List["SearchStep"] = field(default_factory=list)
+    failure: Optional["SearchFailure"] = None
+    search_profile: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class SearchFailure:
+    """结构化搜索失败原因。"""
+    reason: str = ""
+    detail: str = ""
+    retryable: bool = False
+    level: str = ""
 
 
 @dataclass

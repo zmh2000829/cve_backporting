@@ -54,6 +54,20 @@ analysis:
   # 过滤过短噪声变更行，如单独的 "}" / "};"
   missing_intro_min_changed_line_length: 4
 
+# ─── Commit 搜索策略 ─────────────────────────────────────────
+search:
+  # conservative: 更高阈值，减少误命中
+  # balanced:     默认，保持历史行为
+  # aggressive:   更高召回，保留更多 near-miss 供人工复核
+  profile: "balanced"
+  subject_threshold: 0.85
+  diff_threshold: 0.70
+  subject_candidate_limit: 10
+  keyword_candidate_limit: 30
+  diff_candidate_limit: 50
+  file_search_limit: 6
+  near_miss_limit: 5
+
 # ─── 路径映射 ────────────────────────────────────────────────
 # 内核版本演进中目录结构会发生变化，导致社区补丁的文件路径
 # 在低版本仓库中不存在。配置映射规则后工具会自动双向翻译：

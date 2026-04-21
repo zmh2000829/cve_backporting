@@ -27,6 +27,7 @@ class GitRepoManager:
         self.repo_configs = repo_configs
         self.use_cache = use_cache
         self.cache_db_path = cache_db_path
+        self.last_error: Dict[str, str] = {}
         if use_cache:
             self._init_cache_db()
 
@@ -43,23 +44,35 @@ class GitRepoManager:
     # ─── git execution ───────────────────────────────────────────────
 
     def run_git(self, cmd: List[str], rv: str, timeout: int = 600) -> Optional[str]:
+        self.last_error = {}
         rp = self._get_repo_path(rv)
         if not rp:
+            self.last_error = {"reason": "repo_not_configured", "detail": f"未配置仓库: {rv}"}
             raise ValueError(f"未配置仓库: {rv}")
         if not os.path.exists(rp):
+            self.last_error = {"reason": "repo_path_missing", "detail": f"仓库路径不存在: {rp}"}
             raise FileNotFoundError(f"仓库路径不存在: {rp}")
         try:
             r = subprocess.run(cmd, cwd=rp, capture_output=True, text=True,
                                encoding="utf-8", errors="replace", timeout=timeout)
             if r.returncode != 0:
                 logger.debug("Git失败: %s\n%s", " ".join(cmd[:6]), r.stderr.strip()[:200])
+                self.last_error = {
+                    "reason": "git_command_failed",
+                    "detail": r.stderr.strip()[:500] or f"returncode={r.returncode}",
+                }
                 return None
             return r.stdout
         except subprocess.TimeoutExpired:
             logger.error("Git超时(%ds): %s", timeout, " ".join(cmd[:5]))
+            self.last_error = {
+                "reason": "git_timeout",
+                "detail": f"timeout={timeout}s cmd={' '.join(cmd[:8])}",
+            }
             return None
         except Exception as e:
             logger.error("Git异常: %s", e)
+            self.last_error = {"reason": "git_exception", "detail": str(e)[:500]}
             return None
 
     def run_git_rc(self, cmd: List[str], rv: str, timeout: int = 30) -> int:

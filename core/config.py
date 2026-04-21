@@ -65,6 +65,51 @@ class AnalysisConfig:
     missing_intro_min_changed_line_length: int = 4
 
 
+SEARCH_PROFILE_PRESETS: Dict[str, Dict[str, Any]] = {
+    "conservative": {
+        "subject_threshold": 0.90,
+        "diff_threshold": 0.78,
+        "subject_candidate_limit": 10,
+        "keyword_candidate_limit": 30,
+        "diff_candidate_limit": 40,
+        "file_search_limit": 6,
+        "near_miss_limit": 5,
+    },
+    "balanced": {
+        "subject_threshold": 0.85,
+        "diff_threshold": 0.70,
+        "subject_candidate_limit": 10,
+        "keyword_candidate_limit": 30,
+        "diff_candidate_limit": 50,
+        "file_search_limit": 6,
+        "near_miss_limit": 5,
+    },
+    "aggressive": {
+        "subject_threshold": 0.80,
+        "diff_threshold": 0.62,
+        "subject_candidate_limit": 20,
+        "keyword_candidate_limit": 50,
+        "diff_candidate_limit": 100,
+        "file_search_limit": 8,
+        "near_miss_limit": 8,
+    },
+    "default": {},
+}
+
+
+@dataclass
+class SearchConfig:
+    """commit 搜索 profile 与候选保留策略。"""
+    profile: str = "balanced"
+    subject_threshold: float = 0.85
+    diff_threshold: float = 0.70
+    subject_candidate_limit: int = 10
+    keyword_candidate_limit: int = 30
+    diff_candidate_limit: int = 50
+    file_search_limit: int = 6
+    near_miss_limit: int = 5
+
+
 # policy.profile 预设：显式写在 YAML 中的阈值始终覆盖此处
 POLICY_PROFILE_PRESETS: Dict[str, Dict[str, int]] = {
     "conservative": {
@@ -120,6 +165,7 @@ class Config:
     cache: CacheConfig = field(default_factory=CacheConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
     analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
+    search: SearchConfig = field(default_factory=SearchConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     policy: PolicyConfig = field(default_factory=PolicyConfig)
     path_mappings: list = field(default_factory=lambda: list(DEFAULT_PATH_MAPPINGS))
@@ -165,6 +211,26 @@ class ConfigLoader:
                         "missing_intro_fixed_line_threshold",
                         "missing_intro_min_changed_line_length",
                     )
+                })
+            if "search" in data and isinstance(data["search"], dict):
+                raw_search: Dict[str, Any] = dict(data["search"])
+                prof = str(raw_search.get("profile") or "balanced")
+                preset = dict(SEARCH_PROFILE_PRESETS.get(prof) or SEARCH_PROFILE_PRESETS.get("default") or {})
+                merged_search = {**preset, **raw_search}
+                merged_search["profile"] = prof
+                allowed_search_keys = (
+                    "profile",
+                    "subject_threshold",
+                    "diff_threshold",
+                    "subject_candidate_limit",
+                    "keyword_candidate_limit",
+                    "diff_candidate_limit",
+                    "file_search_limit",
+                    "near_miss_limit",
+                )
+                cfg.search = SearchConfig(**{
+                    k: v for k, v in merged_search.items()
+                    if k in allowed_search_keys
                 })
             if "policy" in data and isinstance(data["policy"], dict):
                 raw_policy: Dict[str, Any] = dict(data["policy"])

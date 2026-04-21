@@ -264,6 +264,7 @@ CVE-2024-26635
 | 截取样本 | `python cli.py batch-validate --file cve_data.json --target 5.10-hulk --offset 10 --limit 20` |
 | 推荐并行 | `python cli.py batch-validate --file cve_data.json --target 5.10-hulk --workers 2` |
 | 深度批量验证 | `python cli.py batch-validate --file cve_data.json --target 5.10-hulk --workers 2 --deep` |
+| 输出 Excel 明细 | `python cli.py batch-validate --file cve_data.json --target 5.10-hulk --xlsx` |
 
 ### 6.6 `server`
 
@@ -281,7 +282,7 @@ python cli.py server --host 127.0.0.1 --port 8000
 | `check-intro` | `--target` + `--cve` 或 `--commit` | 无 | TUI |
 | `check-fix` | `--target` + `--cve` 或 `--commit` | 无 | TUI |
 | `validate` | `--target` + `--cve` + `--known-fix` | `--mainline-fix`、`--mainline-intro`、`--deep`、`--policy-profile`、`--enable-p2` / `--disable-p2` | TUI + `report.json` + patch artifacts |
-| `batch-validate` | `--target` + `--file` | `--offset`、`--limit`、`--workers`、`--deep`、`--policy-profile`、`--enable-p2` / `--disable-p2` | TUI + batch summary JSON |
+| `batch-validate` | `--target` + `--file` | `--offset`、`--limit`、`--workers`、`--deep`、`--xlsx`、`--policy-profile`、`--enable-p2` / `--disable-p2` | TUI + batch summary JSON；加 `--xlsx` 时额外输出 Excel 明细 |
 | `server` | 无 | `--host`、`--port` | HTTP API 服务 |
 
 推荐把命令参数整理成统一模板：
@@ -314,7 +315,8 @@ python cli.py batch-validate \
   [--offset 0] \
   [--limit 50] \
   [--policy-profile <balanced|conservative>] \
-  [--deep]
+  [--deep] \
+  [--xlsx]
 ```
 
 ### 6.8 CLI 输出模板

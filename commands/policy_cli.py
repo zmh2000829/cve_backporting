@@ -2,10 +2,11 @@
 
 import copy
 
-from core.config import POLICY_PROFILE_PRESETS
+from core.config import POLICY_PROFILE_PRESETS, SEARCH_PROFILE_PRESETS
 
 
 CLI_POLICY_PROFILES = ("conservative", "balanced")
+CLI_SEARCH_PROFILES = ("conservative", "balanced", "aggressive")
 
 
 def add_policy_profile_arg(parser):
@@ -14,6 +15,15 @@ def add_policy_profile_arg(parser):
         choices=CLI_POLICY_PROFILES,
         default=None,
         help="策略风格预设：conservative=更保守，balanced=默认平衡；命令行参数优先于 YAML policy.profile",
+    )
+
+
+def add_search_profile_arg(parser):
+    parser.add_argument(
+        "--search-profile",
+        choices=CLI_SEARCH_PROFILES,
+        default=None,
+        help="搜索召回/精度预设：conservative=更高阈值，balanced=默认，aggressive=更高召回；命令行参数优先于 YAML search.profile",
     )
 
 
@@ -37,6 +47,13 @@ def add_p2_toggle(parser):
 def apply_policy_cli_overrides(config, args):
     cfg = copy.deepcopy(config)
     policy = getattr(cfg, "policy", None)
+    search = getattr(cfg, "search", None)
+    search_profile = getattr(args, "search_profile", None)
+    if search and search_profile:
+        search.profile = str(search_profile)
+        for key, value in (SEARCH_PROFILE_PRESETS.get(search.profile) or {}).items():
+            setattr(search, key, value)
+
     if not policy:
         return cfg
 

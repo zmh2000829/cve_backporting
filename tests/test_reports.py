@@ -7,6 +7,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -14,6 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from commands.validate import _prepare_batch_validate_json
 from core.output_serializers import aggregate_batch_validate_summary
 from services.history_loader import normalize_report
+from services.batch_xlsx import build_batch_validate_xlsx_rows, write_batch_validate_xlsx
 from services.reporting import prepare_analyze_json, prepare_validate_json
 from services.output_support import (
     build_repo_traceability,
@@ -274,6 +276,113 @@ class OutputSupportRegressionTests(unittest.TestCase):
         self.assertEqual(trace["current_branch"], "stable/5.10")
         self.assertEqual(trace["head_commit_short"], "abc123456789")
         self.assertEqual(trace["head_commit_time"], "2026-04-03T09:55:00+08:00")
+
+
+class BatchXlsxRegressionTests(unittest.TestCase):
+    def _sample_results(self):
+        return [
+            {
+                "cve_id": "CVE-EXACT-UPGRADED",
+                "known_fix": "aaa111bbb222ccc333",
+                "summary": "补丁完全一致，但规则升级",
+                "dryrun_detail": {"apply_method": "strict"},
+                "level_decision": {
+                    "level": "L3",
+                    "base_level": "L0",
+                    "rule_hits": [
+                        {"rule_id": "prerequisite_required", "severity": "high", "level_floor": "L3"},
+                    ],
+                },
+                "generated_vs_real": {
+                    "verdict": "identical",
+                    "core_similarity": 1.0,
+                    "deterministic_exact_match": True,
+                },
+                "validation_details": {
+                    "strategy_buckets": {"dependency_bucket": "required"},
+                    "special_risk_report": {
+                        "summary": {
+                            "triggered_sections": ["locking_sync"],
+                            "has_critical_structure_change": True,
+                        }
+                    },
+                },
+                "result_status": {"state": "complete"},
+            },
+            {
+                "cve_id": "CVE-FAILED",
+                "known_fix": "ddd444eee555",
+                "summary": "核心差异较大",
+                "dryrun_detail": {"apply_method": "regenerated"},
+                "level_decision": {"level": "L1", "base_level": "L1", "rule_hits": []},
+                "generated_vs_real": {
+                    "verdict": "different",
+                    "core_similarity": 0.25,
+                    "deterministic_exact_match": False,
+                },
+                "result_status": {"state": "complete"},
+            },
+            {
+                "cve_id": "CVE-ACCEPTABLE",
+                "known_fix": "fff666",
+                "summary": "语义本质相同",
+                "dryrun_detail": {"apply_method": "3way"},
+                "level_decision": {"level": "L1", "base_level": "L1", "rule_hits": []},
+                "generated_vs_real": {
+                    "verdict": "essentially_same",
+                    "core_similarity": 0.95,
+                    "deterministic_exact_match": False,
+                },
+                "result_status": {"state": "complete"},
+            },
+        ]
+
+    def test_batch_xlsx_rows_separate_exact_promotion_and_failure(self):
+        rows = build_batch_validate_xlsx_rows(self._sample_results())
+
+        exact = rows[0]
+        failed = rows[1]
+        acceptable = rows[2]
+
+        self.assertEqual(exact["主补丁状态"], "完全一致")
+        self.assertEqual(exact["是否完全一致"], "是")
+        self.assertEqual(exact["是否升级"], "是")
+        self.assertEqual(exact["升级路径"], "L0->L3")
+        self.assertIn("prerequisite_required->L3", exact["升级规则"])
+        self.assertEqual(failed["是否失败"], "是")
+        self.assertEqual(acceptable["主补丁状态"], "本质相同")
+        self.assertEqual(acceptable["是否失败"], "否")
+
+    def test_batch_xlsx_writer_creates_expected_workbook_parts(self):
+        tmpdir = tempfile.mkdtemp(prefix="batch-xlsx-")
+        try:
+            path = os.path.join(tmpdir, "batch_validate_summary.xlsx")
+            write_batch_validate_xlsx(
+                path,
+                self._sample_results(),
+                "5.10-hulk",
+                batch_summary={"promotion_summary": {"promotion_matrix": {"L0->L3": 1}}},
+                generated_at="2026-04-21T15:00:00+08:00",
+            )
+            self.assertTrue(os.path.exists(path))
+            with zipfile.ZipFile(path) as zf:
+                names = set(zf.namelist())
+                self.assertIn("xl/workbook.xml", names)
+                self.assertIn("xl/worksheets/sheet1.xml", names)
+                self.assertIn("xl/worksheets/sheet5.xml", names)
+                workbook = zf.read("xl/workbook.xml").decode("utf-8")
+                detail = zf.read("xl/worksheets/sheet2.xml").decode("utf-8")
+                summary = zf.read("xl/worksheets/sheet1.xml").decode("utf-8")
+            self.assertIn("总览", workbook)
+            self.assertIn("全部明细", workbook)
+            self.assertIn("完全一致", workbook)
+            self.assertIn("有升级", workbook)
+            self.assertIn("失败", workbook)
+            self.assertIn("CVE-EXACT-UPGRADED", detail)
+            self.assertIn("CVE-FAILED", detail)
+            self.assertIn("L0-&gt;L3", summary)
+        finally:
+            shutil.rmtree(tmpdir)
 
 
 if __name__ == "__main__":

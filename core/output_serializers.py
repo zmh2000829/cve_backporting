@@ -198,6 +198,29 @@ def serialize_dependency_details(details) -> dict:
     return {}
 
 
+def serialize_search_result(search_result) -> dict:
+    if not search_result:
+        return {}
+    if isinstance(search_result, dict):
+        return dict(search_result)
+    failure = getattr(search_result, "failure", None)
+    return {
+        "found": getattr(search_result, "found", False),
+        "strategy": getattr(search_result, "strategy", ""),
+        "confidence": getattr(search_result, "confidence", 0.0),
+        "target_commit": getattr(search_result, "target_commit", ""),
+        "target_subject": getattr(search_result, "target_subject", ""),
+        "candidates": getattr(search_result, "candidates", []),
+        "near_misses": getattr(search_result, "near_misses", []),
+        "failure": asdict(failure) if failure else {},
+        "search_profile": getattr(search_result, "search_profile", {}),
+        "steps": [
+            asdict(step) if hasattr(step, "__dict__") else dict(step)
+            for step in (getattr(search_result, "steps", []) or [])
+        ],
+    }
+
+
 def collect_rules_metadata(policy_config, level_decision=None, validation_details=None):
     payload = {
         "profile": getattr(policy_config, "profile", "default") if policy_config else "default",

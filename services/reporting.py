@@ -10,6 +10,7 @@ from core.output_serializers import (
     serialize_dependency_details,
     serialize_function_impacts,
     serialize_level_decision,
+    serialize_search_result,
     serialize_validation_details,
 )
 from core.report_schema import (
@@ -136,6 +137,13 @@ def _build_traceability_section(data: dict, mode: str) -> dict:
     policy.setdefault("profile", validation_details.get("rule_profile") or rules.get("profile") or "default")
     policy.setdefault("rule_version", validation_details.get("rule_version") or "")
     policy.setdefault("rule_switches", rules.get("policy_overrides") or {})
+    intro_analysis = data.get("intro_analysis") or {}
+    fix_analysis = data.get("fix_analysis") or {}
+    search_profile = (
+        fix_analysis.get("search_profile")
+        or intro_analysis.get("search_profile")
+        or (traceability.get("search") or {})
+    )
 
     generated_at = traceability.get("generated_at") or ""
     source_timestamps = dict(traceability.get("source_timestamps") or {})
@@ -151,6 +159,7 @@ def _build_traceability_section(data: dict, mode: str) -> dict:
         "report_version": REPORT_VERSION,
         "schema_version": REPORT_SCHEMA_VERSION,
         "policy": policy,
+        "search": search_profile,
         "target_repo": target_repo,
         "data_sources": list(traceability.get("data_sources") or []),
         "source_timestamps": source_timestamps,
@@ -331,15 +340,10 @@ def build_analyze_payload(
     dependency_details = serialize_dependency_details(result.dependency_details)
     intro_analysis = {}
     if result.introduced_search:
-        intro = result.introduced_search
-        intro_analysis = {
-            "found": intro.found,
-            "strategy": intro.strategy,
-            "confidence": intro.confidence,
-            "target_commit": intro.target_commit,
-            "target_subject": intro.target_subject,
-            "candidates": intro.candidates,
-        }
+        intro_analysis = serialize_search_result(result.introduced_search)
+    fix_analysis = {}
+    if result.fix_search:
+        fix_analysis = serialize_search_result(result.fix_search)
     payload = {
         "cve_id": result.cve_id,
         "target_version": target,
@@ -359,6 +363,7 @@ def build_analyze_payload(
         "recommendations": dedupe_strings(result.recommendations or []),
         "analysis_stages": stage_events or [],
         "intro_analysis": intro_analysis,
+        "fix_analysis": fix_analysis,
         "fix_patch_detail": fix_patch_detail,
         "level_decision": serialize_level_decision(result.level_decision),
         "validation_details": valid_details,
@@ -373,6 +378,7 @@ def build_analyze_payload(
                 "rule_version": valid_details.get("rule_version", ""),
                 "rule_switches": (collect_rules_metadata(policy_config).get("policy_overrides") if policy_config else {}),
             },
+            "search": getattr(getattr(pipe, "analysis", None), "search_profile", {}),
             "data_sources": ["target_repo", "community_fix_patch", "analysis_pipeline"],
         },
     }
@@ -399,6 +405,8 @@ def prepare_analyze_json(payload: dict) -> dict:
             "dryrun_detail": payload.get("dryrun_detail", {}),
             "function_impacts": payload.get("function_impacts", []),
             "prerequisite_patches": payload.get("prerequisite_patches", []),
+            "intro_analysis": payload.get("intro_analysis", {}),
+            "fix_analysis": payload.get("fix_analysis", {}),
             "fix_patch_detail": payload.get("fix_patch_detail", {}),
             "analysis_stages": payload.get("analysis_stages", []),
             "rules": payload.get("rules", {}),
@@ -455,6 +463,8 @@ def prepare_validate_json(result: dict, *, deep_serializer=None) -> dict:
             "actual_solution_commits": raw.get("actual_solution_commits", []),
             "actual_solution_detail": raw.get("actual_solution_detail", []),
             "known_prereqs_detail": raw.get("known_prereqs_detail", []),
+            "intro_analysis": raw.get("intro_analysis", {}),
+            "fix_analysis": raw.get("fix_analysis", {}),
             "analysis_stages": raw.get("analysis_stages", []),
             "analysis_narrative": raw.get("analysis_narrative", {}),
             "rules": raw.get("rules", {}),

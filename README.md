@@ -420,6 +420,9 @@ python cli.py batch-validate --file cve_data.json --target 5.10-hulk --workers 2
 
 # Batch validation with conservative promotion thresholds
 python cli.py batch-validate --file cve_data.json --target 5.10-hulk --workers 2 --policy-profile conservative
+
+# Also export an XLSX workbook for exact-match / promotion / failure triage
+python cli.py batch-validate --file cve_data.json --target 5.10-hulk --xlsx
 ```
 
 Recommended usage:

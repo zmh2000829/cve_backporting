@@ -88,6 +88,18 @@ class PolicyEngineRegressionTests(unittest.TestCase):
         ])
         self.assertEqual(args.policy_profile, "balanced")
 
+    def test_batch_validate_cli_accepts_xlsx_argument(self):
+        parser = argparse.ArgumentParser()
+        subparsers = parser.add_subparsers(dest="command")
+        validate_cmd.register(subparsers, argparse.ArgumentParser(add_help=False))
+        args = parser.parse_args([
+            "batch-validate",
+            "--file", "cves.json",
+            "--target", "5.10-hulk",
+            "--xlsx",
+        ])
+        self.assertTrue(args.xlsx)
+
     def test_l0_strict_harmless_when_no_rules(self):
         diff = """diff --git a/x.c b/x.c
 @@ -1,2 +1,2 @@

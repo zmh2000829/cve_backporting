@@ -1,6 +1,6 @@
 # CVE Backporting Engine 执行计划
 
-> 更新：2026-04-09
+> 更新：2026-04-21
 >
 > 目标：不改变现有核心算法主干，优先解决“用户看不懂为什么这么判”的问题，让工具稳定回答三件事：
 > 1. 哪些补丁可以直接回移
@@ -18,6 +18,9 @@
 - 当前用户体验的主要损耗点，不是结果不够多，而是命令参数不统一、边界状态表达不清、批量结果不够像“可执行工作清单”。
 - `pipeline.py` 仍保留 fixed / stable-backport / intel-missing 等分支内早返回，导致“状态判定、证据补齐、用户结论”没有真正做到单出口收敛。
 - 搜索层的关键阈值和候选保留策略仍偏硬编码，`L2=0.85`、`L3=0.70` 这种经验值还没有沉淀成可调 profile，也缺少 near-miss 解释。
+- GLM5 提到的搜索阈值、失败分桶、置信度校准方向基本合理，且多数能在当前代码里找到对应风险点；但应优先通过真实样本回放闭环验证，而不是先大规模改算法。
+- `FunctionAnalyzer` 已有部分去噪和 500 行大括号配对提取，但 `analyze_patch_impact()` 仍用 `func.line_number + 100` 判断函数范围，函数定义识别也仍是轻量正则，对宏、属性、多行签名、函数指针调用等内核 C 代码形态仍需要更稳的解析边界。
+- `conflict-adapted` 当前定位是高风险适配通道，不应直接升级成“自动修复可信结果”；后续即使引入 AST/LLM 辅助，也必须带语义冲突说明、补丁验证和人工门禁。
 - `GitRepoManager` 仍混合 git 执行、cache、FTS、search、worktree 管理和失败兜底，`report_schema` 也同时承担 schema 归一化和业务回退推断，后续容易继续出现职责漂移。
 - CLI/TUI/API 虽然已经统一了主输出骨架，但展示层仍直接依赖部分 raw payload 字段，API 也缺少自描述 schema，调用方和文档仍有再次漂移风险。
 - `L1` 不应天然等于“不可直接回移”；若 DryRun 仅表现为 `context-C1 / ignore-ws` 级别漂移且没有否决证据，应回到“可直接回移 + 保留最小验证”的低风险路径。
@@ -47,10 +50,12 @@
 
 | 建议 | 具体抓手 | 预期价值 |
 |---|---|---|
-| 建低级别真实样本回归集 | 为 `L0/L1` 补正负例 patch corpus，并把期望 `final_level / direct_backport / prerequisite` 固化进回归 | 避免“看起来命中 strict，就被误放进低风险区” |
-| 搜索阈值改成 profile + 回放验证 | 将 `0.85 / 0.70` 阈值、candidate limit、路径扩展策略做成 profile，并支持离线回放对比 | 用真实样本选 recall/precision，而不是靠经验常数 |
-| 置信度从静态标签变成经验校准 | 将 `validate / batch-validate` 的真实通过率、误抬升情况回灌到 confidence 分段 | 让“为什么这么判”之外，再补上“系统有多大把握” |
-| 基础设施失败与算法未命中分桶 | 把 cache miss、git 失败、branch 不匹配、diff 拉取失败与真正搜索未命中拆开统计 | 防止把环境问题误判成算法能力问题 |
+| 建真实样本回归集 | 收集 50-100 个已验证 CVE 回移案例，标注期望 `final_level / direct_backport / prerequisite / fixed-or-missed`，先覆盖 `L0/L1` 正负例再扩到全等级 | 避免“看起来命中 strict，就被误放进低风险区”，也避免阈值调整变成盲调 |
+| 搜索阈值改成 profile + 回放验证 | 将 `0.85 / 0.70` 阈值、candidate limit、路径扩展策略做成 `conservative / balanced / aggressive` profile，并支持离线回放对比 | 用真实样本选 recall/precision，而不是靠经验常数 |
+| 置信度从静态标签变成经验校准 | 将 `validate / batch-validate` 的真实通过率、误抬升情况、样本数回灌到 confidence 分段 | 让“为什么这么判”之外，再补上“系统有多大把握” |
+| 基础设施失败与算法未命中分桶 | 把 cache miss、git timeout、branch mismatch、diff fetch failed、no candidates、below threshold 与真正搜索未命中拆开统计 | 防止把环境问题误判成算法能力问题 |
+| 函数解析可靠性升级 | 为 `FunctionAnalyzer` 增加函数 `end_line`、多行签名/宏/属性/inline 支持，并对函数指针调用和无法解析场景输出 `uncertain` 标记 | 降低调用链误报/漏报对 L0-L4 分级的连锁影响 |
+| 冲突适配自动解决门禁 | 在 `conflict-adapted` 之后引入 AST/LLM 辅助时，必须保留验证步骤、语义差异说明和人工审批标记 | 避免“能 apply”被误读成“语义正确” |
 
 ### 文档体系
 
@@ -103,11 +108,11 @@
 | 编号 | 事项 | 状态 | 落地情况 |
 |---|---|---|---|
 | P1-1 | L0 正向准入条件继续收紧 | ✅ | `direct_backport_candidate` 已要求同时满足：无前置依赖、无传播、无关键结构、无 `special_risk`、无字段/状态/错误路径语义标记；不再因“strict 命中”自动视为可直接回移 |
-| P1-2 | L0/L1 负向否决条件继续补齐 | ⏳ | 已进一步收紧 `single_line_high_impact` 的 `control_flow` 命中，纯 `return var` 这类 rename-only 场景不再误抬升；但仍需补更多 L0/L1 负例样本 |
+| P1-2 | L0/L1 负向否决条件继续补齐 | ⏳ | 已进一步收紧 `single_line_high_impact` 的 `control_flow` 命中，纯 `return var`、低信号 `if (ret)` / 条件变量改名这类场景不再误抬升；但仍需补更多真实 L0/L1 负例样本 |
 | P1-3 | L1 “轻微漂移”边界样本化 | ✅ | 已新增 `l1_light_drift_sample`，可对注释漂移、日志文本漂移、等价宏替换、局部变量重命名给出正向样本证据，避免 L1 只剩模糊描述 |
 | P1-4 | 固定“可直接回移”的准入说明 | ⏳ | 需要让 L0/L1 输出明确的“为什么可直回”，而不是只输出“为什么不能直回” |
-| P1-5 | 低级别准确率回归集 | ⏳ | 现有单测更偏规则逻辑，需要补真实 patch 样本回归，特别是 L0/L1 正负例 |
-| P1-6 | 置信度经验校准 | ⏳ | `rules/level_policies.py` 里的 `high / medium / low` 仍偏静态标签；建议结合 `validate / batch-validate` 的真实命中率、误抬升率和 incomplete 比例做经验校准 |
+| P1-5 | 真实样本准确率回归集 | ⏳ | 现有单测更偏规则逻辑，需要收集 50-100 个已验证 CVE 回移案例，标注期望 `final_level / direct_backport / prerequisite`；先补 L0/L1 正负例，再扩到 L2-L5 |
+| P1-6 | 置信度经验校准 | ⏳ | `rules/level_policies.py` 里的 `high / medium / low` 仍偏静态标签；建议结合 `validate / batch-validate` 的真实命中率、误抬升率、incomplete 比例和样本数生成校准表 |
 
 ## P2
 
@@ -122,6 +127,7 @@
 | P2-7 | 调用链分析去噪 | ✅ | 已过滤 `sizeof/likely/ARRAY_SIZE/__builtin_*` 等伪调用，并跳过 `ops->helper()`/`.cb()` 这类成员访问伪 callee；跨文件仅连接唯一符号，减少 L0 被伪牵连抬升 |
 | P2-8 | 状态机专项区分“语法变化”和“语义变化” | ✅ | 已要求看到状态字段/状态常量/状态迁移语义才进入 `state_machine_control_flow`；纯 `if (ret)` + `return -E...` 只落 `error_path`，不再误判成状态机变化 |
 | P2-9 | 高风险命中与具体对象绑定 | ⏳ | 需要继续强化“锁对象/字段/状态点/错误节点”直接映射到最终结论里的展示 |
+| P2-10 | `FunctionAnalyzer` 解析可靠性升级 | ✅ | 已为 `FunctionInfo` 增加 `end_line / parse_uncertain / indirect_calls`，`analyze_patch_impact()` 改用真实函数范围；已增强多行签名、返回指针、`static inline`、函数指针调用去噪，并补回归测试 |
 
 ## P3
 
@@ -142,10 +148,13 @@
 | P4-3 | 专项误报样本沉淀 | ⏳ | 已补 `struct` 泛化命中、成员访问伪调用、纯错误码返回误入状态机三类回归；仍需继续扩充真实社区补丁样本 |
 | P4-4 | API 真实链路回归 | ✅ | 2026-04-02 已真实回归 `analyze / validate / batch-validate / invalid-request`；`tests/test_api_server.py` 也已补结构化错误与结果状态回归 |
 | P4-5 | 失败样本原因分类 | ⏳ | 需要把 upstream 情报缺失、搜索未命中、准入不足、风险抬升分开统计 |
-| P4-6 | 搜索 near-miss 候选可观测性 | ⏳ | `analysis.py` 当前只保留有限 top candidates，且“为什么没过阈值”表达较弱；需要把接近命中的 subject/diff 候选、分数和落败原因显式输出，方便调参和人工复核 |
-| P4-7 | 搜索阈值与 profile 配置化 | ⏳ | `L2 0.85 / L3 0.70` 仍是代码内经验阈值；建议沉淀为 profile 配置，并记录到结果元数据，避免不同环境下 recall/precision 无法解释 |
+| P4-6 | 搜索 near-miss 候选可观测性 | ✅ | `SearchResult` 已输出 `near_misses`，L2/L3 候选带 `threshold / threshold_delta / passed / failure_reason`，未过线时能解释“差多少命中” |
+| P4-7 | 搜索阈值与 profile 配置化 | ✅ | 已新增 `SearchConfig` 与 `conservative / balanced / aggressive` 预设，CLI 支持 `--search-profile`，API 支持 `search_profile`，结果追溯记录实际 search profile |
 | P4-8 | Git / cache / search 失败原因分类 | ⏳ | 当前 cache miss、git 命令失败、branch 不匹配、diff 拉取失败经常被折叠成“没找到”；需要结构化区分失败原因，避免把基础设施问题误当成算法未命中 |
 | P4-9 | 搜索 profile 回放实验台 | ⏳ | `AnalysisAgent` 当前把 threshold、candidate limit、path expansion 策略绑定在代码路径里；建议增加 profile 回放与对比输出，支持用真实样本评估阈值调整收益 |
+| P4-10 | `SearchProfile` 配置模型 | ✅ | 已新增 `subject_threshold / diff_threshold / subject_candidate_limit / keyword_candidate_limit / diff_candidate_limit / file_search_limit / near_miss_limit` 字段，并提供三档预设 |
+| P4-11 | `SearchFailure` 结构化模型 | ⏳ | 已新增 `SearchFailure(reason/detail/retryable/level)`，覆盖 `git_timeout / diff_fetch_failed / no_candidates / below_threshold / git_command_failed` 等主要场景；`cache_miss / branch_mismatch` 的细分统计和 batch 聚合仍待补 |
+| P4-12 | 冲突自动解决验证闭环 | ⏳ | `conflict-adapted` 当前本质是“替换 - 行并保留 + 行”的高风险适配；后续可接入 AST 语义冲突检测和 `core/ai_patch_generator.py`，但生成补丁必须经过 apply、语义差异摘要、回归样本对比和人工审批门禁 |
 
 ## P5
 
@@ -201,12 +210,12 @@
 | 阶段 | 优先事项 | 目标 |
 |---|---|---|
 | 第一阶段 | P0-7 / P6-3 / P6-1 | 先把 pipeline 单出口、fixed/incomplete 结论补齐和边界态表达收拢，避免主链路再出现“有结果但解释空心化” |
-| 第二阶段 | P2-6 / P2-7 / P2-8 / P1-2 | 已完成第一轮降误报，当前重点转向继续扩真实样本和低级别负例，防止宽匹配、伪调用链和弱语义命中继续把级别虚高 |
-| 第三阶段 | P4-6 / P4-7 / P4-8 / P4-9 | 把搜索阈值、near-miss 候选和基础设施失败原因做成可观测、可解释、可调参的层，先解决“为什么没找到/为什么差一点命中” |
+| 第二阶段 | P2-6 / P2-7 / P2-8 / P2-10 / P1-2 / P1-5 | 已完成第一轮降误报，当前重点转向继续扩真实样本、低级别负例和函数解析可靠性，防止宽匹配、伪调用链和弱语义命中继续把级别虚高 |
+| 第三阶段 | P4-6 / P4-7 / P4-8 / P4-9 / P4-10 / P4-11 | 把搜索阈值、near-miss 候选和基础设施失败原因做成可观测、可解释、可调参的层，先解决“为什么没找到/为什么差一点命中” |
 | 第四阶段 | P1-1 / P1-3 / P1-4 / P1-5 / P1-6 | 把 L0/L1 做成真正可信的低风险处理区，并补齐“为什么可以直接回移”以及“系统有多大把握”的正向说明 |
 | 第五阶段 | P3-2 / P3-3 / P3-4 / P3-5 | 把“需不需要关联补丁”做成用户可执行判断，并能沉淀长期召回趋势 |
 | 第六阶段 | P5-13 / P5-14 / P5-15 / P5-16 / P5-17 | 继续拆分 orchestration、schema 和入口归一化层，避免职责交叉重新把输出和实现拖回双轨 |
-| 第七阶段 | P5-10 / P5-11 / P5-12 / P5-18 | 把远程情报、cache、worktree、telemetry 做成可审计的工程底座，保证真实批量跑数稳定 |
+| 第七阶段 | P5-10 / P5-11 / P5-12 / P5-18 / P4-12 | 把远程情报、cache、worktree、telemetry 和冲突适配门禁做成可审计的工程底座，保证真实批量跑数稳定 |
 | 第八阶段 | P6-4 / P6-8 / P6-9 / P6-13 / P6-14 / P6-15 / P6-16 | 把输出结果做成真正的维护者工作清单，并给 CLI/TUI/API 提供稳定展示层、统一术语和自描述接口 |
 | 第九阶段 | P6-17 / P6-18 / P6-19 / P6-20 / P6-21 | 继续把 README、接口合同、规则手册、边界说明、样板库拆开，防止文档重新长回单文件大杂烩 |
 

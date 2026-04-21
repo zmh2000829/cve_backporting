@@ -8,7 +8,12 @@ from datetime import datetime
 
 from rich.panel import Panel
 
-from commands.policy_cli import add_p2_toggle, add_policy_profile_arg, apply_policy_cli_overrides
+from commands.policy_cli import (
+    add_p2_toggle,
+    add_policy_profile_arg,
+    add_search_profile_arg,
+    apply_policy_cli_overrides,
+)
 from core.output_serializers import (
     aggregate_batch_validate_summary,
     build_l0_l5_view,
@@ -168,12 +173,14 @@ def register(subparsers, parent):
     validate.add_argument("--mainline-intro", default="", help="社区 mainline 引入 commit ID (可选)")
     validate.add_argument("--deep", action="store_true", help="深度分析模式: 漏洞分析+补丁检视+风险收益+合入建议")
     add_policy_profile_arg(validate)
+    add_search_profile_arg(validate)
     add_p2_toggle(validate)
 
     benchmark = subparsers.add_parser("benchmark", help="批量准确度基准测试", parents=[parent])
     benchmark.add_argument("--file", required=True, help="基准测试YAML文件 (benchmarks.yaml)")
     benchmark.add_argument("--target", dest="target_version", required=True)
     add_policy_profile_arg(benchmark)
+    add_search_profile_arg(benchmark)
     add_p2_toggle(benchmark)
 
     batch = subparsers.add_parser("batch-validate", help="批量验证补丁生成准确度 (JSON)", parents=[parent])
@@ -183,7 +190,9 @@ def register(subparsers, parent):
     batch.add_argument("--limit", type=int, default=0, help="处理的 CVE 数量 (0=全部, 与 --offset 配合使用)")
     batch.add_argument("--workers", type=int, default=1, help="并行 worker 数 (默认 1，推荐 2，上限 4；--deep 时建议 <=2)")
     batch.add_argument("--deep", action="store_true", help="深度分析模式: 漏洞分析+补丁检视+风险收益+合入建议")
+    batch.add_argument("--xlsx", action="store_true", help="额外输出 batch-validate XLSX 明细表格 (默认关闭)")
     add_policy_profile_arg(batch)
+    add_search_profile_arg(batch)
     add_p2_toggle(batch)
 
     return {
@@ -944,6 +953,33 @@ def run_batch_validate(args, config, runtime):
         if getattr(config, "policy", None) else {}
     )
     full_report_path = os.path.join(batch_report_dir, "full_report.json")
+    xlsx_report_path = ""
+    if getattr(args, "xlsx", False):
+        try:
+            from services.batch_xlsx import write_batch_validate_xlsx
+
+            xlsx_report_path = os.path.join(batch_report_dir, "batch_validate_summary.xlsx")
+            write_batch_validate_xlsx(
+                xlsx_report_path,
+                cve_results,
+                tv,
+                batch_summary=batch_summary,
+                generated_at=generated_at,
+            )
+        except Exception as exc:
+            xlsx_report_path = ""
+            runtime.logger.exception("batch-validate XLSX 导出失败: %s", exc)
+            runtime.console.print(f"[red]XLSX 表格导出失败: {exc}[/]")
+
+    artifacts = {
+        "run_id": run_id,
+        "output_dir": batch_report_dir,
+        "report_file": full_report_path,
+        "live_report_file": live_report_path,
+    }
+    if xlsx_report_path:
+        artifacts["xlsx_report_file"] = xlsx_report_path
+
     with open(full_report_path, "w", encoding="utf-8") as f:
         json.dump(
             _prepare_batch_validate_json(
@@ -975,14 +1011,11 @@ def run_batch_validate(args, config, runtime):
                         "report_generated_at": generated_at,
                     },
                 },
-                artifacts={
-                    "run_id": run_id,
-                    "output_dir": batch_report_dir,
-                    "report_file": full_report_path,
-                    "live_report_file": live_report_path,
-                },
+                artifacts=artifacts,
             ),
             f, indent=2, ensure_ascii=False, default=str
         )
     runtime.console.print(f"[dim]完整结果: {full_report_path}[/]")
     runtime.console.print(f"[dim]实时报告: {live_report_path}[/]")
+    if xlsx_report_path:
+        runtime.console.print(f"[dim]XLSX 表格: {xlsx_report_path}[/]")

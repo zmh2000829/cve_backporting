@@ -280,7 +280,7 @@ class CommitMatcher:
                 mtype = "diff_similarity"
 
             if score >= threshold:
-                details = {"file_sim": fs, "diff_sim": ds}
+                details = {"file_sim": fs, "diff_sim": ds, "target_subject": t.subject}
                 if use_containment:
                     details["diff_containment"] = dc
                 res.append(MatchResult(
@@ -290,16 +290,28 @@ class CommitMatcher:
         return res
 
     def match_comprehensive(self, src: CommitInfo, tgts: List[CommitInfo],
-                            use_containment: bool = False) -> List[MatchResult]:
+                            use_containment: bool = False,
+                            subject_threshold: float = 0.85,
+                            diff_threshold: float = 0.70,
+                            include_below_threshold: bool = False) -> List[MatchResult]:
         for t in tgts:
             if src.commit_id[:12] == t.commit_id[:12]:
                 return [MatchResult(target_commit=t.commit_id, source_commit=src.commit_id,
                                      confidence=1.0, match_type="exact_id",
                                      details={"target_subject": t.subject})]
-        subj = self.match_by_subject(src, tgts, 0.85)
+        subj = self.match_by_subject(
+            src,
+            tgts,
+            0.0 if include_below_threshold else subject_threshold,
+        )
         if subj and subj[0].confidence >= 0.95:
             return subj
-        diff = self.match_by_diff(src, tgts, 0.70, use_containment=use_containment)
+        diff = self.match_by_diff(
+            src,
+            tgts,
+            0.0 if include_below_threshold else diff_threshold,
+            use_containment=use_containment,
+        )
         seen = {}
         for m in subj + diff:
             if m.target_commit not in seen or m.confidence > seen[m.target_commit].confidence:
