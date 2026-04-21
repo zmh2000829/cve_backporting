@@ -120,7 +120,7 @@ class PolicyEngineRegressionTests(unittest.TestCase):
         self.assertEqual(vd.decision_skeleton["conclusion"]["direct_backport"]["status"], "direct")
         self.assertIn("admission_rules", vd.decision_skeleton["evidence"])
 
-    def test_l0_direct_backport_candidate_requires_no_semantic_markers(self):
+    def test_l0_direct_backport_candidate_allows_plain_field_assignment(self):
         diff = """diff --git a/x.c b/x.c
 @@ -1,2 +1,2 @@
 - ctx->limit = old;
@@ -144,8 +144,8 @@ class PolicyEngineRegressionTests(unittest.TestCase):
         vd = eng.evaluate(p, dr, _MockGit({}), "any")
         rule_ids = {hit["rule_id"] for hit in vd.level_decision.rule_hits}
         self.assertEqual(vd.level_decision.level, "L0")
-        self.assertNotIn("direct_backport_candidate", rule_ids)
-        self.assertEqual(vd.decision_skeleton["conclusion"]["direct_backport"]["status"], "review")
+        self.assertIn("direct_backport_candidate", rule_ids)
+        self.assertEqual(vd.decision_skeleton["conclusion"]["direct_backport"]["status"], "direct")
 
     def test_strict_critical_structure_promotes_out_of_l0(self):
         diff = """diff --git a/lock.c b/lock.c
@@ -285,6 +285,89 @@ void baz(void) {
         self.assertEqual(vd.level_decision.level, "L2")
         self.assertEqual(vd.level_decision.review_mode, "targeted-review")
         self.assertTrue(any("签名" in w or "入参" in w or "调用点" in w for w in vd.warnings))
+
+    def test_l1_function_call_statement_does_not_trigger_api_surface(self):
+        diff = """diff --git a/f.c b/f.c
+@@ -1,3 +1,3 @@ int frob(int x) {
+-    ret = helper(old);
++    ret = helper(new);
+     return ret;
+ }
+"""
+        p = _patch(diff, ["f.c"])
+        dr = DryRunResult(applies_cleanly=True, apply_method="context-C1")
+        eng = PolicyEngine(
+            PolicyConfig(
+                profile="default",
+                prerequisite_rules_enabled=False,
+                large_change_rules_enabled=False,
+                call_chain_rules_enabled=False,
+                critical_structure_rules_enabled=False,
+                special_risk_rules_enabled=False,
+                high_impact_single_line_rules_enabled=False,
+            ),
+            llm_enabled=False,
+        )
+        vd = eng.evaluate(p, dr, _MockGit({}), "any")
+        rule_ids = {hit["rule_id"] for hit in vd.level_decision.rule_hits}
+        self.assertEqual(vd.level_decision.level, "L1")
+        self.assertNotIn("l1_api_surface", rule_ids)
+
+    def test_generic_uppercase_condition_does_not_trigger_state_machine(self):
+        diff = """diff --git a/f.c b/f.c
+@@ -1,3 +1,3 @@ int frob(int rc) {
+-    if (rc == FOO_READY)
++    if (rc == BAR_READY)
+         return 0;
+ }
+"""
+        p = _patch(diff, ["f.c"])
+        dr = DryRunResult(applies_cleanly=True, apply_method="strict")
+        eng = PolicyEngine(
+            PolicyConfig(
+                profile="default",
+                prerequisite_rules_enabled=False,
+                direct_backport_rules_enabled=False,
+                large_change_rules_enabled=False,
+                call_chain_rules_enabled=False,
+                critical_structure_rules_enabled=False,
+                l1_api_surface_rules_enabled=False,
+                high_impact_single_line_rules_enabled=False,
+            ),
+            llm_enabled=False,
+        )
+        vd = eng.evaluate(p, dr, _MockGit({}), "any")
+        rule_ids = {hit["rule_id"] for hit in vd.level_decision.rule_hits}
+        self.assertEqual(vd.level_decision.level, "L0")
+        self.assertNotIn("p2_state_machine_control_flow", rule_ids)
+
+    def test_plain_member_condition_does_not_trigger_single_line_high_impact(self):
+        diff = """diff --git a/f.c b/f.c
+@@ -1,3 +1,3 @@ int frob(struct foo *ctx) {
+-    if (ctx->ready)
++    if (ctx->active)
+         return 0;
+ }
+"""
+        p = _patch(diff, ["f.c"])
+        dr = DryRunResult(applies_cleanly=True, apply_method="strict")
+        eng = PolicyEngine(
+            PolicyConfig(
+                profile="default",
+                prerequisite_rules_enabled=False,
+                direct_backport_rules_enabled=False,
+                large_change_rules_enabled=False,
+                call_chain_rules_enabled=False,
+                critical_structure_rules_enabled=False,
+                special_risk_rules_enabled=False,
+                l1_api_surface_rules_enabled=False,
+            ),
+            llm_enabled=False,
+        )
+        vd = eng.evaluate(p, dr, _MockGit({}), "any")
+        rule_ids = {hit["rule_id"] for hit in vd.level_decision.rule_hits}
+        self.assertEqual(vd.level_decision.level, "L0")
+        self.assertNotIn("single_line_high_impact", rule_ids)
 
     def test_l1_comment_drift_is_sampled_as_light_drift(self):
         diff = """diff --git a/f.c b/f.c

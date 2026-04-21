@@ -87,6 +87,10 @@
 
 所以 `strict` 成功不一定是 `L0`；如果同时命中锁、生命周期、状态机、强依赖等规则，最终仍可能被抬到 `L3/L4`。完整解释见 [用户决策指南](docs/USER_DECISION_GUIDE.md)。
 
+`verified-direct` 也不要理解成“绕过 Git 强行通过”。它是在 `git apply` 上下文匹配不稳时，在目标文件中定位 hunk，先内存应用，再复核变更并生成标准 diff。普通 `verified-direct` 默认是 `L3` 强适配基线；若 validate 或内部校正确认结果精确，会标成 `verified-direct-exact`，可进入 `L1` 低漂移快速复核。
+
+前置补丁列表也做了降噪：`prerequisite_patches` 只返回最多 10 个 `strong/medium` 可操作候选；`weak` 候选只进入 `dependency_details.weak_count` 和证据样本，不再把可直接合入的补丁误拖成十几个前置补丁。
+
 ### 2.2 当前不能稳定解决的场景
 
 这部分必须看清楚。本项目不是“所有 CVE 都能自动给出稳定回移结论”的工具。完整说明请直接看 [边界与不适用场景](docs/BOUNDARIES.md)。
@@ -507,6 +511,7 @@ python cli.py batch-validate --file cve_data.json --target 5.10-hulk --workers 2
 | 搜索命中精确 ID | 不依赖模糊启发式 | 搜索策略 `L1` |
 | `Strict` 直接通过 | 原始补丁文本与目标仓高度一致 | `dryrun_detail.apply_method` |
 | `Context-C1/Whitespace` 通过且无风险规则命中 | 差异主要限于上下文或空白 | `apply_method` + `rule_hits` |
+| `verified-direct-exact` 且 validate 完全一致 | 内存重建结果已经被真实修复校正 | `apply_method` + `generated_vs_real.deterministic_exact_match` |
 | validate 中 `verdict = identical` | 工具补丁与真实修复完全一致 | `generated_vs_real.verdict` |
 | validate 中 `deterministic_exact_match = true` | 工具补丁与真实修复逐字等价 | `generated_vs_real.deterministic_exact_match` |
 | batch 中某个策略家族 `acceptable_patch_rate` 高 | 说明该策略家族在当前样本集里稳定产生可接受补丁 | `summary.strategy_effectiveness` |

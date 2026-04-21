@@ -1065,7 +1065,10 @@ class PolicyEngine:
             r"\s*(?:==|!=|=|\+=|-=|\|\||&&)",
             re.IGNORECASE,
         )
-        state_const_re = re.compile(r"\b[A-Z][A-Z0-9_]{2,}\b")
+        state_const_re = re.compile(
+            r"\b[A-Z][A-Z0-9_]*(?:STATE|STATUS|MODE|PHASE|STEP|FLAGS?|ENABLED|DISABLED)[A-Z0-9_]*\b"
+            r"|\b(?:STATE|STATUS|MODE|PHASE|STEP|FLAGS?|ENABLED|DISABLED)_[A-Z0-9_]+\b"
+        )
 
         for hunk_key, group in hunk_groups.items():
             hunk_conditions: List[str] = []

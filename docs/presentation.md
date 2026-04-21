@@ -72,6 +72,8 @@ TUI / JSON / API Response / Batch Summary
 | `Conflict-Adapted` | 结合目标文件实际内容重写冲突 hunk | 真实冲突但修复意图可保留 |
 | `AI-Generated` | LLM 兜底生成补丁 | 全部确定性路径失败 |
 
+`Verified-Direct` 的关键点：它先定位 hunk，再在内存中应用，复核后输出标准 diff；普通 `verified-direct` 是 `L3` 强适配基线，`verified-direct-exact` 才是可进入 `L1` 的低漂移精确重建证据。
+
 ---
 
 # 5. L0-L5 到底是什么

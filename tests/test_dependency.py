@@ -83,6 +83,98 @@ class DependencyEvidenceTests(unittest.TestCase):
         self.assertGreaterEqual(details.semantic_overlap_summary["shared_state_points"], 1)
         self.assertTrue(details.prerequisite_evidence_samples)
 
+    def test_weak_same_function_candidates_do_not_become_prerequisites(self):
+        fix_patch = PatchInfo(
+            commit_id="fixdeadbeef",
+            subject="fix",
+            diff_code="""diff --git a/drivers/foo.c b/drivers/foo.c
+--- a/drivers/foo.c
++++ b/drivers/foo.c
+@@ -1,1 +1,1 @@ foo_worker {
+-    value = old;
++    value = new;
+""",
+            modified_files=["drivers/foo.c"],
+        )
+        commits = [
+            SimpleNamespace(
+                commit_id=f"weak{i:02d}abcdef",
+                subject=f"background cleanup {i}",
+                author="tester",
+                timestamp=100 + i,
+            )
+            for i in range(15)
+        ]
+        diffs = {
+            c.commit_id: f"""diff --git a/drivers/foo.c b/drivers/foo.c
+--- a/drivers/foo.c
++++ b/drivers/foo.c
+@@ -{100 + i},1 +{100 + i},1 @@ foo_worker {{
+-    tmp = {i};
++    tmp = {i + 1};
+"""
+            for i, c in enumerate(commits)
+        }
+        agent = DependencyAgent(_MockDependencyGit(commits, diffs))
+
+        result = agent.analyze(
+            fix_patch,
+            CveInfo(cve_id="CVE-TEST-WEAK"),
+            target_version="5.10-hulk",
+        )
+
+        self.assertEqual(result["prerequisite_patches"], [])
+        details = result["analysis_details"]
+        self.assertEqual(details.strong_count, 0)
+        self.assertEqual(details.medium_count, 0)
+        self.assertEqual(details.weak_count, 15)
+        self.assertIn("weak 候选仅作为背景线索", details.no_prerequisite_reason)
+
+    def test_actionable_prerequisites_are_capped(self):
+        fix_patch = PatchInfo(
+            commit_id="fixdeadbeef",
+            subject="fix",
+            diff_code="""diff --git a/drivers/foo.c b/drivers/foo.c
+--- a/drivers/foo.c
++++ b/drivers/foo.c
+@@ -20,1 +20,1 @@ foo_worker {
+-    if (ctx->limit)
++    if (ctx->limit && ready)
+""",
+            modified_files=["drivers/foo.c"],
+        )
+        commits = [
+            SimpleNamespace(
+                commit_id=f"medium{i:02d}abcdef",
+                subject=f"prep ctx limit {i}",
+                author="tester",
+                timestamp=100 + i,
+            )
+            for i in range(12)
+        ]
+        diffs = {
+            c.commit_id: f"""diff --git a/drivers/foo.c b/drivers/foo.c
+--- a/drivers/foo.c
++++ b/drivers/foo.c
+@@ -20,1 +20,1 @@ foo_worker {{
+-    if (ctx->limit == {i})
++    if (ctx->limit == {i + 1})
+"""
+            for i, c in enumerate(commits)
+        }
+        agent = DependencyAgent(_MockDependencyGit(commits, diffs))
+
+        result = agent.analyze(
+            fix_patch,
+            CveInfo(cve_id="CVE-TEST-CAP"),
+            target_version="5.10-hulk",
+        )
+
+        prereqs = result["prerequisite_patches"]
+        self.assertEqual(len(prereqs), 10)
+        self.assertTrue(all(p.grade == "medium" for p in prereqs))
+        self.assertEqual(result["analysis_details"].medium_count, 10)
+
 
 if __name__ == "__main__":
     unittest.main()

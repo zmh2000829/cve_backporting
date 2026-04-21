@@ -20,7 +20,10 @@ from core.matcher import (
 
 logger = logging.getLogger(__name__)
 
-ADJACENT_MARGIN = 50
+ADJACENT_MARGIN = 12
+MAX_ACTIONABLE_PREREQS = 10
+MAX_STRONG_PREREQS = 5
+MAX_EVIDENCE_SAMPLES = 8
 LOCK_PATTERNS = [
     re.compile(r"\b(?:spin_lock(?:_[A-Za-z0-9_]+)?|spin_unlock(?:_[A-Za-z0-9_]+)?|"
                r"mutex_lock|mutex_unlock|mutex_trylock|mutex_lock_interruptible|"
@@ -205,8 +208,10 @@ class DependencyAgent:
         logger.info("[Dependency] fix patch: %d hunks, %d funcs, %d 候选commit",
                     len(fix_hunks), len(fix_funcs), len(intervening))
 
-        # 逐个分析候选
+        # 逐个分析候选。只有 strong / medium 会作为可操作前置补丁返回；
+        # weak 候选只用于解释和计数，避免同文件宽匹配阻塞可直接合入补丁。
         prereqs: List[PrerequisitePatch] = []
+        weak_candidates: List[PrerequisitePatch] = []
         for c in intervening:
             diff = self.git_mgr.get_commit_diff(c.commit_id, target_version)
             if not diff:
@@ -245,15 +250,30 @@ class DependencyAgent:
             if score < 0.05 and not func_overlap and direct_overlaps == 0 and not (shared_fields or shared_locks or shared_states):
                 continue
 
-            # 分级
-            if (direct_overlaps > 0 and (func_overlap or shared_fields or shared_locks or shared_states)) or score >= 0.5:
+            # 分级：相邻 hunk 或单一函数名交集不再直接升级为 actionable prerequisite。
+            semantic_overlap = bool(shared_fields or shared_locks or shared_states)
+            direct_semantic = bool(direct_overlaps > 0 and (func_overlap or semantic_overlap))
+            adjacent_semantic = bool(adjacent_overlaps > 0 and semantic_overlap)
+            strong_semantic = bool(shared_locks or shared_states)
+
+            if (
+                (direct_semantic and strong_semantic and score >= 0.45)
+                or (direct_semantic and score >= 0.6)
+                or score >= 0.75
+            ):
                 grade = "strong"
-            elif direct_overlaps > 0 or adjacent_overlaps > 0 or func_overlap or shared_fields or shared_locks or shared_states or score >= 0.2:
+            elif (
+                (direct_semantic and score >= 0.3)
+                or (direct_overlaps > 0 and score >= 0.38)
+                or (adjacent_semantic and score >= 0.22)
+                or (func_overlap and semantic_overlap and score >= 0.24)
+                or (strong_semantic and score >= 0.3)
+            ):
                 grade = "medium"
             else:
                 grade = "weak"
 
-            prereqs.append(PrerequisitePatch(
+            patch = PrerequisitePatch(
                 commit_id=c.commit_id,
                 subject=c.subject,
                 author=c.author,
@@ -272,18 +292,27 @@ class DependencyAgent:
                     locks=shared_locks,
                     states=shared_states,
                 ),
-            ))
+            )
+            if grade == "weak":
+                weak_candidates.append(patch)
+            else:
+                prereqs.append(patch)
 
-        # 按 score 降序, strong 优先
+        # 按 score 降序, strong 优先，并限制返回给策略层的可操作集合规模。
         grade_order = {"strong": 0, "medium": 1, "weak": 2}
         prereqs.sort(key=lambda p: (grade_order.get(p.grade, 9), -p.score))
+        weak_candidates.sort(key=lambda p: -p.score)
+        strong_prereqs = [p for p in prereqs if p.grade == "strong"][:MAX_STRONG_PREREQS]
+        remaining_slots = max(MAX_ACTIONABLE_PREREQS - len(strong_prereqs), 0)
+        medium_prereqs = [p for p in prereqs if p.grade == "medium"][:remaining_slots]
+        prereqs = strong_prereqs + medium_prereqs
 
         result["prerequisite_patches"] = prereqs
 
         # 统计
         n_strong = sum(1 for p in prereqs if p.grade == "strong")
         n_medium = sum(1 for p in prereqs if p.grade == "medium")
-        n_weak = sum(1 for p in prereqs if p.grade == "weak")
+        n_weak = len(weak_candidates)
         semantic_overlap_summary = {
             "shared_fields": sum(1 for p in prereqs if p.shared_fields),
             "shared_lock_domains": sum(1 for p in prereqs if p.shared_lock_domains),
@@ -297,7 +326,7 @@ class DependencyAgent:
                 "shared_lock_domains": p.shared_lock_domains[:4],
                 "shared_state_points": p.shared_state_points[:4],
             }
-            for p in prereqs[:5]
+            for p in (prereqs + weak_candidates)[:MAX_EVIDENCE_SAMPLES]
             if p.shared_fields or p.shared_lock_domains or p.shared_state_points
         ]
 
@@ -305,12 +334,16 @@ class DependencyAgent:
         if len(prereqs) == 0:
             # 无前置依赖场景
             confidence = "high"
-            reason = "候选集中无 strong/medium 依赖，仅有 weak 依赖可忽略"
+            reason = (
+                f"候选集中无 strong/medium 依赖，{n_weak} 个 weak 候选仅作为背景线索，"
+                "不进入前置补丁阻塞集合"
+            )
             narrative = [
                 f"Step 1: 建候选集 — 在时间窗口内搜索修改同文件的 commit",
                 f"  结果: {len(intervening)} 个候选 commit",
-                f"Step 2: 依赖分级 — 按 hunk 重叠、函数交集、评分分级",
+                f"Step 2: 依赖分级 — 按 hunk 重叠、函数交集和语义域交集分级",
                 f"  strong: {n_strong}, medium: {n_medium}, weak: {n_weak}",
+                "  处理: weak 不进入 prerequisite_patches，仅保留在 evidence samples / weak_count",
                 f"Step 3: 结论 — 无硬前置依赖",
                 f"  置信度: {confidence} (无 strong/medium 依赖)",
             ]
@@ -329,8 +362,12 @@ class DependencyAgent:
             narrative = [
                 f"Step 1: 建候选集 — 在时间窗口内搜索修改同文件的 commit",
                 f"  结果: {len(intervening)} 个候选 commit",
-                f"Step 2: 依赖分级 — 按 hunk 重叠、函数交集、评分分级",
+                f"Step 2: 依赖分级 — 按 hunk 重叠、函数交集和语义域交集分级",
                 f"  strong: {n_strong}, medium: {n_medium}, weak: {n_weak}",
+                (
+                    f"  处理: prerequisite_patches 仅返回最多 {MAX_ACTIONABLE_PREREQS} 个 "
+                    "strong/medium 可操作候选，weak 只作背景线索"
+                ),
                 (
                     "Step 2.5: 语义域交集 — 继续核对共享字段/锁域/状态点"
                     f"  结果: 锁域={semantic_overlap_summary['shared_lock_domains']},"
@@ -378,14 +415,18 @@ class DependencyAgent:
                 parts.append(f"{n_strong} 个强依赖")
             if n_medium:
                 parts.append(f"{n_medium} 个中依赖")
-            if n_weak:
-                parts.append(f"{n_weak} 个弱依赖")
             result["recommendations"].append(
-                f"发现前置依赖: {', '.join(parts)}, 建议按顺序 review")
+                f"发现可操作前置依赖: {', '.join(parts)}, 建议按顺序 review")
+            if n_weak:
+                result["recommendations"].append(
+                    f"另有 {n_weak} 个 weak 候选已降为背景线索，不作为前置补丁阻塞项")
             if n_strong > 0:
                 strong_list = [p for p in prereqs if p.grade == "strong"]
                 result["recommendations"].append(
                     f"强依赖 commit 建议优先合入: " +
                     ", ".join(p.commit_id[:12] for p in strong_list[:5]))
+        elif n_weak:
+            result["recommendations"].append(
+                f"仅发现 {n_weak} 个 weak 关联候选，已作为背景线索过滤，不阻塞单补丁处理")
 
         return result

@@ -181,7 +181,7 @@ This means the baseline says "how the patch applied", while the final level says
 
 | Level | What it really means | Typical baseline | What must be true to stay here | Typical reasons to be here | Maintainer action |
 |------|-----------------------|------------------|--------------------------------|----------------------------|-------------------|
-| **L0** | Deterministic safe lane | `strict` | No warning/high-risk promotion, no strong/medium prerequisite evidence, no critical structure hit, no meaningful propagation, and no field/state/error-path semantic markers | Exact context match and stable semantics | Can be directly backported; keep only minimal regression validation |
+| **L0** | Deterministic safe lane | `strict` | No warning/high-risk promotion, no strong/medium prerequisite evidence, no critical structure hit, no meaningful propagation, no `special_risk` hit, and no lock/state/error-path blocking markers | Exact context match and stable semantics | Can be directly backported; keep only minimal regression validation |
 | **L1** | Low-risk drift lane, not auto-safe | `ignore-ws` / `context-C1` / `C1-ignore-ws` | Drift is limited to nearby context/whitespace/minor textual movement; no hard veto rules | Small context drift, formatting drift, comment-only drift, logging text drift, equivalent macro alias, local variable rename | Run lightweight LLM/manual review before treating as harmless |
 | **L2** | Caution lane for medium adaptation or medium warnings | `3way`, or L0/L1 promoted by rules | Core patch still looks structurally close, but evidence is no longer strong enough for low-level handling | Large diff warning, API-surface drift, error-path drift, fanout warning, medium prerequisite evidence | Do targeted hunk review and compare affected call sites / return paths |
 | **L3** | Semantic-sensitive lane | `regenerated`, or lower baseline promoted upward | A critical semantic dimension is touched, or prerequisite certainty becomes blocking | Locking/lifetime/state-machine/struct-field changes, strong prerequisite requirement, regenerated context | Do focused code review plus subsystem-specific regression tests |
@@ -196,6 +196,11 @@ Two important nuances:
 - **Zero-Context is an internal DryRun technique, not a user-facing final level.**
   Zero-context regeneration is folded into the `regenerated` family and therefore
   typically surfaces as final `L3` unless stronger promotions push it higher.
+- **Verified-Direct is deterministic hunk reconstruction, not a blind bypass.**
+  It locates the target hunk, applies the change in memory, verifies the result,
+  and emits a standard diff. Plain `verified-direct` defaults to an `L3` baseline;
+  `verified-direct-exact` means validate/internal calibration proved a near-exact
+  reconstruction and can use the `L1` low-drift lane.
 
 #### How This Connects To The Three User Questions
 
@@ -290,7 +295,10 @@ This round also tightened the positive side of the policy:
 
 - **`direct_backport_candidate` for L0 is stricter now.**
   A `strict` baseline is no longer enough by itself. The engine now also expects
-  no prerequisite evidence, no propagation, no `special_risk` hit, and no field/state/error-path semantic markers before it says "direct backport candidate".
+  no strong/medium prerequisite evidence, no propagation, no `special_risk` hit,
+  and no lock/state/error-path blocking markers before it says "direct backport candidate".
+  A plain field access alone no longer blocks L0 unless it triggers a concrete
+  struct-field/data-path risk rule.
 - **L1 now has positive low-drift samples instead of only vague review language.**
   `l1_light_drift_sample` records when the observed drift looks like comment-only changes,
   logging text changes, equivalent macro aliases, or local variable renames.
@@ -298,6 +306,10 @@ This round also tightened the positive side of the policy:
   Dependency results expose shared fields, shared lock domains, shared state points,
   and supporting evidence lines, so "consider prerequisite patches" is no longer based
   only on hunk overlap and function overlap.
+- **Weak prerequisite candidates no longer bloat the actionable list.**
+  `prerequisite_patches` now returns only capped `strong/medium` candidates
+  (default max 10). `weak` candidates remain in `dependency_details.weak_count`
+  and evidence samples, but do not trigger prerequisite veto rules.
 
 This improves all three user-facing questions:
 

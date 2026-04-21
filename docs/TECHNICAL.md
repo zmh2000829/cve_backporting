@@ -160,10 +160,17 @@ services/reporting.py
 | 文件扩展 | `PathMapper.expand_files()` | 同时搜索上游路径和本地迁移路径 |
 | 候选召回 | `GitRepoManager.search_by_files()` | `git log -- <files>`，排除 merge，默认最多 50 个 |
 | 时间窗口 | `intro_search.target_commit.timestamp` | 有 intro 时从 intro 时间开始，否则从仓库初始开始 |
-| hunk 分析 | `extract_hunks_from_diff()` / `compute_hunk_overlap()` | 直接重叠和 50 行内相邻 hunk |
+| hunk 分析 | `extract_hunks_from_diff()` / `compute_hunk_overlap()` | 直接重叠和 12 行内相邻 hunk |
 | 函数分析 | `extract_functions_from_diff()` | 比较 hunk header 中函数签名 |
 | 语义域分析 | `_extract_semantic_markers()` | 字段、锁域、状态点交集 |
-| 分级 | `strong / medium / weak` | 分数和证据类型共同决定 |
+| 分级 | `strong / medium / weak` | 分数和证据类型共同决定；只返回最多 10 个 `strong/medium` 给策略层，`weak` 留作背景证据 |
+
+`Dependency Agent` 的输出有意区分两类集合：
+
+| 集合 | 进入位置 | 用途 |
+| --- | --- | --- |
+| 可操作前置补丁 | `prerequisite_patches` | 仅 `strong/medium`，默认最多 10 个，会影响 `prerequisite_required/recommended` |
+| 弱关联线索 | `dependency_details.weak_count` / `prerequisite_evidence_samples` | 同文件、同函数或弱语义近邻的背景证据，不阻塞单补丁路径 |
 
 ### 5.2 后置关联补丁
 

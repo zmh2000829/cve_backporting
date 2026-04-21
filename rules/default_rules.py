@@ -458,6 +458,11 @@ class DirectBackportRule(PolicyRule):
             "state_points": len(risk_markers.get("state_points", []) or []),
             "error_path_nodes": len(risk_markers.get("error_path_nodes", []) or []),
         }
+        direct_blocking_marker_counts = {
+            "lock_objects": semantic_marker_counts["lock_objects"],
+            "state_points": semantic_marker_counts["state_points"],
+            "error_path_nodes": semantic_marker_counts["error_path_nodes"],
+        }
         dependency_confidence = getattr(ctx.dependency_details, "confidence_level", "") if ctx.dependency_details else ""
         if ctx.base_level != "L0":
             return None
@@ -467,7 +472,7 @@ class DirectBackportRule(PolicyRule):
             return None
         if ctx.critical_structure_hits or max_fanout > 0:
             return None
-        if any(semantic_marker_counts.values()):
+        if any(direct_blocking_marker_counts.values()):
             return None
         if special_summary.get("triggered_sections"):
             return None
@@ -487,6 +492,7 @@ class DirectBackportRule(PolicyRule):
                 "line_threshold": self.line_threshold,
                 "hunk_threshold": self.hunk_threshold,
                 "semantic_marker_counts": semantic_marker_counts,
+                "direct_blocking_marker_counts": direct_blocking_marker_counts,
                 "special_risk_sections": list(special_summary.get("triggered_sections") or []),
                 "dependency_confidence": dependency_confidence,
             },
@@ -626,12 +632,22 @@ class L1APISurfaceRule(PolicyRule):
         self.return_delta_threshold = return_delta_threshold
 
     def _looks_like_func_sig(self, body: str) -> bool:
-        s = body.strip()
+        s = body.strip().rstrip("{").strip()
         if "(" not in s or ")" not in s:
             return False
-        if re.match(r"^(if|for|while|switch|return)\b", s):
+        if ";" in s:
             return False
-        return bool(re.search(r"\b\w+\s*\(", s))
+        if re.match(r"^(if|for|while|switch|return|sizeof|WARN_ON|BUG_ON)\b", s):
+            return False
+        before_paren = s.split("(", 1)[0].strip()
+        if not before_paren or re.search(r"(?:=|==|!=|<=|>=|\+|-|&&|\|\|)\s*$", before_paren):
+            return False
+        tokens = re.findall(r"[A-Za-z_]\w*", before_paren)
+        if len(tokens) < 2:
+            return False
+        if tokens[-1] in _C_KEYWORDS:
+            return False
+        return True
 
     def _scan_diff(self, diff_text: str) -> Dict:
         plus_ret = minus_ret = 0
@@ -734,7 +750,6 @@ class SingleLineHighImpactRule(PolicyRule):
             r"\bswitch\b|"
             r"\breturn\s+(?:-[A-Z0-9_]+|NULL|ERR_PTR|PTR_ERR|IS_ERR)|"
             r"\b(state|status|mode|phase|flag|flags)\b|"
-            r"(?:->|\.)[A-Za-z_]\w*|"
             r"\b(spin_lock\w*|spin_unlock\w*|mutex_\w+|rcu_\w+|refcount\w*|kref\w*|atomic_\w+)\b"
         )
         return not re.search(strong_control_markers, text, re.IGNORECASE)

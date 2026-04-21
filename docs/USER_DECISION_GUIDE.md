@@ -94,6 +94,24 @@ git 尝试把 base -> theirs 的变化搬到 ours 上
 
 它的价值是处理“双边都改过附近代码”的场景；它的风险是 Git 只保证文本合并，不保证业务语义一定正确。所以 `3way` 通常不会低于 `L2`。
 
+### 3.2 `verified-direct` 怎么理解
+
+`verified-direct` 是确定性强适配路径，不是 AI 生成，也不是跳过校验。它做的是：
+
+| 步骤 | 含义 |
+| --- | --- |
+| 定位 | 用原始 hunk 的删除行、增加行和上下文在目标文件中找落点 |
+| 内存应用 | 在内存文本中替换目标片段，不直接改工作区 |
+| 复核 | 确认应删除的旧行、应加入的新行和锚点关系成立 |
+| 出 patch | 重新生成标准 diff，交给后续 validate / policy / 人工审查 |
+
+读结果时注意两点：
+
+| 结果 | 怎么看 |
+| --- | --- |
+| `apply_method=verified-direct` | 表示核心改动能被稳定重建，但 context 已经不是原样命中，默认按 `L3` 聚焦审查 |
+| `apply_method=verified-direct-exact` | 表示校正确认接近精确重建，常作为 `L1` 低漂移快速复核 |
+
 ---
 
 ## 4. 为什么要建立缓存索引
@@ -143,8 +161,8 @@ git 尝试把 base -> theirs 的变化搬到 ours 上
 | 3 | `git log -- <files>` 找时间窗口内修改同文件的 commit，排除 merge，默认最多取 50 个候选 | 构造候选关联补丁集合 |
 | 4 | 排除已知 fix、intro、Fixes 标签引用的 commit | 避免把当前补丁或已知锚点当依赖 |
 | 5 | 读取候选 diff，提取 hunk、函数、字段、锁域、状态点 | 构造文本和语义证据 |
-| 6 | 计算 hunk 重叠、50 行内相邻 hunk、函数交集、共享字段/锁/状态 | 判断关联强度 |
-| 7 | 评分并分成 `strong / medium / weak` | 给 Policy Engine 和人工审查使用 |
+| 6 | 计算 hunk 重叠、12 行内相邻 hunk、函数交集、共享字段/锁/状态 | 判断关联强度 |
+| 7 | 评分并分成 `strong / medium / weak` | `strong/medium` 给 Policy Engine；`weak` 只保留为背景证据 |
 
 分级口径：
 
@@ -153,6 +171,8 @@ git 尝试把 base -> theirs 的变化搬到 ours 上
 | `strong` | 与 fix patch 有直接 hunk 重叠，且共享函数/字段/锁/状态，或综合评分很高 | 视为强前置，通常应先 review 或先合入 |
 | `medium` | 有直接或相邻 hunk、函数交集、共享语义域，但证据没强到 required | 建议一并评估，不能草率忽略 |
 | `weak` | 只有弱关联信号 | 作为背景线索，通常不阻断单 patch |
+
+当前默认只会把最多 10 个 `strong/medium` 可操作候选放进 `prerequisite_patches`。单纯同文件、同函数名、远距离 hunk 或单一弱信号不会再把前置补丁列表膨胀到十几个；这类候选会进入 `dependency_details.weak_count` 和证据样本，用于人工参考，但不阻塞直接回移判断。
 
 注意：前置依赖不是“只要补丁 apply 失败才存在”。有些前置补丁提供的是结构体字段、API 语义、状态初始化或锁保护，即使文本能 `strict` 应用，也可能仍然需要一并 review。
 
@@ -191,4 +211,3 @@ git 尝试把 base -> theirs 的变化搬到 ours 上
 | `weak` 依赖完全没用 | 它通常不阻断，但可作为人工背景线索 |
 | 后置补丁都必须合 | 不一定。`followup_fix` 优先级高，`same_function` 需要人工判断关系 |
 | 索引是为了替代 Git | 不是。索引用来加速 commit 元信息搜索，真实 diff/apply 仍依赖 Git |
-

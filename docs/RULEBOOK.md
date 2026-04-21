@@ -22,7 +22,7 @@
 
 | `rule_id` | 常见 floor | 作用 | 典型样本 | 常见误解 | 误判边界 |
 | --- | --- | --- | --- | --- | --- |
-| `direct_backport_candidate` | `L0` | 证明样本可以留在最低风险通道 | `strict` 成功、无依赖、无专项风险、无传播 | “strict 成功就自动 L0” | 不对。任何 veto / risk 规则都可以继续把它抬高 |
+| `direct_backport_candidate` | `L0` | 证明样本可以留在最低风险通道 | `strict` 成功、无 strong/medium 依赖、无专项风险、无传播、无锁/状态/错误路径阻断信号 | “strict 成功就自动 L0” | 不对。任何 veto / risk 规则都可以继续把它抬高；普通字段访问本身不再单独阻断 L0 |
 | `l1_light_drift_sample` | `L1` | 证明样本属于轻漂移而不是语义改写 | 注释漂移、日志文本漂移、局部变量重命名、等价宏替换 | “L1 就是低风险放行” | 不对。`L1` 只是轻漂移起点，仍要看是否叠加 API、字段、错误路径变化 |
 | `single_line_high_impact` | `L2/L3` | 阻止“小改动行数”误导成低风险 | 单行改动改变返回路径、锁操作、状态迁移 | “只改一行不可能危险” | 不对。单行就可能改变控制流或同步语义 |
 
@@ -35,6 +35,8 @@
 | `l1_api_surface` | `L1/L2` | 函数签名、入参、返回路径、调用约束变化 | 新增参数检查、返回值语义变化、回调签名变化 | “只是函数头变了，不算风险” | 不对。API 面变化往往会影响调用方或错误处理 |
 | `prerequisite_recommended` | `L1` | 存在中等依赖信号，建议同时评估关联补丁 | 共享字段、共享状态点、共享错误路径，但不一定强到 required | “recommended 可以忽略” | 不对。它不一定禁止回移，但明确不该草率单 patch 决策 |
 | `prerequisite_required` | `L3` | 依赖强到顺序错误会带来风险 | 修复依赖前置重构、前置字段初始化或状态迁移 | “只要 patch apply 成功就不需要管前置” | 不对。依赖是语义约束，不是文本 apply 约束 |
+
+`prerequisite_patches` 只承载 `strong/medium` 可操作候选，默认最多 10 个。`weak` 候选用于解释和人工参考，不触发 `prerequisite_recommended` / `prerequisite_required`，也不应被理解成必须合入的前置补丁。
 
 ---
 

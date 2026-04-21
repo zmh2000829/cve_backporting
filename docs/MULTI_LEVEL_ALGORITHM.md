@@ -47,6 +47,8 @@
 | `recommended` | 有中等依赖信号，建议同时看关联补丁 | 不宜草率直接回移 |
 | `required` | 有强依赖证据，顺序错误会带来风险 | 必须把前置补丁纳入决策 |
 
+依赖算法现在只把 `strong/medium` 作为可操作前置补丁交给规则引擎，默认最多返回 10 个。`weak` 候选仍会统计在 `dependency_details.weak_count` 和证据样本中，但不会进入 `prerequisite_patches`，避免“同文件历史很多”把一个能完全一致合入的补丁误判成需要十几个前置补丁。
+
 ### 2.3 风险规则算法
 
 | 规则类 | 作用 |
@@ -142,6 +144,19 @@ final_level = max(base_level, 所有命中规则给出的 level_floor)
 
 ---
 
+### 5.1 `verified-direct` 的等级口径
+
+`verified-direct` 的核心含义是：`git apply` 的原始 context 已经不够稳定，但系统仍能在目标文件中定位 hunk，先在内存中应用，再复核并生成标准 diff。它证明“核心变更可重建”，不证明语义天然安全。
+
+| 方法 | 基线 | 说明 |
+| --- | --- | --- |
+| `verified-direct` | `L3` | 强适配路径，默认需要聚焦审查落点、上下文和语义 |
+| `verified-direct-exact` | `L1` | validate 或内部校正确认接近精确重建，可进入低漂移快速复核 |
+
+如果 validate 显示 `generated_vs_real.deterministic_exact_match=true`，系统可以把 `verified-direct` 的证据校正为 `verified-direct-exact`，但最终仍会叠加依赖和风险规则。
+
+---
+
 ## 6. 核心升档规则总览
 
 | 规则 | 常见 floor | 触发意义 |
@@ -203,15 +218,17 @@ final_level = max(base_level, 所有命中规则给出的 level_floor)
 | 候选召回 | `git log -- <files>` | 在 fix patch 修改文件的历史中找相关 commit，路径会经过 PathMapper 扩展 |
 | 时间窗口 | introduced commit 时间 -> HEAD | 有 intro 时从 intro 时间开始；无 intro 时退化为仓库初始到 HEAD |
 | 候选过滤 | 排除 merge、当前 fix、intro、Fixes 引用 | 避免把锚点误判为依赖 |
-| 结构比较 | hunk 重叠、50 行内相邻 hunk、函数交集 | 找文本和局部结构上的交叉 |
+| 结构比较 | hunk 重叠、12 行内相邻 hunk、函数交集 | 找文本和局部结构上的交叉 |
 | 语义标记 | 共享字段、锁域、状态点 | 捕捉文本不完全重叠但语义域相同的依赖 |
-| 分级 | `strong / medium / weak` | 给 Policy Engine 和人工 review 使用 |
+| 分级 | `strong / medium / weak` | `strong/medium` 给 Policy Engine；`weak` 只作为背景线索 |
 
 | 依赖等级 | 进入条件的直观理解 | 对 `L0-L5` 的影响 |
 | --- | --- | --- |
 | `strong` | 同 hunk 或同函数/字段/锁/状态强重叠，缺失可能导致编译或语义错误 | 常触发 `prerequisite_required`，可抬到 `L3` |
 | `medium` | 相邻 hunk、函数交集或共享语义域，建议一并看 | 常触发 `prerequisite_recommended`，可抬到 `L1/L2` |
 | `weak` | 仅有弱相关信号 | 通常不阻断，只作为背景线索 |
+
+默认最多返回 10 个 `strong/medium` 到 `prerequisite_patches`，并额外限制强依赖展示数量，避免历史同文件噪声把前置补丁集合膨胀成不可操作列表。
 
 ### 8.2 后置关联补丁
 
