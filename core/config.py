@@ -46,6 +46,21 @@ class LLMConfig:
 
 
 @dataclass
+class AIConfig:
+    """AI 增强任务配置。"""
+    mode: str = "off"  # off / advisory / gated
+    cache_enabled: bool = True
+    prompt_version: str = "ai-v1"
+    max_candidates_for_rerank: int = 20
+    max_diff_chars: int = 12000
+    enable_search_rerank: bool = False
+    enable_dependency_triage: bool = False
+    enable_low_signal_adjudication: bool = False
+    enable_risk_explainer: bool = False
+    enable_conflict_patch_suggestion: bool = False
+
+
+@dataclass
 class AnalysisConfig:
     """基础分析策略配置"""
     # 上游 CVE 没有 introduced commit 时的处理策略:
@@ -167,6 +182,7 @@ class Config:
     analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
+    ai: AIConfig = field(default_factory=AIConfig)
     policy: PolicyConfig = field(default_factory=PolicyConfig)
     path_mappings: list = field(default_factory=lambda: list(DEFAULT_PATH_MAPPINGS))
 
@@ -199,6 +215,22 @@ class ConfigLoader:
                     k: v for k, v in data["llm"].items()
                     if k in ("enabled", "provider", "api_key", "base_url",
                              "model", "max_tokens", "temperature", "timeout")
+                })
+            if "ai" in data and isinstance(data["ai"], dict):
+                cfg.ai = AIConfig(**{
+                    k: v for k, v in data["ai"].items()
+                    if k in (
+                        "mode",
+                        "cache_enabled",
+                        "prompt_version",
+                        "max_candidates_for_rerank",
+                        "max_diff_chars",
+                        "enable_search_rerank",
+                        "enable_dependency_triage",
+                        "enable_low_signal_adjudication",
+                        "enable_risk_explainer",
+                        "enable_conflict_patch_suggestion",
+                    )
                 })
             if "analysis" in data and isinstance(data["analysis"], dict):
                 cfg.analysis = AnalysisConfig(**{

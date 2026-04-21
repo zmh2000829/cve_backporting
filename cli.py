@@ -194,7 +194,8 @@ def run_analyze_payload(cve_id: str, target_version: str, config, *,
                     llm_config=config.llm,
                     policy_config=getattr(config, "policy", None),
                     analysis_config=getattr(config, "analysis", None),
-                    search_config=getattr(config, "search", None))
+                    search_config=getattr(config, "search", None),
+                    ai_config=getattr(config, "ai", None))
 
     stage_events, record_stage = _make_stage_trace_tracker(
         stage_callback=stage_callback)
@@ -1762,7 +1763,8 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
                         llm_config=config.llm if deep else None,
                         policy_config=getattr(config, "policy", None),
                         analysis_config=getattr(config, "analysis", None),
-                        search_config=getattr(config, "search", None))
+                        search_config=getattr(config, "search", None),
+                        ai_config=getattr(config, "ai", None))
 
         if show_stages:
             tracker = StageTracker(STAGES)

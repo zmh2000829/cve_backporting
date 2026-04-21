@@ -181,6 +181,7 @@ def serialize_validation_details(validation_details) -> dict:
         "strategy_buckets": getattr(validation_details, "strategy_buckets", {}),
         "decision_skeleton": getattr(validation_details, "decision_skeleton", {}),
         "manual_review_checklist": getattr(validation_details, "manual_review_checklist", []),
+        "ai_evidence": getattr(validation_details, "ai_evidence", {}),
     }
 
 

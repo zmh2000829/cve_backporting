@@ -13,6 +13,8 @@ from core.models import AnalysisResult, AnalysisResultV2, SearchResult, PatchInf
 from core.git_manager import GitRepoManager
 from core.matcher import PathMapper
 from core.llm_client import LLMClient
+from core.ai_assistant import AIAssistant
+from core.ai_patch_generator import AIPatchGenerator
 from agents.crawler import CrawlerAgent
 from agents.analysis import AnalysisAgent
 from agents.dependency import DependencyAgent
@@ -54,17 +56,25 @@ class Pipeline:
     def __init__(self, git_mgr: GitRepoManager, api_timeout: int = 30,
                  path_mappings: list = None, llm_config=None,
                  policy_config=None, analysis_config=None,
-                 search_config=None):
+                 search_config=None, ai_config=None):
         pm = PathMapper(path_mappings) if path_mappings else PathMapper()
+        self.llm = LLMClient(llm_config) if llm_config else LLMClient()
+        self.ai_config = ai_config
+        ai_patch_generator = AIPatchGenerator(self.llm) if self.llm.enabled else None
         self.crawler = CrawlerAgent(api_timeout=api_timeout, git_mgr=git_mgr)
         self.analysis = AnalysisAgent(git_mgr, path_mapper=pm, search_config=search_config)
         self.dependency = DependencyAgent(git_mgr, path_mapper=pm)
-        self.dryrun = DryRunAgent(git_mgr, path_mapper=pm)
+        self.dryrun = DryRunAgent(
+            git_mgr,
+            path_mapper=pm,
+            ai_patch_generator=ai_patch_generator,
+            ai_config=ai_config,
+        )
         self.git_mgr = git_mgr
         self.analysis_config = analysis_config
         self.search_config = search_config
 
-        self.llm = LLMClient(llm_config) if llm_config else LLMClient()
+        self.ai_assistant = AIAssistant(self.llm, ai_config)
         self.community_agent = CommunityAgent(self.llm)
         self.vuln_agent = VulnAnalysisAgent(self.llm)
         self.patch_review_agent = PatchReviewAgent(git_mgr, self.llm)
@@ -547,6 +557,16 @@ class Pipeline:
             )
             result.level_decision = result.validation_details.level_decision
             result.function_impacts = result.validation_details.function_impacts
+            ai_evidence = self.ai_assistant.enhance_accuracy(
+                patch=result.fix_patch,
+                validation_details=result.validation_details,
+                prerequisite_patches=result.prerequisite_patches,
+                dependency_details=result.dependency_details,
+            )
+            if ai_evidence.get("tasks"):
+                result.validation_details.ai_evidence = ai_evidence
+                result.recommendations.append(
+                    f"AI辅助分析: {len(ai_evidence['tasks'])} 个 advisory task 已输出，仅供审查参考")
 
             ld = result.level_decision
             if ld:

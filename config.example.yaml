@@ -28,13 +28,26 @@ output:
 # 兼容 OpenAI 接口 (支持 DeepSeek / Azure / vLLM 等)
 llm:
   enabled: false
-  provider: "openai"
-  api_key: ""                        # 也可通过 LLM_API_KEY 环境变量设置
-  base_url: "https://api.openai.com/v1"
-  model: "gpt-4o"
+  provider: "glm"                    # GLM5 走 OpenAI-compatible 接口
+  api_key: "${GLM_API_KEY}"          # 不要硬编码密钥；也可用 LLM_API_KEY
+  base_url: "http://<glm5-host>:8888/v1"
+  model: "GLM-5"
   max_tokens: 2000
-  temperature: 0.3
-  timeout: 60
+  temperature: 0.1
+  timeout: 90
+
+# ─── AI 增强任务 (可选，默认只做 advisory) ────────────────────────
+ai:
+  mode: "off"                        # off / advisory / gated
+  cache_enabled: true
+  prompt_version: "ai-v1"
+  max_candidates_for_rerank: 20
+  max_diff_chars: 12000
+  enable_search_rerank: false
+  enable_dependency_triage: false
+  enable_low_signal_adjudication: false
+  enable_risk_explainer: false
+  enable_conflict_patch_suggestion: false
 
 # ─── 基础分析策略 ────────────────────────────────────────────
 analysis:

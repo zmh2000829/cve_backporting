@@ -207,6 +207,7 @@ class ValidationDetails:
     strategy_buckets: Dict[str, Any] = field(default_factory=dict)
     decision_skeleton: Dict[str, Any] = field(default_factory=dict)
     manual_review_checklist: List[str] = field(default_factory=list)
+    ai_evidence: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -245,6 +246,7 @@ class DryRunResult:
     adapted_patch: str = ""         # 上下文重生成/冲突适配后的补丁内容
     search_reports: List[Dict] = field(default_factory=list)  # 详细搜索过程报告
     apply_attempts: List[Dict[str, str]] = field(default_factory=list)  # 每次 apply 尝试轨迹
+    ai_evidence: Dict[str, Any] = field(default_factory=dict)  # AI 补丁建议/冲突说明证据
 
 
 @dataclass

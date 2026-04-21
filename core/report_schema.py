@@ -32,6 +32,7 @@ _HIGH_RISK_APPLY_METHODS = {
     "regenerated",
     "conflict-adapted",
     "verified-direct",
+    "ai-generated",
 }
 
 _ATTENTION_APPLY_METHODS = {

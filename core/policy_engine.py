@@ -297,7 +297,7 @@ class PolicyEngine:
             level_decision.level in ("L2", "L3", "L4", "L5")
             or bool(prereqs)
             or any(hit.get("severity") in ("warn", "high") for hit in (rule_hits or []))
-            or base_method in ("regenerated", "conflict-adapted", "verified-direct")
+            or base_method in ("regenerated", "conflict-adapted", "verified-direct", "ai-generated")
         )
         if not needs_manual:
             return []
@@ -348,8 +348,8 @@ class PolicyEngine:
             ordered = [p.commit_id[:12] for p in strong[:3]] + [p.commit_id[:12] for p in medium[:2]]
             _push("按 strong/medium 顺序复核关联补丁: " + ", ".join(ordered))
 
-        if base_method in ("regenerated", "conflict-adapted", "verified-direct"):
-            _push("当前补丁经过重建/冲突适配/verified-direct 路径，需逐 hunk 复核生成结果与目标分支代码")
+        if base_method in ("regenerated", "conflict-adapted", "verified-direct", "ai-generated"):
+            _push("当前补丁经过重建/冲突适配/verified-direct/AI 生成路径，需逐 hunk 复核生成结果与目标分支代码")
 
         _push("完成关键路径编译、最小功能回归和错误路径回归验证")
         return out[:8]

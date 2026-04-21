@@ -67,6 +67,7 @@ _METHOD_CN = {
     "regenerated": "上下文重生成模式 (重新定位 hunk 上下文)",
     "conflict-adapted": "冲突适配模式 (自动解决部分冲突)",
     "verified-direct": "直接验证模式 (绕过 git apply，内存级验证)",
+    "ai-generated": "AI 生成候选补丁模式 (通过 apply check 后仍需人工审查)",
 }
 
 
@@ -151,6 +152,9 @@ class RiskBenefitAnalyzer:
                         f"注意：应用方式非 strict，"
                         f"说明原始补丁与目标代码存在上下文偏移，"
                         f"已由工具自动适配")
+                if dr.apply_method == "ai-generated":
+                    c += 0.35
+                    parts.append("AI 生成补丁仅证明候选 diff 可应用，仍需逐 hunk 人工审查")
             else:
                 c += 0.4
                 n_cf = len(dr.conflicting_files)

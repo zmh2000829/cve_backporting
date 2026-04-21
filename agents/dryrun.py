@@ -10,6 +10,7 @@ Dry-Run Agent — 多级补丁试应用 + 逐 hunk 冲突分析
   Level 3 - regenerated:      从目标文件重建 context (核心 +/- 不变)
   Level 3.5 - zero-context:   零上下文重建, 消除 context 行匹配问题
   Level 4 - conflict-adapted: 用目标文件实际行替换 - 行, 保留 + 行
+  AI suggestion:              失败后可选生成候选 diff, 必须再通过 git apply --check
 
 核心定位:
   _locate_hunk → (change_pos, n_remove):
@@ -55,10 +56,13 @@ logger = logging.getLogger(__name__)
 class DryRunAgent:
     """补丁试应用Agent — 多级上下文自适应 + 路径映射 + 代码语义匹配"""
 
-    def __init__(self, git_mgr: GitRepoManager, path_mapper=None):
+    def __init__(self, git_mgr: GitRepoManager, path_mapper=None,
+                 ai_patch_generator=None, ai_config=None):
         self.git_mgr = git_mgr
         self.path_mapper = path_mapper
         self.code_matcher = CodeMatcher()
+        self.ai_patch_generator = ai_patch_generator
+        self.ai_config = ai_config
 
     # ─── 公开接口 ─────────────────────────────────────────────────
 
@@ -230,6 +234,13 @@ class DryRunAgent:
                                 l4_label, patch.commit_id[:12])
                     return r4
 
+        ai_result, ai_evidence = self._try_ai_patch_suggestion(
+            mapped_diff, analysis, rp_path, target_version, apply_attempts)
+        if ai_result is not None:
+            return ai_result
+        if ai_evidence:
+            r0.ai_evidence = ai_evidence
+
         # ── 全部失败: 按优先级保留最佳可用补丁 ────────────────────
         # direct-verify > L3.5 零上下文 > L3 重建 > L4 适配 > 社区原始
         if direct_diff:
@@ -261,6 +272,113 @@ class DryRunAgent:
                     patch.commit_id[:12], len(r0.conflicting_files),
                     len(r0.conflict_hunks))
         return r0
+
+    def _try_ai_patch_suggestion(self, mapped_diff: str, analysis: dict,
+                                 repo_path: str, target_version: str,
+                                 apply_attempts: List[dict]):
+        if not bool(getattr(self.ai_config, "enable_conflict_patch_suggestion", False)):
+            return None, {}
+        if not self.ai_patch_generator:
+            return None, {
+                "enabled": True,
+                "mode": getattr(self.ai_config, "mode", ""),
+                "tasks": [{
+                    "task": "ai_patch_suggestion",
+                    "status": "disabled",
+                    "summary": "AI patch generator 未配置",
+                    "used_for_final_decision": False,
+                }],
+            }
+
+        target = self._first_target_file_context(mapped_diff, repo_path)
+        if not target:
+            return None, {
+                "enabled": True,
+                "mode": getattr(self.ai_config, "mode", ""),
+                "tasks": [{
+                    "task": "ai_patch_suggestion",
+                    "status": "no_target_context",
+                    "summary": "无法读取目标文件上下文，跳过 AI patch suggestion",
+                    "used_for_final_decision": False,
+                }],
+            }
+
+        file_path, content = target
+        report = self.ai_patch_generator.generate_patch_with_report(
+            mapped_diff,
+            content,
+            analysis or {},
+            file_path,
+        )
+        task = {
+            "task": "ai_patch_suggestion",
+            "status": report.get("status", "unknown"),
+            "summary": report.get("summary", ""),
+            "semantic_delta": report.get("semantic_delta", {}),
+            "target_file": file_path,
+            "used_for_final_decision": False,
+            "decision_guard": "AI 候选补丁必须通过 git apply --check；通过后仍按高风险候选处理",
+        }
+        ai_evidence = {
+            "enabled": True,
+            "mode": getattr(self.ai_config, "mode", ""),
+            "tasks": [task],
+            "summary": [task.get("summary", "")] if task.get("summary") else [],
+        }
+        patch_text = report.get("patch") or ""
+        if not patch_text:
+            return None, ai_evidence
+
+        for opts, label in [
+                ([], "strict"),
+                (["--ignore-whitespace"], "ignore-ws"),
+                (["-C1"], "context-C1")]:
+            checked = self._apply_check(patch_text, repo_path, opts)
+            if checked.applies_cleanly:
+                checked.apply_method = "ai-generated"
+                checked.adapted_patch = patch_text
+                checked.conflict_hunks = analysis.get("hunks", []) if analysis else []
+                checked.search_reports = analysis.get("search_reports", []) if analysis else []
+                checked.stat_output = self._get_stat(patch_text, target_version)
+                checked.error_output = (
+                    f"(AI patch suggestion 通过 {label} apply check；"
+                    "仅作为高风险候选，需人工审查)"
+                )
+                checked.apply_attempts = apply_attempts + [{
+                    "method": f"ai-generated/{label}",
+                    "success": "yes",
+                    "detail": "AI patch suggestion passed git apply --check",
+                }]
+                task["status"] = "accepted_by_apply_check"
+                task["apply_method"] = label
+                task["used_for_final_decision"] = True
+                task["summary"] = (
+                    f"AI 候选补丁通过 {label} apply check；"
+                    "仅代表可应用，仍需人工逐 hunk 审查")
+                ai_evidence["summary"] = [task["summary"]]
+                checked.ai_evidence = ai_evidence
+                return checked, ai_evidence
+
+        task["status"] = "rejected_by_apply_check"
+        task["summary"] = "AI 生成了候选补丁，但未通过 git apply --check"
+        ai_evidence["summary"] = [task["summary"]]
+        return None, ai_evidence
+
+    def _first_target_file_context(self, diff_text: str, repo_path: str):
+        parsed = self._parse_hunks_for_regen(diff_text)
+        if not parsed:
+            return None
+        limit = int(getattr(self.ai_config, "max_diff_chars", 12000) or 12000)
+        for file_path, _header_lines, _hunks in parsed:
+            resolved = self._resolve_file_path(file_path, repo_path)
+            if not resolved:
+                continue
+            try:
+                with open(resolved, "r", encoding="utf-8", errors="replace") as f:
+                    return file_path, f.read(max(2000, min(limit, 20000)))
+            except Exception:
+                continue
+        return None
 
     def _ensure_adapted_patch(self, result: DryRunResult,
                               diff_text: str, repo_path: str):

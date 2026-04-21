@@ -156,6 +156,171 @@
 | P4-11 | `SearchFailure` 结构化模型 | ⏳ | 已新增 `SearchFailure(reason/detail/retryable/level)`，覆盖 `git_timeout / diff_fetch_failed / no_candidates / below_threshold / git_command_failed` 等主要场景；`cache_miss / branch_mismatch` 的细分统计和 batch 聚合仍待补 |
 | P4-12 | 冲突自动解决验证闭环 | ⏳ | `conflict-adapted` 当前本质是“替换 - 行并保留 + 行”的高风险适配；后续可接入 AST 语义冲突检测和 `core/ai_patch_generator.py`，但生成补丁必须经过 apply、语义差异摘要、回归样本对比和人工审批门禁 |
 
+## AI 增强专项（GLM5）
+
+### 专项判断
+
+- 当前项目已经有 `LLMClient`、`LLMAnalyzer`、`VulnAnalysisAgent`、`PatchReviewAgent`、`MergeAdvisorAgent` 等 LLM 增强入口，但它们主要承担“解释文本”和“deep analysis 补充”，还没有系统性进入搜索召回、依赖去噪、风险裁决和经验校准闭环。
+- GLM5 的价值不应定位为“替代确定性算法”。更合理的定位是：在确定性链路已经给出候选、near-miss、弱证据或冲突上下文后，让模型做**语义重排、证据补充、弱信号裁决、失败根因归类、候选补丁建议**。
+- 准确率提升的核心不是让模型直接给最终级别，而是让模型减少两类错误：一是弱信号误升级，二是真正语义相关但文本相似度不足导致的漏召回。
+- 召回率提升的核心不是让模型全仓搜索，而是让模型生成更好的搜索 query、路径/符号/语义别名，并对确定性召回出的 near-miss 做语义重排。
+- 所有 AI 输出必须结构化、可缓存、可回放、可验证；不能只把自然语言塞进报告，否则无法做 batch 统计和准确率闭环。
+- AI 生成补丁仍必须是高风险候选路径。它只能在确定性路径失败或进入 `L5/conflict-adapted` 后参与，并且必须经过 unified diff 格式校验、`git apply --check`、语义差异摘要、validate 对比和人工审批。
+
+### 总体架构
+
+| 层 | 新增/改造点 | 设计要求 |
+|---|---|---|
+| Provider 层 | 扩展 `core/llm_client.py` 为 GLM5/OpenAI-compatible 统一客户端 | 支持 `provider=glm`、`base_url`、`model`、`api_key`、timeout、重试、JSON 强制解析、调用耗时与 token 估算 |
+| AI 任务层 | 新增 `core/ai_tasks.py` 或 `agents/ai_assistant.py` | 每类任务有固定输入、固定 JSON schema、固定失败降级，不允许自由格式输出驱动主流程 |
+| 缓存层 | 新增 AI response cache | cache key = prompt version + model + task + 输入 hash；支持离线回放，避免批量验证成本失控 |
+| 证据层 | 新增 `ai_evidence` / `ai_decision_support` 输出块 | 记录模型建议、置信度、引用的 diff 行/候选 commit、是否影响最终级别、是否只供人工参考 |
+| 策略层 | AI 只作为 advisory 或 gated promotion/demotion | 默认不直接覆盖 `final_level`；只有通过 validate 校准的任务才允许影响 rule floor 或 candidate rank |
+| 评估层 | `batch-validate` 增加 AI ablation | 同一批样本分别跑 `ai=off / ai=advisory / ai=gated`，输出 precision、recall、F1、误升级率、漏召回率、成本和耗时 |
+
+推荐配置形态：
+
+```yaml
+llm:
+  enabled: true
+  provider: "glm"
+  api_key: "${GLM_API_KEY}"
+  base_url: "https://<glm5-openai-compatible-endpoint>/v1"
+  model: "GLM-5"
+  max_tokens: 4000
+  temperature: 0.1
+  timeout: 90
+
+ai:
+  mode: "advisory"        # off / advisory / gated
+  cache_enabled: true
+  prompt_version: "ai-v1"
+  max_candidates_for_rerank: 20
+  max_diff_chars: 12000
+  enable_search_rerank: true
+  enable_dependency_triage: true
+  enable_low_signal_adjudication: true
+  enable_conflict_patch_suggestion: false
+```
+
+### 召回率提升设计
+
+| 场景 | 当前短板 | GLM5 介入方式 | 门禁 |
+|---|---|---|---|
+| Subject 搜索漏召回 | backport subject 改写、企业分支 squash、缩写/子系统名变化 | `AIQueryExpansionTask` 从 CVE 描述、upstream subject、diff 文件/函数生成 5-10 个搜索 query、关键符号、子系统别名 | 只扩展 `git log --grep` / FTS query，不直接认定命中 |
+| Diff 搜索 near-miss | 相似度低于阈值但语义等价 | `AISemanticRerankTask` 对 L2/L3 near-miss 候选做语义重排，输出 `same_fix / related / unrelated` | 只能在确定性候选集合内重排；命中必须保留 candidate commit 和证据行 |
+| 路径迁移漏召回 | PathMapper 未覆盖新目录迁移 | `AIPathAliasTask` 基于 diff 路径、Kconfig/Makefile/子系统名推断候选路径别名 | 只作为临时 search path，命中后需真实 `git show` / diff 验证 |
+| introduced commit 缺失 | 只有 fix patch，缺少 intro 真值 | `AIAffectednessProbeTask` 对 removed/added 行、目标文件片段、函数上下文做受影响判断 | 结论只能是 `affected / fixed / uncertain`，不伪造 introduced commit |
+| stable backport 识别 | stable commit 与 mainline diff 有小幅改写 | `AIStableBackportMatchTask` 对候选 stable diff 和 mainline diff 做 hunk 意图匹配 | 只补充 confidence 和 rationale；最终仍以 diff containment / validate 为准 |
+
+### 准确率提升设计
+
+| 场景 | 当前误差来源 | GLM5 介入方式 | 对最终级别的影响 |
+|---|---|---|---|
+| 弱信号误升级 | 普通字段访问、普通条件变化、日志/注释/局部变量改名被规则误读 | `AILowSignalAdjudicationTask` 读取 rule hits、diff hunks、风险 marker，判断是否为语义敏感变化 | 初期只写入 `ai_evidence.low_signal`; 回放证明稳定后才允许降低 advisory risk |
+| 前置补丁膨胀 | 同文件历史、相邻 hunk、函数名交集产生过多 weak/medium | `AIDependencyTriageTask` 对 top strong/medium/weak 候选判断 `required / helpful / background / unrelated` | 不能把 weak 直接升 required；可辅助降低 weak/medium 噪声和生成人工顺序 |
+| 锁/生命周期/状态机漏判 | 规则只看局部 token，无法理解上下文协议 | `AIRiskSemanticTask` 对锁对象、状态字段、错误路径做语义解释，补充“为什么危险/不危险” | 只在已有确定性风险 marker 时参与提升置信度，不凭空创建高风险 |
+| L0/L1 可直回解释不足 | 只知道没有命中风险，不知道为什么低风险 | `AIDirectBackportJustificationTask` 生成结构化正向证据：核心 +/- 行是否等价、上下文漂移类型、回归建议 | 不改变级别，提升可审计性和用户信任 |
+| validate 偏差根因不结构化 | LLMAnalyzer 现在输出自然语言，不利于统计 | `AIValidateRootCauseTask` 输出固定 JSON：`search_miss / prereq_noise / dryrun_adaptation_error / policy_overpromotion / policy_underpromotion / intel_gap` | 进入 batch 误差分桶，用于下一轮阈值和规则调优 |
+
+### 补丁生成与冲突适配设计
+
+| 阶段 | 目标 | 约束 |
+|---|---|---|
+| AI conflict explanation | 对 `3way / verified-direct / regenerated / conflict-adapted` 的失败 hunk 生成语义差异说明 | 不生成代码，只解释目标分支旧逻辑与上游旧逻辑差异 |
+| AI patch suggestion | 仅在确定性路径失败、目标文件可定位、人工显式开启时生成候选 diff | 输出必须是 unified diff，且保留原修复意图，不允许扩大修改范围 |
+| Patch verifier | 对 AI diff 运行格式检查、路径检查、`git apply --check`、DryRun、规则分级 | 任一步失败则丢弃 AI patch |
+| Semantic delta report | 对 AI patch 与 upstream patch 做 hunk 级差异摘要 | 明确哪些 `+` 行保留、哪些 `-` 行被目标分支代码替换 |
+| Human gate | `ai-generated` 永不进入 L0/L1 自动通道 | 默认 `L5` 或审批通道，除非后续 validate 真值证明可降级 |
+
+### 数据模型与输出
+
+建议新增统一 AI 输出结构，避免每个模块自由扩字段：
+
+```json
+{
+  "ai_evidence": {
+    "enabled": true,
+    "mode": "advisory",
+    "provider": "glm",
+    "model": "GLM-5",
+    "prompt_version": "ai-v1",
+    "tasks": [
+      {
+        "task": "semantic_rerank",
+        "status": "success",
+        "input_hash": "...",
+        "latency_ms": 1234,
+        "decision": "same_fix",
+        "confidence": 0.82,
+        "affected_candidates": ["abc123..."],
+        "evidence_lines": ["..."],
+        "used_for_final_decision": false
+      }
+    ]
+  }
+}
+```
+
+关键原则：
+
+- `used_for_final_decision=false` 是分析类 task 的默认值。
+- 只有 `mode=gated` 且该 task 经过 batch validate 校准，才允许搜索、依赖、低信号裁决类 task 影响 rank、rule floor 或最终分级。
+- `ai-generated` 补丁建议是单独的 dryrun 候选通道：只有通过确定性 `git apply --check` 才可记录 `used_for_final_decision=true`，但仍必须保持高风险/L5 和人工审批门禁。
+- 所有 AI task 必须返回 `confidence`、`evidence_lines`、`uncertainty_reason`，不能只返回“是/否”。
+- AI 结果必须进入 traceability，记录模型、prompt 版本和输入 hash，便于审计和复现。
+
+### 评估指标
+
+| 指标 | 目标 | 说明 |
+|---|---|---|
+| fix search recall | 显著提升 | 统计 mainline/stable fix 是否被定位；重点看 subject 改写和 squash 样本 |
+| introduced / affectedness recall | 提升 | 缺 intro 时减少错误 unknown 和错误 fixed 判断 |
+| prerequisite precision | 提升 | 前置补丁推荐数量下降，`required/recommended` 与真值更一致 |
+| low-level precision | 提升 | `L0/L1` 的误放行率下降，误升级率也下降 |
+| overpromotion rate | 下降 | 能完全一致合入的补丁不再被弱信号抬到高等级 |
+| underpromotion rate | 不上升 | 降误报不能牺牲真实高风险样本 |
+| AI cost / latency | 可控 | batch 输出每个 task 的调用数、耗时、缓存命中率 |
+
+### AI 专项任务拆分
+
+| 编号 | 事项 | 状态 | 落地方案 |
+|---|---|---|---|
+| AI-1 | GLM5 Provider 接入 | ⏳ | 基础已落：`LLMClient` 支持 `provider=glm`、OpenAI-compatible endpoint、`${GLM_API_KEY}`/`GLM_API_KEY` 回退和更稳的 JSON 抽取；`AIPatchGenerator` 已改走统一 `LLMClient.chat`。待补：重试、token/成本 telemetry |
+| AI-2 | AI 配置与模式开关 | ⏳ | 基础已落：新增 `AIConfig` 与 `config.yaml`/`config.example.yaml` 配置项，支持 `mode=off/advisory/gated`、task 开关、候选上限、diff 截断和 prompt version。待补：CLI/API `--ai-mode` 临时覆盖 |
+| AI-3 | AI response cache 与回放 | ⏳ | 新增本地 cache，按 task/model/prompt/input hash 存取；batch-validate 支持复用 AI 结果，避免重复调用 GLM5 |
+| AI-4 | 结构化 AI task 基座 | ⏳ | 基础已落：新增 `core/ai_assistant.py`，统一 advisory task 的 prompt、JSON schema、失败降级、输入裁剪、输出校验和 `ai_evidence`。待补：持久化 traceability 与 prompt 独立目录 |
+| AI-5 | 搜索 query expansion | ⏳ | 在 L2/L3 未命中或 below-threshold 时调用 GLM5 生成 subject/query/path/function 别名，再回到 Git/FTS 做确定性召回 |
+| AI-6 | near-miss semantic rerank | ⏳ | 对 `near_misses` 和 L3 candidates 做 GLM5 语义重排，输出 `same_fix/related/unrelated`，先 advisory 展示，再用 validate 证明收益 |
+| AI-7 | missing-intro affectedness probe | ⏳ | 在 `patch_probe` 证据不足时，用目标函数片段 + fix hunk 让 GLM5 输出 `affected/fixed/uncertain` 和证据行，减少情报缺失导致的召回损失 |
+| AI-8 | prerequisite triage | ⏳ | advisory 基础已落：`AIAssistant` 可对 strong/medium/weak 证据样本输出 `required/helpful/background/unrelated` 建议，不影响最终级别。待补：batch 统计与排序 UI |
+| AI-9 | low-signal adjudication | ⏳ | advisory 基础已落：可对普通 `if`、字段访问、return path、日志/注释/rename 这类误升级高发样本输出低信号裁决，不做自动降级。待补：真实样本回放后开放 gated |
+| AI-10 | risk semantic explainer | ⏳ | advisory 基础已落：可对锁、生命周期、状态机、字段、错误路径命中输出对象级解释，进入 `validation_details.ai_evidence`。待补：CLI/TUI 专门面板 |
+| AI-11 | AI patch suggestion v2 | ⏳ | 基础已落：`core/ai_patch_generator.py` 已统一走 `LLMClient`，DryRun 在确定性路径失败且显式开启 `enable_conflict_patch_suggestion` 时生成候选 diff，并必须通过 `git apply --check` 才返回 `ai-generated`。待补：validate 自动对比与审批 UI |
+| AI-12 | validate root-cause JSON | ⏳ | 将 `LLMAnalyzer` 从自然语言改为结构化根因分类，进入 batch 聚合，用于反推搜索、依赖和规则误差来源 |
+| AI-13 | AI ablation benchmark | ⏳ | `batch-validate` 增加 `ai=off/advisory/gated` 对照，输出 precision/recall/F1、误升级率、漏召回率、AI 调用成本和耗时 |
+| AI-14 | Prompt 与 schema 版本治理 | ⏳ | 所有 prompt 进入 `prompts/` 或 `core/ai_prompts.py`，带版本号、测试样本和 JSON schema；修改 prompt 必须跑 golden 回归 |
+| AI-15 | 安全与隐私门禁 | ⏳ | 增加 diff/context 最大长度、敏感路径脱敏、禁用全文件上传开关、调用日志脱敏；默认只发送 hunk 和必要上下文 |
+
+### 推荐落地顺序
+
+| 阶段 | 优先任务 | 目标 |
+|---|---|---|
+| AI 第一阶段 | AI-1 / AI-2 / AI-3 / AI-4 / AI-12 / AI-13 | 先把 GLM5 接入、结构化输出、缓存回放和评估闭环打稳；没有评估闭环前不让 AI 改最终结论 |
+| AI 第二阶段 | AI-5 / AI-6 / AI-7 | 优先提升召回率：搜索扩展、near-miss 重排、missing-intro 受影响判断 |
+| AI 第三阶段 | AI-8 / AI-9 / AI-10 | 再提升准确率：前置补丁去噪、弱信号裁决、高风险解释绑定 |
+| AI 第四阶段 | AI-11 / AI-14 / AI-15 | 最后处理 AI 生成补丁和 prompt 治理，确保不会把兜底能力误包装成自动合入能力 |
+
+### 验收标准
+
+| 里程碑 | 必须满足 |
+|---|---|
+| GLM5 接入完成 | `llm.enabled=true` 时 deep analysis、validate root-cause、AI task runner 均可调用；无 key 或调用失败时自动降级，主流程不失败 |
+| Advisory 可用 | 单条报告出现 `ai_evidence`，但 `used_for_final_decision=false`；用户能看见 AI 对 near-miss、弱信号、依赖候选的解释 |
+| 召回提升可量化 | 在真实样本集上 `ai=advisory` 的候选召回率高于 `ai=off`，且误命中没有明显上升 |
+| 准确率提升可量化 | 前置补丁 precision、低级别 precision、overpromotion rate 至少一项显著改善，underpromotion rate 不上升 |
+| Gated 模式放开 | 只有当某个 AI task 在 batch validate 中持续稳定，才允许该 task 影响 candidate rank 或低信号降级；所有影响必须写入 traceability |
+
 ## P5
 
 | 编号 | 事项 | 状态 | 落地情况 |
@@ -212,12 +377,15 @@
 | 第一阶段 | P0-7 / P6-3 / P6-1 | 先把 pipeline 单出口、fixed/incomplete 结论补齐和边界态表达收拢，避免主链路再出现“有结果但解释空心化” |
 | 第二阶段 | P2-6 / P2-7 / P2-8 / P2-10 / P1-2 / P1-5 | 已完成第一轮降误报，当前重点转向继续扩真实样本、低级别负例和函数解析可靠性，防止宽匹配、伪调用链和弱语义命中继续把级别虚高 |
 | 第三阶段 | P4-6 / P4-7 / P4-8 / P4-9 / P4-10 / P4-11 | 把搜索阈值、near-miss 候选和基础设施失败原因做成可观测、可解释、可调参的层，先解决“为什么没找到/为什么差一点命中” |
-| 第四阶段 | P1-1 / P1-3 / P1-4 / P1-5 / P1-6 | 把 L0/L1 做成真正可信的低风险处理区，并补齐“为什么可以直接回移”以及“系统有多大把握”的正向说明 |
-| 第五阶段 | P3-2 / P3-3 / P3-4 / P3-5 | 把“需不需要关联补丁”做成用户可执行判断，并能沉淀长期召回趋势 |
-| 第六阶段 | P5-13 / P5-14 / P5-15 / P5-16 / P5-17 | 继续拆分 orchestration、schema 和入口归一化层，避免职责交叉重新把输出和实现拖回双轨 |
-| 第七阶段 | P5-10 / P5-11 / P5-12 / P5-18 / P4-12 | 把远程情报、cache、worktree、telemetry 和冲突适配门禁做成可审计的工程底座，保证真实批量跑数稳定 |
-| 第八阶段 | P6-4 / P6-8 / P6-9 / P6-13 / P6-14 / P6-15 / P6-16 | 把输出结果做成真正的维护者工作清单，并给 CLI/TUI/API 提供稳定展示层、统一术语和自描述接口 |
-| 第九阶段 | P6-17 / P6-18 / P6-19 / P6-20 / P6-21 | 继续把 README、接口合同、规则手册、边界说明、样板库拆开，防止文档重新长回单文件大杂烩 |
+| 第四阶段 | AI-1 / AI-2 / AI-3 / AI-4 / AI-12 / AI-13 | 接入 GLM5 但先只做结构化 advisory、缓存和 ablation 评估；没有真实回放收益前不让 AI 改最终结论 |
+| 第五阶段 | AI-5 / AI-6 / AI-7 | 用 GLM5 优先提升召回率：query expansion、near-miss semantic rerank、missing-intro affectedness probe |
+| 第六阶段 | AI-8 / AI-9 / AI-10 | 用 GLM5 提升准确率：前置补丁去噪、弱信号裁决、高风险语义解释绑定 |
+| 第七阶段 | P1-1 / P1-3 / P1-4 / P1-5 / P1-6 | 把 L0/L1 做成真正可信的低风险处理区，并补齐“为什么可以直接回移”以及“系统有多大把握”的正向说明 |
+| 第八阶段 | P3-2 / P3-3 / P3-4 / P3-5 | 把“需不需要关联补丁”做成用户可执行判断，并能沉淀长期召回趋势 |
+| 第九阶段 | P5-13 / P5-14 / P5-15 / P5-16 / P5-17 | 继续拆分 orchestration、schema 和入口归一化层，避免职责交叉重新把输出和实现拖回双轨 |
+| 第十阶段 | P5-10 / P5-11 / P5-12 / P5-18 / P4-12 / AI-11 / AI-14 / AI-15 | 把远程情报、cache、worktree、telemetry、AI 补丁生成和安全门禁做成可审计的工程底座 |
+| 第十一阶段 | P6-4 / P6-8 / P6-9 / P6-13 / P6-14 / P6-15 / P6-16 | 把输出结果做成真正的维护者工作清单，并给 CLI/TUI/API 提供稳定展示层、统一术语和自描述接口 |
+| 第十二阶段 | P6-17 / P6-18 / P6-19 / P6-20 / P6-21 | 继续把 README、接口合同、规则手册、边界说明、样板库拆开，防止文档重新长回单文件大杂烩 |
 
 ## 北极星结果
 

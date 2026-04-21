@@ -21,6 +21,7 @@ class LLMClient:
     def __init__(self, config=None):
         if config is None:
             self.enabled = False
+            self._provider = ""
             self._api_key = ""
             self._base_url = ""
             self._model = ""
@@ -30,7 +31,8 @@ class LLMClient:
             return
 
         self.enabled = config.enabled
-        self._api_key = config.api_key or os.environ.get("LLM_API_KEY", "")
+        self._provider = (getattr(config, "provider", "") or "openai").lower()
+        self._api_key = self._resolve_api_key(getattr(config, "api_key", "") or "")
         self._base_url = (config.base_url or "").rstrip("/")
         self._model = config.model or ""
         self._max_tokens = config.max_tokens or 2000
@@ -40,6 +42,28 @@ class LLMClient:
         if self.enabled and not self._api_key:
             logger.warning("LLM 已启用但未配置 api_key，自动降级为确定性模式")
             self.enabled = False
+
+    @property
+    def provider(self) -> str:
+        return self._provider
+
+    @property
+    def model(self) -> str:
+        return self._model
+
+    @property
+    def base_url(self) -> str:
+        return self._base_url
+
+    def _resolve_api_key(self, configured: str) -> str:
+        value = (configured or "").strip()
+        if value.startswith("${") and value.endswith("}"):
+            value = os.environ.get(value[2:-1], "")
+        if value:
+            return value
+        if self._provider == "glm":
+            return os.environ.get("GLM_API_KEY", "") or os.environ.get("LLM_API_KEY", "")
+        return os.environ.get("LLM_API_KEY", "")
 
     def chat(self, prompt: str, *,
              system: str = "",
@@ -94,6 +118,13 @@ class LLMClient:
         try:
             return json.loads(text)
         except json.JSONDecodeError:
+            obj_start = text.find("{")
+            obj_end = text.rfind("}")
+            if 0 <= obj_start < obj_end:
+                try:
+                    return json.loads(text[obj_start:obj_end + 1])
+                except json.JSONDecodeError:
+                    pass
             logger.warning("LLM 返回的内容无法解析为 JSON (前 200 字符): %s",
                            text[:200])
             return None

@@ -187,6 +187,8 @@ def build_human_friendly_summary(data: dict, mode: str) -> dict:
     evidence = framework.get("evidence") or {}
     conclusion = framework.get("conclusion") or {}
     result_status = data.get("result_status") or {}
+    validation_details = data.get("validation_details") or {}
+    ai_evidence = validation_details.get("ai_evidence") if isinstance(validation_details, dict) else {}
     manual_review_checklist = _resolve_manual_review_checklist(data)
     level = (data.get("l0_l5") or {}).get("current_level") or (data.get("level_decision") or {}).get("level") or "未知"
     base_level = (data.get("l0_l5") or {}).get("base_level") or (data.get("level_decision") or {}).get("base_level") or "未知"
@@ -249,6 +251,7 @@ def build_human_friendly_summary(data: dict, mode: str) -> dict:
             "状态点": (evidence.get("state_points") or [])[:8],
             "错误路径节点": (evidence.get("error_path_nodes") or [])[:8],
             "状态证据": result_status.get("evidence_refs", []),
+            "AI辅助证据": (ai_evidence or {}).get("summary", []),
         },
         "manual_review_checklist": manual_review_checklist,
     }
@@ -313,6 +316,7 @@ def build_analyze_payload(
             "error_output": dr.error_output[:500] if dr.error_output else "",
             "has_adapted_patch": bool(dr.adapted_patch),
             "apply_attempts": dr.apply_attempts,
+            "ai_evidence": getattr(dr, "ai_evidence", {}),
         }
 
     fix_patch_detail = {}

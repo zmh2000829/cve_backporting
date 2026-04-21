@@ -6,9 +6,7 @@ AI 辅助补丁生成 — 用 LLM 生成最小化修改的补丁
 """
 
 import logging
-import json
 from typing import Optional, List, Dict
-from core.models import PatchInfo
 
 logger = logging.getLogger(__name__)
 
@@ -38,50 +36,68 @@ class AIPatchGenerator:
         Returns:
             生成的补丁内容，或 None 如果生成失败
         """
-        if not self.llm_client:
-            logger.warning("LLM 客户端未配置，无法生成补丁")
-            return None
+        report = self.generate_patch_with_report(
+            mainline_patch,
+            target_file_content,
+            conflict_analysis,
+            target_file_path,
+        )
+        return report.get("patch") if report.get("status") == "success" else None
 
-        # 构建 prompt
+    def generate_patch_with_report(self, mainline_patch: str,
+                                   target_file_content: str,
+                                   conflict_analysis: Dict,
+                                   target_file_path: str) -> Dict:
+        """Generate an AI patch candidate and return structured evidence."""
+        if not self.llm_client or not getattr(self.llm_client, "enabled", False):
+            logger.warning("LLM 客户端未配置，无法生成补丁")
+            return {
+                "status": "disabled",
+                "patch": "",
+                "summary": "LLM 未启用，无法生成 AI patch",
+            }
+
         prompt = self._build_prompt(
             mainline_patch, target_file_content,
             conflict_analysis, target_file_path
         )
 
         try:
-            response = self.llm_client.chat.completions.create(
-                model=self.llm_client.model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "你是一个 Linux 内核补丁专家。你的任务是分析 mainline 补丁和目标文件的实际代码，"
-                            "生成一个最小化修改的补丁。补丁应该只改变必要的 context 行，保留所有的 + 行（新增代码）。"
-                            "输出必须是有效的 unified diff 格式。"
-                        )
-                    },
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
-                ],
-                temperature=0.3,
+            patch_content = self.llm_client.chat(
+                prompt,
+                system=(
+                    "你是一个 Linux 内核补丁专家。你的任务是分析 mainline 补丁和目标文件的实际代码，"
+                    "生成一个最小化修改的 unified diff。只输出补丁，不要解释。"
+                ),
+                temperature=0.1,
                 max_tokens=4000,
             )
+            patch_content = self._extract_patch(patch_content or "")
 
-            patch_content = response.choices[0].message.content.strip()
-
-            # 验证补丁格式
             if not self._validate_patch_format(patch_content):
                 logger.warning("生成的补丁格式无效")
-                return None
+                return {
+                    "status": "invalid_format",
+                    "patch": "",
+                    "summary": "LLM 返回内容不是有效 unified diff",
+                    "raw_preview": (patch_content or "")[:500],
+                }
 
             logger.info("AI 补丁生成成功")
-            return patch_content
+            return {
+                "status": "success",
+                "patch": patch_content,
+                "summary": "AI 生成了候选补丁，仍需 apply/check/validate 和人工审查",
+                "semantic_delta": self._semantic_delta(mainline_patch, patch_content),
+            }
 
         except Exception as e:
             logger.error(f"AI 补丁生成失败: {e}")
-            return None
+            return {
+                "status": "error",
+                "patch": "",
+                "summary": str(e),
+            }
 
     def _build_prompt(self, mainline_patch: str,
                       target_file_content: str,
@@ -111,10 +127,10 @@ class AIPatchGenerator:
 
 {target_file_path}
 
-## 目标文件内容（前 2000 字符）
+## 目标文件内容（必要上下文，最多 6000 字符）
 
 ```c
-{target_file_content[:2000]}
+{target_file_content[:6000]}
 ```
 
 ## 冲突分析
@@ -137,6 +153,21 @@ class AIPatchGenerator:
 """
         return prompt
 
+    @staticmethod
+    def _extract_patch(text: str) -> str:
+        content = (text or "").strip()
+        if content.startswith("```"):
+            lines = content.splitlines()
+            if lines and lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            content = "\n".join(lines).strip()
+        idx = content.find("diff --git")
+        if idx >= 0:
+            content = content[idx:]
+        return content
+
     def _validate_patch_format(self, patch_content: str) -> bool:
         """验证补丁格式"""
         lines = patch_content.strip().split("\n")
@@ -157,6 +188,27 @@ class AIPatchGenerator:
             return False
 
         return True
+
+    @staticmethod
+    def _semantic_delta(mainline_patch: str, generated_patch: str) -> Dict:
+        def _change_lines(diff: str, prefix: str) -> List[str]:
+            out = []
+            for line in (diff or "").splitlines():
+                if line.startswith(("+++", "---")):
+                    continue
+                if line.startswith(prefix):
+                    out.append(line[1:].strip())
+            return out
+
+        main_added = set(_change_lines(mainline_patch, "+"))
+        gen_added = set(_change_lines(generated_patch, "+"))
+        return {
+            "mainline_added_count": len(main_added),
+            "generated_added_count": len(gen_added),
+            "preserved_added_count": len(main_added & gen_added),
+            "missing_added_samples": sorted(main_added - gen_added)[:6],
+            "extra_added_samples": sorted(gen_added - main_added)[:6],
+        }
 
     def analyze_conflict_for_ai(self, conflict_hunks: List[Dict]) -> str:
         """
