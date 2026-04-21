@@ -15,7 +15,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from commands.validate import _prepare_batch_validate_json
 from core.output_serializers import aggregate_batch_validate_summary
 from services.history_loader import normalize_report
-from services.batch_xlsx import build_batch_validate_xlsx_rows, write_batch_validate_xlsx
+from services.batch_xlsx import (
+    build_batch_validate_ai_xlsx_rows,
+    build_batch_validate_xlsx_rows,
+    write_batch_validate_xlsx,
+)
 from services.reporting import prepare_analyze_json, prepare_validate_json
 from services.output_support import (
     build_repo_traceability,
@@ -299,6 +303,24 @@ class BatchXlsxRegressionTests(unittest.TestCase):
                     "deterministic_exact_match": True,
                 },
                 "validation_details": {
+                    "ai_evidence": {
+                        "enabled": True,
+                        "mode": "advisory",
+                        "provider": "glm",
+                        "model": "GLM-5",
+                        "tasks": [
+                            {
+                                "task": "low_signal_adjudication",
+                                "status": "success",
+                                "decision": "semantic_risk",
+                                "confidence": 0.72,
+                                "summary": "命中锁域风险，不能降级。",
+                                "evidence_lines": ["spin_lock(&ctx->lock)"],
+                                "used_for_final_decision": False,
+                            }
+                        ],
+                        "summary": ["命中锁域风险，不能降级。"],
+                    },
                     "strategy_buckets": {"dependency_bucket": "required"},
                     "special_risk_report": {
                         "summary": {
@@ -349,9 +371,22 @@ class BatchXlsxRegressionTests(unittest.TestCase):
         self.assertEqual(exact["是否升级"], "是")
         self.assertEqual(exact["升级路径"], "L0->L3")
         self.assertIn("prerequisite_required->L3", exact["升级规则"])
+        self.assertEqual(exact["AI启用"], "是")
+        self.assertIn("low_signal_adjudication", exact["AI任务"])
+        self.assertIn("semantic_risk", exact["AI结论"])
         self.assertEqual(failed["是否失败"], "是")
         self.assertEqual(acceptable["主补丁状态"], "本质相同")
         self.assertEqual(acceptable["是否失败"], "否")
+
+    def test_batch_xlsx_ai_rows_extract_task_details(self):
+        rows = build_batch_validate_ai_xlsx_rows(self._sample_results())
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["CVE"], "CVE-EXACT-UPGRADED")
+        self.assertEqual(rows[0]["AI模型"], "glm/GLM-5")
+        self.assertEqual(rows[0]["任务"], "low_signal_adjudication")
+        self.assertEqual(rows[0]["决策"], "semantic_risk")
+        self.assertEqual(rows[0]["置信度"], "0.72")
 
     def test_batch_xlsx_writer_creates_expected_workbook_parts(self):
         tmpdir = tempfile.mkdtemp(prefix="batch-xlsx-")
@@ -369,18 +404,23 @@ class BatchXlsxRegressionTests(unittest.TestCase):
                 names = set(zf.namelist())
                 self.assertIn("xl/workbook.xml", names)
                 self.assertIn("xl/worksheets/sheet1.xml", names)
+                self.assertIn("xl/worksheets/sheet3.xml", names)
                 self.assertIn("xl/worksheets/sheet5.xml", names)
                 workbook = zf.read("xl/workbook.xml").decode("utf-8")
                 detail = zf.read("xl/worksheets/sheet2.xml").decode("utf-8")
+                ai_detail = zf.read("xl/worksheets/sheet3.xml").decode("utf-8")
                 summary = zf.read("xl/worksheets/sheet1.xml").decode("utf-8")
             self.assertIn("总览", workbook)
             self.assertIn("全部明细", workbook)
+            self.assertIn("AI分析", workbook)
             self.assertIn("完全一致", workbook)
             self.assertIn("有升级", workbook)
             self.assertIn("失败", workbook)
             self.assertIn("CVE-EXACT-UPGRADED", detail)
             self.assertIn("CVE-FAILED", detail)
+            self.assertIn("low_signal_adjudication", ai_detail)
             self.assertIn("L0-&gt;L3", summary)
+            self.assertIn("AI任务数", summary)
         finally:
             shutil.rmtree(tmpdir)
 

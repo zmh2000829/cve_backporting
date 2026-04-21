@@ -44,7 +44,35 @@ DETAIL_HEADERS = [
     "直接回移状态",
     "关联补丁状态",
     "风险状态",
+    "AI启用",
+    "AI模式",
+    "AI模型",
+    "AI任务",
+    "AI结论",
+    "AI置信度",
+    "AI参与决策",
+    "AI摘要",
+    "AI补丁状态",
+    "AI补丁Apply",
+    "AI语义差异",
     "摘要/失败原因",
+]
+
+AI_TASK_HEADERS = [
+    "CVE",
+    "来源",
+    "AI模式",
+    "AI模型",
+    "任务",
+    "状态",
+    "决策",
+    "置信度",
+    "参与最终决策",
+    "摘要",
+    "证据行",
+    "目标文件",
+    "Apply方法",
+    "语义差异",
 ]
 
 _ILLEGAL_XML_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
@@ -148,6 +176,148 @@ def _extract_conclusion_statuses(result: dict) -> Tuple[str, str, str]:
     )
 
 
+def _as_list(value) -> List:
+    if not value:
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
+def _join_texts(value, *, limit: int = 6) -> str:
+    items = _as_list(value)
+    out = []
+    for item in items[:limit]:
+        if isinstance(item, dict):
+            out.append(", ".join(f"{k}={v}" for k, v in item.items() if v not in (None, "")))
+        else:
+            out.append(str(item))
+    return " | ".join(text for text in out if text)
+
+
+def _semantic_delta_text(delta: dict) -> str:
+    if not isinstance(delta, dict) or not delta:
+        return ""
+    parts = []
+    for key in ("mainline_added_count", "generated_added_count", "preserved_added_count"):
+        if key in delta:
+            parts.append(f"{key}={delta.get(key)}")
+    missing = delta.get("missing_added_samples") or []
+    extra = delta.get("extra_added_samples") or []
+    if missing:
+        parts.append("missing=" + _join_texts(missing, limit=3))
+    if extra:
+        parts.append("extra=" + _join_texts(extra, limit=3))
+    return "; ".join(parts)
+
+
+def _task_confidence(task: dict) -> str:
+    value = task.get("confidence")
+    if value in (None, ""):
+        return ""
+    try:
+        return f"{float(value):.2f}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _collect_ai_evidence(result: dict) -> List[Tuple[str, dict]]:
+    validation = result.get("validation_details") or {}
+    dryrun = result.get("dryrun_detail") or {}
+    candidates = [
+        ("validation", validation.get("ai_evidence") if isinstance(validation, dict) else {}),
+        ("dryrun", dryrun.get("ai_evidence") if isinstance(dryrun, dict) else {}),
+    ]
+    return [(source, evidence) for source, evidence in candidates if isinstance(evidence, dict) and evidence]
+
+
+def _ai_task_rows_for_result(result: dict) -> List[Dict]:
+    cve_id = result.get("cve_id", "")
+    rows = []
+    for source, evidence in _collect_ai_evidence(result):
+        mode = evidence.get("mode", "")
+        model = evidence.get("model", "")
+        provider = evidence.get("provider", "")
+        model_label = "/".join(item for item in (provider, model) if item)
+        for task in evidence.get("tasks", []) or []:
+            if not isinstance(task, dict):
+                continue
+            rows.append({
+                "CVE": cve_id,
+                "来源": source,
+                "AI模式": mode,
+                "AI模型": model_label,
+                "任务": task.get("task", ""),
+                "状态": task.get("status", ""),
+                "决策": task.get("decision", ""),
+                "置信度": _task_confidence(task),
+                "参与最终决策": _yes_no(bool(task.get("used_for_final_decision"))),
+                "摘要": task.get("summary", ""),
+                "证据行": _join_texts(task.get("evidence_lines")),
+                "目标文件": task.get("target_file", ""),
+                "Apply方法": task.get("apply_method", ""),
+                "语义差异": _semantic_delta_text(task.get("semantic_delta") or {}),
+            })
+    return rows
+
+
+def build_batch_validate_ai_xlsx_rows(results: Iterable[dict]) -> List[Dict]:
+    """Return one row per AI task for the dedicated AI worksheet."""
+    rows = []
+    for result in results or []:
+        if isinstance(result, dict):
+            rows.extend(_ai_task_rows_for_result(result))
+    return rows
+
+
+def _extract_ai_cells(result: dict) -> Dict[str, str]:
+    evidences = _collect_ai_evidence(result)
+    tasks = []
+    summaries = []
+    modes = []
+    models = []
+    for _source, evidence in evidences:
+        if evidence.get("mode"):
+            modes.append(str(evidence.get("mode")))
+        provider = evidence.get("provider", "")
+        model = evidence.get("model", "")
+        if provider or model:
+            models.append("/".join(item for item in (provider, model) if item))
+        summaries.extend(str(item) for item in _as_list(evidence.get("summary")) if item)
+        tasks.extend(task for task in (evidence.get("tasks", []) or []) if isinstance(task, dict))
+
+    task_names = [str(task.get("task", "")) for task in tasks if task.get("task")]
+    decisions = []
+    confidences = []
+    for task in tasks:
+        decision = task.get("decision") or task.get("status") or ""
+        if decision:
+            decisions.append(f"{task.get('task', 'task')}={decision}")
+        confidence = _task_confidence(task)
+        if confidence:
+            confidences.append(confidence)
+        if task.get("summary"):
+            summaries.append(str(task.get("summary")))
+
+    patch_tasks = [task for task in tasks if task.get("task") == "ai_patch_suggestion"]
+    patch_status = ", ".join(str(task.get("status", "")) for task in patch_tasks if task.get("status"))
+    patch_apply = ", ".join(str(task.get("apply_method", "")) for task in patch_tasks if task.get("apply_method"))
+    semantic = " | ".join(_semantic_delta_text(task.get("semantic_delta") or {}) for task in patch_tasks)
+    return {
+        "AI启用": _yes_no(bool(tasks or any(e.get("enabled") for _s, e in evidences))),
+        "AI模式": ", ".join(dict.fromkeys(modes)),
+        "AI模型": ", ".join(dict.fromkeys(models)),
+        "AI任务": ", ".join(dict.fromkeys(task_names)),
+        "AI结论": " | ".join(decisions[:8]),
+        "AI置信度": ", ".join(confidences[:8]),
+        "AI参与决策": _yes_no(any(bool(task.get("used_for_final_decision")) for task in tasks)),
+        "AI摘要": " | ".join(dict.fromkeys(summaries))[:1000],
+        "AI补丁状态": patch_status,
+        "AI补丁Apply": patch_apply,
+        "AI语义差异": semantic[:1000],
+    }
+
+
 def build_batch_validate_xlsx_rows(results: Iterable[dict]) -> List[Dict]:
     """Return normalized row dictionaries used by the XLSX exporter."""
     rows = []
@@ -171,6 +341,7 @@ def build_batch_validate_xlsx_rows(results: Iterable[dict]) -> List[Dict]:
         direct_status, prereq_status, risk_status = _extract_conclusion_statuses(result)
         upgrade_path = f"{base_level}->{current_level}" if base_level and current_level and promoted else ""
         upgrade_delta = level_rank(current_level) - level_rank(base_level) if promoted else 0
+        ai_cells = _extract_ai_cells(result)
         row = {
             "CVE": result.get("cve_id", ""),
             "主补丁状态": patch_status,
@@ -197,6 +368,7 @@ def build_batch_validate_xlsx_rows(results: Iterable[dict]) -> List[Dict]:
             "直接回移状态": direct_status,
             "关联补丁状态": prereq_status,
             "风险状态": risk_status,
+            **ai_cells,
             "摘要/失败原因": result.get("summary", "") or result_status.get("user_message", ""),
             "_is_exact": patch_status == "完全一致",
             "_is_promoted": promoted,
@@ -210,12 +382,21 @@ def _row_values(row: dict) -> List:
     return [row.get(header, "") for header in DETAIL_HEADERS]
 
 
-def _summary_rows(target: str, rows: List[Dict], batch_summary: Optional[dict], generated_at: str) -> List[List]:
+def _summary_rows(target: str, rows: List[Dict], batch_summary: Optional[dict], generated_at: str,
+                  ai_rows: Optional[List[Dict]] = None) -> List[List]:
     total = len(rows)
     exact = sum(1 for row in rows if row.get("_is_exact"))
     promoted = sum(1 for row in rows if row.get("_is_promoted"))
     failed = sum(1 for row in rows if row.get("_is_failed"))
     acceptable = sum(1 for row in rows if not row.get("_is_failed"))
+    ai_rows = ai_rows or []
+    ai_enabled = sum(1 for row in rows if row.get("AI启用") == "是")
+    ai_used = sum(1 for row in ai_rows if row.get("参与最终决策") == "是")
+    ai_patch_accepted = sum(
+        1 for row in ai_rows
+        if row.get("任务") == "ai_patch_suggestion"
+        and row.get("状态") == "accepted_by_apply_check"
+    )
     verdicts = Counter(row.get("补丁判定", "no_data") for row in rows)
     levels = Counter(row.get("最终级别", "") for row in rows if row.get("最终级别"))
 
@@ -228,6 +409,10 @@ def _summary_rows(target: str, rows: List[Dict], batch_summary: Optional[dict], 
         ["可接受补丁", acceptable, "补丁判定 in {identical, essentially_same}"],
         ["有升级", promoted, "最终级别高于 DryRun 基线级别"],
         ["失败", failed, "补丁判定不在可接受集合，或结果状态为 error"],
+        ["AI启用样本", ai_enabled, "存在 validation/dryrun ai_evidence 的 CVE 数"],
+        ["AI任务数", len(ai_rows), "AI分析工作表中的结构化 task 数"],
+        ["AI参与决策任务", ai_used, "通常只应出现在 ai_patch_suggestion 通过 apply check 的场景"],
+        ["AI补丁候选通过", ai_patch_accepted, "ai_patch_suggestion 被 apply check 接受的次数"],
     ]
     if total:
         summary.extend([
@@ -260,6 +445,10 @@ def _summary_rows(target: str, rows: List[Dict], batch_summary: Optional[dict], 
 
 def _detail_rows(rows: List[Dict]) -> List[List]:
     return [DETAIL_HEADERS] + [_row_values(row) for row in rows]
+
+
+def _ai_detail_rows(rows: List[Dict]) -> List[List]:
+    return [AI_TASK_HEADERS] + [[row.get(header, "") for header in AI_TASK_HEADERS] for row in rows]
 
 
 def _workbook_xml(sheet_names: List[str]) -> str:
@@ -501,15 +690,18 @@ def write_batch_validate_xlsx(path: str, results: Iterable[dict], target: str, *
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     generated_at = generated_at or datetime.now().astimezone().isoformat(timespec="seconds")
     created_utc = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-    rows = build_batch_validate_xlsx_rows(results)
+    result_list = list(results or [])
+    rows = build_batch_validate_xlsx_rows(result_list)
+    ai_rows = build_batch_validate_ai_xlsx_rows(result_list)
     exact_rows = [row for row in rows if row.get("_is_exact")]
     promoted_rows = [row for row in rows if row.get("_is_promoted")]
     failed_rows = [row for row in rows if row.get("_is_failed")]
 
     used_names = set()
     sheets = [
-        (_safe_sheet_name("总览", used_names), _summary_rows(target, rows, batch_summary, generated_at), None),
+        (_safe_sheet_name("总览", used_names), _summary_rows(target, rows, batch_summary, generated_at, ai_rows), None),
         (_safe_sheet_name("全部明细", used_names), _detail_rows(rows), _detail_row_styles(rows)),
+        (_safe_sheet_name("AI分析", used_names), _ai_detail_rows(ai_rows), None),
         (_safe_sheet_name("完全一致", used_names), _detail_rows(exact_rows), _detail_row_styles(exact_rows)),
         (_safe_sheet_name("有升级", used_names), _detail_rows(promoted_rows), _detail_row_styles(promoted_rows)),
         (_safe_sheet_name("失败", used_names), _detail_rows(failed_rows), _detail_row_styles(failed_rows)),

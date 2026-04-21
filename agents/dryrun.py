@@ -319,9 +319,12 @@ class DryRunAgent:
             "used_for_final_decision": False,
             "decision_guard": "AI 候选补丁必须通过 git apply --check；通过后仍按高风险候选处理",
         }
+        llm_client = getattr(self.ai_patch_generator, "llm_client", None)
         ai_evidence = {
             "enabled": True,
             "mode": getattr(self.ai_config, "mode", ""),
+            "provider": getattr(llm_client, "provider", "") if llm_client else "",
+            "model": getattr(llm_client, "model", "") if llm_client else "",
             "tasks": [task],
             "summary": [task.get("summary", "")] if task.get("summary") else [],
         }

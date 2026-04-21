@@ -85,6 +85,19 @@ def _make_git_mgr(config, tv: str) -> GitRepoManager:
     )
 
 
+def _ai_tasks_enabled(config) -> bool:
+    ai = getattr(config, "ai", None)
+    mode = str(getattr(ai, "mode", "off") or "off").lower()
+    if mode not in ("advisory", "gated"):
+        return False
+    return any(bool(getattr(ai, name, False)) for name in (
+        "enable_dependency_triage",
+        "enable_low_signal_adjudication",
+        "enable_risk_explainer",
+        "enable_conflict_patch_suggestion",
+    ))
+
+
 def _coerce_commit_list(values):
     """将配置/请求参数中的 commit 列表统一成标准 list[str]。"""
     if not values:
@@ -1760,7 +1773,7 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
             use_cache=False,
         )
         pipe = Pipeline(wt_mgr, path_mappings=config.path_mappings,
-                        llm_config=config.llm if deep else None,
+                        llm_config=config.llm if (deep or _ai_tasks_enabled(config)) else None,
                         policy_config=getattr(config, "policy", None),
                         analysis_config=getattr(config, "analysis", None),
                         search_config=getattr(config, "search", None),
