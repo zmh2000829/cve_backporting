@@ -171,9 +171,12 @@ class AIAssistant:
         input_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
         response = self.llm.chat_json(
             prompt,
-            system="你是 Linux 内核 CVE 回移审查助手。必须只返回 JSON。",
-            temperature=0.1,
-            max_tokens=min(1800, int(getattr(self.llm, "_max_tokens", 2000) or 2000)),
+            system=(
+                "你是 Linux 内核 CVE 回移审查助手。"
+                "必须只返回一个合法 JSON 对象，禁止 markdown、代码块、前后说明和多余文本。"
+            ),
+            temperature=0.0,
+            max_tokens=min(1200, int(getattr(self.llm, "_max_tokens", 2000) or 2000)),
         )
         base = {
             "task": task_name,
@@ -189,7 +192,8 @@ class AIAssistant:
                 "confidence": 0.0,
                 "summary": "AI 未返回可解析 JSON",
                 "evidence_lines": [],
-                "uncertainty_reason": "no_json_response",
+                "uncertainty_reason": getattr(self.llm, "last_json_error", "") or "no_json_response",
+                "raw_preview": getattr(self.llm, "last_json_preview", "")[:300],
             }
         return {
             **base,
@@ -207,18 +211,20 @@ class AIAssistant:
 
     def _build_json_prompt(self, *, task: str, instruction: str, payload: Dict[str, Any]) -> str:
         schema = {
-            "decision": "string",
-            "confidence": "number between 0 and 1",
-            "summary": "short Chinese explanation",
-            "evidence_lines": ["short quoted evidence from input"],
-            "uncertainty_reason": "string, empty when confident",
+            "decision": "one of expected_decisions",
+            "confidence": 0.0,
+            "summary": "不超过80个汉字的中文说明",
+            "evidence_lines": ["最多3条，每条不超过100字符"],
+            "uncertainty_reason": "不确定时填写，确定时为空字符串",
         }
         return "\n".join([
             f"任务: {task}",
             instruction,
-            "返回要求: 只返回一个 JSON 对象，不要 markdown，不要额外解释。",
+            "返回要求: 只返回一个紧凑 JSON 对象；不要 markdown；不要代码块；不要额外解释；不要复述输入 diff。",
             "JSON schema:",
             json.dumps(schema, ensure_ascii=False),
+            "合法返回示例:",
+            '{"decision":"uncertain","confidence":0.3,"summary":"证据不足，需人工复核。","evidence_lines":[],"uncertainty_reason":"缺少上下文"}',
             "输入:",
             json.dumps(payload, ensure_ascii=False),
         ])

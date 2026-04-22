@@ -8,6 +8,7 @@
 import json
 import logging
 import os
+import re
 import ssl
 import urllib.request
 from typing import Any, Dict, List, Optional
@@ -28,6 +29,8 @@ class LLMClient:
             self._max_tokens = 2000
             self._temperature = 0.3
             self._timeout = 60
+            self.last_json_preview = ""
+            self.last_json_error = ""
             return
 
         self.enabled = config.enabled
@@ -38,6 +41,8 @@ class LLMClient:
         self._max_tokens = config.max_tokens or 2000
         self._temperature = config.temperature if config.temperature is not None else 0.3
         self._timeout = config.timeout or 60
+        self.last_json_preview = ""
+        self.last_json_error = ""
 
         if self.enabled and not self._api_key:
             logger.warning("LLM 已启用但未配置 api_key，自动降级为确定性模式")
@@ -68,7 +73,8 @@ class LLMClient:
     def chat(self, prompt: str, *,
              system: str = "",
              temperature: Optional[float] = None,
-             max_tokens: Optional[int] = None) -> Optional[str]:
+             max_tokens: Optional[int] = None,
+             response_format: Optional[Dict[str, Any]] = None) -> Optional[str]:
         """
         发送聊天请求，返回文本回复。LLM 不可用时返回 None。
 
@@ -88,8 +94,9 @@ class LLMClient:
 
         try:
             return self._call(messages,
-                              temperature=temperature or self._temperature,
-                              max_tokens=max_tokens or self._max_tokens)
+                              temperature=self._temperature if temperature is None else temperature,
+                              max_tokens=self._max_tokens if max_tokens is None else max_tokens,
+                              response_format=response_format)
         except Exception as e:
             logger.error("LLM chat 失败: %s", e)
             return None
@@ -102,42 +109,41 @@ class LLMClient:
         发送聊天请求并解析 JSON 回复。LLM 不可用或解析失败时返回 None。
         prompt 中应明确要求返回 JSON 格式。
         """
-        raw = self.chat(prompt, system=system,
-                        temperature=temperature, max_tokens=max_tokens)
+        raw = self.chat(
+            prompt,
+            system=system,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_format={"type": "json_object"},
+        )
         if raw is None:
+            raw = self.chat(prompt, system=system,
+                            temperature=temperature, max_tokens=max_tokens)
+        if raw is None:
+            self.last_json_preview = ""
+            self.last_json_error = "empty_response"
             return None
 
-        text = raw.strip()
-        if text.startswith("```"):
-            lines = text.split("\n")
-            lines = lines[1:]  # remove opening ```json or ```
-            if lines and lines[-1].strip() == "```":
-                lines = lines[:-1]
-            text = "\n".join(lines)
-
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            obj_start = text.find("{")
-            obj_end = text.rfind("}")
-            if 0 <= obj_start < obj_end:
-                try:
-                    return json.loads(text[obj_start:obj_end + 1])
-                except json.JSONDecodeError:
-                    pass
+        parsed = self._parse_json_object(raw)
+        if parsed is None:
+            self.last_json_preview = raw.strip()[:500]
             logger.warning("LLM 返回的内容无法解析为 JSON (前 200 字符): %s",
-                           text[:200])
-            return None
+                           self.last_json_preview[:200])
+        return parsed
 
     def _call(self, messages: List[Dict[str, str]], *,
-              temperature: float, max_tokens: int) -> str:
+              temperature: float, max_tokens: int,
+              response_format: Optional[Dict[str, Any]] = None) -> str:
         url = f"{self._base_url}/chat/completions"
-        payload = json.dumps({
+        payload_data = {
             "model": self._model,
             "messages": messages,
             "max_tokens": max_tokens,
             "temperature": temperature,
-        }).encode("utf-8")
+        }
+        if response_format:
+            payload_data["response_format"] = response_format
+        payload = json.dumps(payload_data).encode("utf-8")
 
         headers = {
             "Content-Type": "application/json",
@@ -157,3 +163,57 @@ class LLMClient:
             content = choices[0].get("message", {}).get("content")
             return (content or "").strip()
         return ""
+
+    def _parse_json_object(self, raw: str) -> Optional[Dict[str, Any]]:
+        self.last_json_preview = ""
+        self.last_json_error = ""
+        text = (raw or "").strip().lstrip("\ufeff")
+        if not text:
+            self.last_json_error = "empty_text"
+            return None
+
+        candidates = [text]
+        candidates.extend(
+            match.group(1).strip()
+            for match in re.finditer(r"```(?:json)?\s*(.*?)```", text, re.DOTALL | re.IGNORECASE)
+        )
+        decoder = json.JSONDecoder()
+        parsed_objects = []
+
+        def _add_parsed(parsed, size: int):
+            if isinstance(parsed, dict):
+                parsed_objects.append((size, parsed))
+            elif isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
+                parsed_objects.append((size, parsed[0]))
+
+        for candidate in candidates:
+            normalized = re.sub(r",\s*([}\]])", r"\1", candidate.strip())
+            try:
+                parsed = json.loads(normalized)
+                _add_parsed(parsed, len(normalized))
+            except json.JSONDecodeError:
+                pass
+
+            for match in re.finditer(r"[{[]", normalized):
+                try:
+                    parsed, end = decoder.raw_decode(normalized[match.start():])
+                except json.JSONDecodeError:
+                    continue
+                _add_parsed(parsed, end)
+
+            obj_start = normalized.find("{")
+            obj_end = normalized.rfind("}")
+            if 0 <= obj_start < obj_end:
+                snippet = normalized[obj_start:obj_end + 1]
+                try:
+                    import ast
+                    parsed = ast.literal_eval(snippet)
+                    _add_parsed(parsed, len(snippet))
+                except (SyntaxError, ValueError):
+                    pass
+
+        if parsed_objects:
+            return max(parsed_objects, key=lambda item: item[0])[1]
+        self.last_json_error = "json_decode_failed"
+        self.last_json_preview = text[:500]
+        return None

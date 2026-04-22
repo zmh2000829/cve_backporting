@@ -61,6 +61,23 @@ diff --git a/foo.c b/foo.c
 ```"""
 
 
+class _JsonFallbackLLM(LLMClient):
+    def __init__(self):
+        super().__init__()
+        self.enabled = True
+        self._provider = "glm"
+        self._model = "GLM-5"
+        self._base_url = "http://glm5.local:8888/v1"
+        self._api_key = "test"
+        self.calls = []
+
+    def _call(self, messages, *, temperature, max_tokens, response_format=None):
+        self.calls.append(response_format)
+        if response_format:
+            raise RuntimeError("response_format unsupported")
+        return "```json\n{'decision':'uncertain','confidence':0.4,'summary':'ok','evidence_lines':[],}\n```"
+
+
 class AIEnhancementTests(unittest.TestCase):
     def test_glm_api_key_can_come_from_provider_specific_env(self):
         old = os.environ.get("GLM_API_KEY")
@@ -93,6 +110,32 @@ class AIEnhancementTests(unittest.TestCase):
         self.assertTrue(client.enabled)
         self.assertEqual(client.provider, "glm")
         self.assertEqual(client.model, "GLM-5")
+
+    def test_chat_json_tolerates_common_model_wrappers(self):
+        client = LLMClient()
+
+        parsed = client._parse_json_object(
+            "下面是结果：\n```json\n{\"decision\":\"likely_low_signal\",\"confidence\":0.8,\"summary\":\"ok\",\"evidence_lines\":[]}\n```\n请参考。"
+        )
+        self.assertEqual(parsed["decision"], "likely_low_signal")
+
+        parsed = client._parse_json_object(
+            "{'decision':'uncertain','confidence':0.2,'summary':'ok','evidence_lines':[],}"
+        )
+        self.assertEqual(parsed["decision"], "uncertain")
+
+        parsed = client._parse_json_object(
+            '{"decision":"attention","confidence":0.7,"summary":"ok","raw":{"nested":true}}'
+        )
+        self.assertEqual(parsed["decision"], "attention")
+
+    def test_chat_json_retries_without_response_format_when_provider_rejects_it(self):
+        client = _JsonFallbackLLM()
+        parsed = client.chat_json("return json", system="json only")
+
+        self.assertEqual(parsed["decision"], "uncertain")
+        self.assertEqual(client.calls[0], {"type": "json_object"})
+        self.assertIsNone(client.calls[1])
 
     def test_ai_assistant_outputs_advisory_evidence_without_changing_policy(self):
         diff = """diff --git a/foo.c b/foo.c
