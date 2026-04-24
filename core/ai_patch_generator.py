@@ -111,6 +111,21 @@ class AIPatchGenerator:
             f"  - Hunk {i+1}: {h.get('severity', 'L3')} - {h.get('reason', 'unknown')}"
             for i, h in enumerate(hunks_info[:5])  # 最多显示 5 个
         ])
+        context_pack = conflict_analysis.get("conflict_context_pack", []) or []
+        context_summary = "\n\n".join([
+            "\n".join([
+                f"### Context {i+1}: {item.get('file', target_file_path)}:{item.get('location', 0)}",
+                f"reason: {item.get('reason', '')}",
+                "patch expected:",
+                "\n".join(item.get("patch_expected", [])[:8]),
+                "patch added:",
+                "\n".join(item.get("patch_added", [])[:8]),
+                f"target context starts at line {item.get('target_context_start', 0)}:",
+                "\n".join(item.get("target_context", [])[:18]),
+            ])
+            for i, item in enumerate(context_pack[:5])
+            if isinstance(item, dict)
+        ])
 
         prompt = f"""
 ## 任务
@@ -136,6 +151,14 @@ class AIPatchGenerator:
 ## 冲突分析
 
 {hunk_summary}
+
+## 冲突上下文包
+
+以下内容是工具从目标仓冲突 hunk 周围截取的真实代码。优先基于这些上下文定位补丁落点，不要凭空创造目标代码。
+
+```text
+{context_summary[:6000]}
+```
 
 ## 要求
 

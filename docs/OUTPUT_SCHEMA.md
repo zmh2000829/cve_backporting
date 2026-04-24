@@ -159,6 +159,7 @@
 | `prompt_version` | prompt/schema 版本，便于回放 |
 | `tasks[]` | 每个 task 的结构化结果 |
 | `summary[]` | 面向人阅读的摘要 |
+| `confidence_calibration` | AI 结论与确定性证据的一致性校准；`status=conflict`、`severity=red` 表示需要优先人工复核 |
 
 `tasks[]` 常见字段：
 
@@ -169,9 +170,12 @@
 | `decision` | 模型给出的结构化建议 |
 | `confidence` | 0 到 1 的置信度 |
 | `evidence_lines` | 模型引用的输入证据行 |
+| `confidence_calibration` | 单个 task 的一致性校准结果 |
 | `used_for_final_decision` | 是否实际参与最终路径选择；分析类 task 默认 `false` |
 
 新增 `missing_intro_adjudication` task 用于解释无 introduced commit 时的代码形态探测证据。该 task 只消费 deterministic evidence，不会默认改写最终级别。
+
+`dependency_triage` 的候选输入会包含 `diff_summary`，用于展示候选补丁的文件数、增删行数量和代表性增删行，避免 AI 只根据字段/锁/状态点做裁决。
 
 ---
 
@@ -184,6 +188,7 @@ AI patch suggestion 的证据写入 `dryrun_detail.ai_evidence`。它只说明 A
 | `tasks[].semantic_delta` | AI patch 与上游 patch 的 `+` 行保留情况和差异样本 |
 | `tasks[].decision_guard` | 当前 AI 候选必须满足的确定性门禁 |
 | `tasks[].apply_method` | AI 候选通过的 apply check 方式，例如 `strict / ignore-ws / context-C1` |
+| `tasks[].conflict_context_pack` | DryRun 从冲突 hunk 周围截取的目标仓真实代码上下文，供 AI patch suggestion 定位落点 |
 
 如果最终 `dryrun_detail.apply_method = ai-generated`，调用方应把它视为高风险/L5 候选，而不是自动修复结论。
 

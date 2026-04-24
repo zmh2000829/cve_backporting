@@ -104,6 +104,31 @@ class DependencyAgent:
                 break
         return evidence[:limit]
 
+    def _summarize_candidate_diff(self, diff_text: str) -> Dict:
+        files = extract_files_from_diff(diff_text or "")
+        added = []
+        removed = []
+        for raw in (diff_text or "").splitlines():
+            if raw.startswith(("+++", "---")):
+                continue
+            if raw.startswith("+"):
+                body = raw[1:].strip()
+                if body:
+                    added.append(body)
+            elif raw.startswith("-"):
+                body = raw[1:].strip()
+                if body:
+                    removed.append(body)
+        return {
+            "files": files[:8],
+            "file_count": len(files),
+            "added_count": len(added),
+            "removed_count": len(removed),
+            "changed_line_count": len(added) + len(removed),
+            "added_samples": added[:5],
+            "removed_samples": removed[:5],
+        }
+
     def _derive_intro_verdict(self, intro_search: Optional[SearchResult]) -> str:
         if not intro_search:
             return "unknown"
@@ -279,6 +304,7 @@ class DependencyAgent:
             c_hunks = extract_hunks_from_diff(diff)
             c_funcs = set(extract_functions_from_diff(diff))
             c_markers = self._extract_semantic_markers(diff)
+            c_diff_summary = self._summarize_candidate_diff(diff)
 
             # 文件数过多的大重构 commit → 降权
             c_files = extract_files_from_diff(diff)
@@ -358,6 +384,7 @@ class DependencyAgent:
                     locks=shared_locks,
                     states=shared_states,
                 ),
+                diff_summary=c_diff_summary,
             )
             if grade == "weak":
                 weak_candidates.append(patch)
@@ -391,6 +418,7 @@ class DependencyAgent:
                 "shared_fields": p.shared_fields[:4],
                 "shared_lock_domains": p.shared_lock_domains[:4],
                 "shared_state_points": p.shared_state_points[:4],
+                "diff_summary": getattr(p, "diff_summary", {}),
             }
             for p in (prereqs + weak_candidates)[:MAX_EVIDENCE_SAMPLES]
             if p.shared_fields or p.shared_lock_domains or p.shared_state_points

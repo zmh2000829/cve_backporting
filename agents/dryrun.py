@@ -352,6 +352,7 @@ class DryRunAgent:
             "summary": report.get("summary", ""),
             "semantic_delta": report.get("semantic_delta", {}),
             "target_file": file_path,
+            "conflict_context_pack": (analysis or {}).get("conflict_context_pack", [])[:6],
             "used_for_final_decision": False,
             "decision_guard": "AI 候选补丁必须通过 git apply --check；通过后仍按高风险候选处理",
         }
@@ -1620,6 +1621,7 @@ class DryRunAgent:
         hunk_analyses = []
         adapted_parts = []
         any_l3 = False
+        conflict_context_pack = []
 
         for file_path, header_lines, hunks in parsed:
             resolved = self._resolve_file_path(file_path, repo_path)
@@ -1673,6 +1675,20 @@ class DryRunAgent:
                         file_offset = actual_start - expected_start
 
                     if change_pos is None:
+                        hint_idx = max((hint_line or 1) - 1, 0)
+                        pack_lo = max(0, hint_idx - 6)
+                        pack_hi = min(len(file_lines), hint_idx + 6)
+                        context_pack = {
+                            "file": file_path,
+                            "hunk_header": hunk_header,
+                            "location": hint_line or 0,
+                            "target_context_start": pack_lo + 1,
+                            "target_context": file_lines[pack_lo:pack_hi],
+                            "patch_expected": expected[:10],
+                            "patch_added": added[:10],
+                            "reason": "无法定位，按 hunk 行号提示截取目标上下文",
+                        }
+                        conflict_context_pack.append(context_pack)
                         hunk_analyses.append({
                             "file": file_path, "severity": "L3",
                             "reason": "无法在目标文件中定位对应代码区域",
@@ -1680,6 +1696,7 @@ class DryRunAgent:
                             "added": added[:8], "hint_line": hint_line,
                             "patch_ctx_before": ctx_before[:5],
                             "patch_ctx_after": ctx_after[:5],
+                            "conflict_context_pack": context_pack,
                         })
                         any_l3 = True
                         adapted_parts.append(hunk_header)
@@ -1705,6 +1722,23 @@ class DryRunAgent:
                     snippet_lo = max(0, change_pos - 3)
                     snippet_hi = min(len(file_lines),
                                      change_pos + n_remove + 3)
+                    pack_lo = max(0, change_pos - 8)
+                    pack_hi = min(len(file_lines), change_pos + max(n_remove, 1) + 8)
+                    context_pack = {
+                        "file": file_path,
+                        "hunk_header": hunk_header,
+                        "location": change_pos + 1,
+                        "target_context_start": pack_lo + 1,
+                        "target_context": file_lines[pack_lo:pack_hi],
+                        "target_actual_removed_region": actual[:12],
+                        "patch_expected": expected[:12],
+                        "patch_added": added[:12],
+                        "similarity": round(sim, 3),
+                        "severity": sev,
+                        "reason": reason,
+                    }
+                    if sev in ("L2", "L3"):
+                        conflict_context_pack.append(context_pack)
                     hunk_analyses.append({
                         "file": file_path, "severity": sev,
                         "similarity": round(sim, 3), "reason": reason,
@@ -1716,6 +1750,7 @@ class DryRunAgent:
                         "patch_ctx_after": ctx_after[:5],
                         "target_snippet":
                             file_lines[snippet_lo:snippet_hi][:12],
+                        "conflict_context_pack": context_pack if sev in ("L2", "L3") else {},
                     })
 
                     if sev != "L3":
@@ -1763,6 +1798,7 @@ class DryRunAgent:
         return {
             "hunks": hunk_analyses,
             "adapted_diff": adapted_diff,
+            "conflict_context_pack": conflict_context_pack[:10],
             "search_reports": []  # 暂时为空，后续可扩展
         }
 

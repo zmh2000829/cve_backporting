@@ -166,6 +166,7 @@ class PrerequisitePatch:
     shared_lock_domains: List[str] = field(default_factory=list)
     shared_state_points: List[str] = field(default_factory=list)
     evidence_lines: List[str] = field(default_factory=list)
+    diff_summary: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

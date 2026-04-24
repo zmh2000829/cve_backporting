@@ -68,6 +68,26 @@ class AIAssistant:
             for item in tasks
             if item.get("status") == "success"
         ][:6]
+        conflicts = [
+            item.get("confidence_calibration", {})
+            for item in tasks
+            if (item.get("confidence_calibration") or {}).get("status") == "conflict"
+        ]
+        if conflicts:
+            evidence["confidence_calibration"] = {
+                "status": "conflict",
+                "severity": "red",
+                "conflict_count": len(conflicts),
+                "messages": [item.get("message", "") for item in conflicts if item.get("message")][:6],
+            }
+            evidence["summary"].insert(0, f"AI 结论与确定性证据存在 {len(conflicts)} 处冲突，需人工优先复核。")
+        else:
+            evidence["confidence_calibration"] = {
+                "status": "aligned" if tasks else "not_run",
+                "severity": "normal",
+                "conflict_count": 0,
+                "messages": [],
+            }
         return evidence
 
     def _run_missing_intro_task(self, dependency_details) -> Optional[Dict[str, Any]]:
@@ -93,7 +113,16 @@ class AIAssistant:
                 "expected_decisions": ["vulnerable_like", "fixed_like", "uncertain"],
             },
         )
-        return self._run_task("missing_intro_adjudication", prompt)
+        task = self._run_task("missing_intro_adjudication", prompt)
+        return self._calibrate_task(
+            task,
+            deterministic={
+                "kind": "missing_intro",
+                "verdict": verdict,
+                "strategy": strategy,
+                "confidence": getattr(dependency_details, "intro_confidence", 0.0),
+            },
+        )
 
     def _new_evidence(self) -> Dict[str, Any]:
         return {
@@ -132,7 +161,16 @@ class AIAssistant:
                 "expected_decisions": ["semantic_risk", "likely_low_signal", "uncertain"],
             },
         )
-        return self._run_task("low_signal_adjudication", prompt)
+        task = self._run_task("low_signal_adjudication", prompt)
+        return self._calibrate_task(
+            task,
+            deterministic={
+                "kind": "low_signal",
+                "selected_rule_count": len(selected),
+                "high_rule_count": sum(1 for hit in selected if hit.get("severity") == "high"),
+                "changed_lines": changed_lines,
+            },
+        )
 
     def _run_dependency_task(self, prerequisite_patches, dependency_details) -> Optional[Dict[str, Any]]:
         prereqs = list(prerequisite_patches or [])
@@ -151,6 +189,7 @@ class AIAssistant:
                 "shared_lock_domains": list(getattr(item, "shared_lock_domains", []) or [])[:4],
                 "shared_state_points": list(getattr(item, "shared_state_points", []) or [])[:4],
                 "evidence_lines": list(getattr(item, "evidence_lines", []) or [])[:3],
+                "diff_summary": getattr(item, "diff_summary", {}) or {},
             })
         for sample in samples[:8]:
             if isinstance(sample, dict):
@@ -171,7 +210,16 @@ class AIAssistant:
                 "expected_decisions": ["required", "helpful", "background", "unrelated", "uncertain"],
             },
         )
-        return self._run_task("dependency_triage", prompt)
+        task = self._run_task("dependency_triage", prompt)
+        return self._calibrate_task(
+            task,
+            deterministic={
+                "kind": "dependency",
+                "strong": getattr(dependency_details, "strong_count", 0) if dependency_details else 0,
+                "medium": getattr(dependency_details, "medium_count", 0) if dependency_details else 0,
+                "weak": getattr(dependency_details, "weak_count", 0) if dependency_details else 0,
+            },
+        )
 
     def _run_risk_task(self, patch, validation_details, rule_hits: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         special = getattr(validation_details, "special_risk_report", {}) or {}
@@ -193,7 +241,86 @@ class AIAssistant:
                 "expected_decisions": ["high_risk", "attention", "likely_low_risk", "uncertain"],
             },
         )
-        return self._run_task("risk_semantic_explainer", prompt)
+        task = self._run_task("risk_semantic_explainer", prompt)
+        return self._calibrate_task(
+            task,
+            deterministic={
+                "kind": "risk",
+                "triggered_sections": sections,
+                "high_rule_count": sum(1 for hit in risk_hits if hit.get("severity") == "high"),
+                "warn_rule_count": sum(1 for hit in risk_hits if hit.get("severity") == "warn"),
+            },
+        )
+
+    def _calibrate_task(self, task: Optional[Dict[str, Any]], *, deterministic: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if not task:
+            return task
+        task["confidence_calibration"] = self._build_confidence_calibration(task, deterministic)
+        return task
+
+    def _build_confidence_calibration(self, task: Dict[str, Any], deterministic: Dict[str, Any]) -> Dict[str, Any]:
+        decision = str(task.get("decision") or "uncertain")
+        confidence = self._safe_confidence(task.get("confidence"))
+        kind = deterministic.get("kind", "")
+        conflict = False
+        message = ""
+
+        if confidence < 0.7 or task.get("status") != "success":
+            return {
+                "status": "unchecked",
+                "severity": "normal",
+                "message": "AI 置信度不足或任务未成功，不做冲突标红。",
+                "ai_decision": decision,
+                "ai_confidence": confidence,
+                "deterministic_evidence": deterministic,
+            }
+
+        if kind == "missing_intro":
+            expected = deterministic.get("verdict", "")
+            conflict = bool(expected and expected != "unknown" and decision != expected)
+            if conflict:
+                message = f"AI missing-intro={decision} 与确定性 patch_probe={expected} 不一致。"
+        elif kind == "dependency":
+            strong = int(deterministic.get("strong", 0) or 0)
+            medium = int(deterministic.get("medium", 0) or 0)
+            if strong > 0 and decision in {"background", "unrelated"}:
+                conflict = True
+                message = "AI 将 strong 依赖判为背景/无关，与确定性强依赖证据冲突。"
+            elif strong == 0 and medium == 0 and decision == "required":
+                conflict = True
+                message = "AI 判定 required，但确定性证据没有 strong/medium 依赖。"
+        elif kind == "risk":
+            high = int(deterministic.get("high_rule_count", 0) or 0)
+            sections = deterministic.get("triggered_sections", []) or []
+            if (high > 0 or sections) and decision == "likely_low_risk":
+                conflict = True
+                message = "AI 判定低风险，但确定性风险规则已命中高风险/专项风险。"
+            elif high == 0 and not sections and decision == "high_risk":
+                conflict = True
+                message = "AI 判定高风险，但确定性规则没有高风险或专项命中。"
+        elif kind == "low_signal":
+            high = int(deterministic.get("high_rule_count", 0) or 0)
+            if high > 0 and decision == "likely_low_signal":
+                conflict = True
+                message = "AI 判定低信号，但确定性规则存在 high severity 命中。"
+
+        if conflict:
+            return {
+                "status": "conflict",
+                "severity": "red",
+                "message": message,
+                "ai_decision": decision,
+                "ai_confidence": confidence,
+                "deterministic_evidence": deterministic,
+            }
+        return {
+            "status": "aligned",
+            "severity": "normal",
+            "message": "AI 结论与确定性证据未发现显著冲突。",
+            "ai_decision": decision,
+            "ai_confidence": confidence,
+            "deterministic_evidence": deterministic,
+        }
 
     def _run_task(self, task_name: str, prompt: str) -> Dict[str, Any]:
         start = time.time()

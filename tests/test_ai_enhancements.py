@@ -12,7 +12,7 @@ from core.ai_assistant import AIAssistant
 from core.ai_patch_generator import AIPatchGenerator
 from core.config import ConfigLoader
 from core.llm_client import LLMClient
-from core.models import DependencyAnalysisDetails, DryRunResult, PatchInfo
+from core.models import DependencyAnalysisDetails, DryRunResult, PatchInfo, PrerequisitePatch
 from core.policy_engine import PolicyEngine
 from core.config import AIConfig, PolicyConfig
 
@@ -197,18 +197,66 @@ class AIEnhancementTests(unittest.TestCase):
         self.assertTrue(any(t.get("task") == "missing_intro_adjudication" for t in evidence["tasks"]))
         self.assertFalse(any(t.get("used_for_final_decision") for t in evidence["tasks"]))
 
+    def test_ai_confidence_calibration_flags_dependency_conflict_and_diff_summary(self):
+        patch = PatchInfo(commit_id="deadbeef", subject="fix", diff_code="-old\n+new\n", modified_files=["foo.c"])
+        details = PolicyEngine(PolicyConfig(profile="default"), llm_enabled=False).evaluate(
+            patch,
+            DryRunResult(applies_cleanly=True, apply_method="strict"),
+            git_mgr=object(),
+            target_version="5.10",
+        )
+        fake_llm = _FakeLLM()
+        assistant = AIAssistant(
+            fake_llm,
+            AIConfig(mode="advisory", enable_dependency_triage=True),
+        )
+        evidence = assistant.enhance_accuracy(
+            patch=patch,
+            validation_details=details,
+            prerequisite_patches=[
+                PrerequisitePatch(
+                    commit_id="abc123",
+                    subject="prep",
+                    grade="strong",
+                    score=0.9,
+                    diff_summary={
+                        "changed_line_count": 2,
+                        "added_samples": ["new helper"],
+                        "removed_samples": ["old helper"],
+                    },
+                )
+            ],
+            dependency_details=DependencyAnalysisDetails(strong_count=1),
+        )
+        dep_task = next(t for t in evidence["tasks"] if t.get("task") == "dependency_triage")
+        self.assertEqual(dep_task["confidence_calibration"]["status"], "conflict")
+        self.assertEqual(evidence["confidence_calibration"]["severity"], "red")
+        self.assertIn("diff_summary", fake_llm.prompts[-1])
+
     def test_ai_patch_generator_uses_unified_llm_client_and_reports_delta(self):
         generator = AIPatchGenerator(_FakeLLM())
         report = generator.generate_patch_with_report(
             "diff --git a/foo.c b/foo.c\n--- a/foo.c\n+++ b/foo.c\n@@ -1,1 +1,1 @@\n-old();\n+new();\n",
             "old();\n",
-            {"hunks": [{"severity": "L4", "reason": "conflict"}]},
+            {
+                "hunks": [{"severity": "L4", "reason": "conflict"}],
+                "conflict_context_pack": [{
+                    "file": "foo.c",
+                    "location": 1,
+                    "target_context_start": 1,
+                    "target_context": ["old();"],
+                    "patch_expected": ["old();"],
+                    "patch_added": ["new();"],
+                    "reason": "context drift",
+                }],
+            },
             "foo.c",
         )
 
         self.assertEqual(report["status"], "success")
         self.assertIn("diff --git", report["patch"])
         self.assertGreaterEqual(report["semantic_delta"]["preserved_added_count"], 1)
+        self.assertIn("冲突上下文包", generator.llm_client.prompts[-1])
 
     def test_ai_generated_apply_method_stays_high_risk(self):
         diff = """diff --git a/foo.c b/foo.c

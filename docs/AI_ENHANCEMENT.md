@@ -91,9 +91,19 @@ AI 证据统一写入 `ai_evidence`：
         "confidence": 0.81,
         "summary": "普通条件变化，暂未看到锁或生命周期语义。",
         "evidence_lines": ["if (ctx->active)"],
+        "confidence_calibration": {
+          "status": "aligned",
+          "severity": "normal",
+          "message": "AI 结论与确定性证据未发现显著冲突。"
+        },
         "used_for_final_decision": false
       }
     ],
+    "confidence_calibration": {
+      "status": "aligned",
+      "severity": "normal",
+      "conflict_count": 0
+    },
     "summary": ["普通条件变化，暂未看到锁或生命周期语义。"]
   }
 }
@@ -106,6 +116,8 @@ AI 证据统一写入 `ai_evidence`：
 | `validation_details.ai_evidence` | 分析类 advisory task 的结构化结果 |
 | `dryrun_detail.ai_evidence` | AI patch suggestion 的生成、校验、拒绝或接受证据 |
 | `human_friendly_summary.key_evidence.AI辅助证据` | 面向人阅读的摘要 |
+
+如果 AI 高置信结论与确定性证据冲突，task 会输出 `confidence_calibration.status=conflict` 和 `severity=red`。例如 strong 前置依赖被 AI 判为 background，或 missing-intro 的 `patch_probe` 判为 `vulnerable_like` 但 AI 判为 `fixed_like`，都需要人工优先复核。该标红只改变证据展示，不默认改写最终 L0-L5。
 
 ---
 
