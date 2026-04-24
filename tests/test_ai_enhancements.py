@@ -12,7 +12,7 @@ from core.ai_assistant import AIAssistant
 from core.ai_patch_generator import AIPatchGenerator
 from core.config import ConfigLoader
 from core.llm_client import LLMClient
-from core.models import DryRunResult, PatchInfo
+from core.models import DependencyAnalysisDetails, DryRunResult, PatchInfo
 from core.policy_engine import PolicyEngine
 from core.config import AIConfig, PolicyConfig
 
@@ -173,6 +173,29 @@ class AIEnhancementTests(unittest.TestCase):
         self.assertTrue(evidence["tasks"])
         self.assertFalse(any(t.get("used_for_final_decision") for t in evidence["tasks"]))
         self.assertTrue(evidence["summary"])
+
+    def test_ai_assistant_runs_missing_intro_adjudication(self):
+        patch = PatchInfo(commit_id="deadbeef", subject="fix", diff_code="-old\n+new\n", modified_files=["foo.c"])
+        details = PolicyEngine(PolicyConfig(profile="default"), llm_enabled=False).evaluate(
+            patch,
+            DryRunResult(applies_cleanly=True, apply_method="strict"),
+            git_mgr=object(),
+            target_version="5.10",
+        )
+        assistant = AIAssistant(_FakeLLM(), AIConfig(mode="advisory"))
+        evidence = assistant.enhance_accuracy(
+            patch=patch,
+            validation_details=details,
+            prerequisite_patches=[],
+            dependency_details=DependencyAnalysisDetails(
+                intro_verdict="uncertain",
+                intro_strategy="missing_intro_patch_probe_uncertain_assume",
+                intro_confidence=0.25,
+                intro_evidence_summary={"removed_match_rate": 0.1, "added_match_rate": 0.1},
+            ),
+        )
+        self.assertTrue(any(t.get("task") == "missing_intro_adjudication" for t in evidence["tasks"]))
+        self.assertFalse(any(t.get("used_for_final_decision") for t in evidence["tasks"]))
 
     def test_ai_patch_generator_uses_unified_llm_client_and_reports_delta(self):
         generator = AIPatchGenerator(_FakeLLM())

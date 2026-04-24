@@ -104,6 +104,55 @@ class DependencyAgent:
                 break
         return evidence[:limit]
 
+    def _derive_intro_verdict(self, intro_search: Optional[SearchResult]) -> str:
+        if not intro_search:
+            return "unknown"
+        strategy = getattr(intro_search, "strategy", "") or ""
+        if getattr(intro_search, "target_commit", ""):
+            return "exact_intro"
+        candidates = list(getattr(intro_search, "candidates", []) or [])
+        first = candidates[0] if candidates and isinstance(candidates[0], dict) else {}
+        verdict = first.get("verdict")
+        if verdict:
+            return str(verdict)
+        if "fixed_like" in strategy:
+            return "fixed_like"
+        if "uncertain" in strategy or "no_signal" in strategy:
+            return "uncertain"
+        if "patch_probe" in strategy and getattr(intro_search, "found", False):
+            return "vulnerable_like"
+        return "unknown"
+
+    def _summarize_intro_evidence(self, intro_search: Optional[SearchResult]) -> Dict:
+        if not intro_search:
+            return {"summary": "未提供 introduced commit 证据", "verdict": "unknown"}
+        strategy = getattr(intro_search, "strategy", "") or ""
+        confidence = float(getattr(intro_search, "confidence", 0.0) or 0.0)
+        candidates = list(getattr(intro_search, "candidates", []) or [])
+        first = candidates[0] if candidates and isinstance(candidates[0], dict) else {}
+        verdict = self._derive_intro_verdict(intro_search)
+        if getattr(intro_search, "target_commit", ""):
+            summary = f"introduced commit 已定位: {intro_search.target_commit[:12]} via {strategy}"
+        elif "patch_probe" in strategy:
+            summary = (
+                f"未稳定定位 introduced commit，使用 fix patch 代码形态探测: "
+                f"{verdict}, confidence={confidence:.0%}"
+            )
+        else:
+            summary = f"introduced commit 搜索结果: {verdict}, strategy={strategy or 'none'}"
+        return {
+            "summary": summary,
+            "verdict": verdict,
+            "strategy": strategy,
+            "confidence": round(confidence, 3),
+            "files_checked": first.get("files_checked", 0),
+            "files_total": first.get("files_total", 0),
+            "removed_match_rate": first.get("removed_match_rate", 0.0),
+            "added_match_rate": first.get("added_match_rate", 0.0),
+            "removed_hunk_match_rate": first.get("removed_hunk_match_rate", 0.0),
+            "added_hunk_match_rate": first.get("added_hunk_match_rate", 0.0),
+        }
+
     def analyze(self, fix_patch: PatchInfo, cve_info: CveInfo,
                 target_version: str,
                 fix_search: Optional[SearchResult] = None,
@@ -142,6 +191,11 @@ class DependencyAgent:
         # 确定时间窗口起点
         after_ts = 0
         time_window_start = "仓库初始"
+        intro_strategy = getattr(intro_search, "strategy", "") if intro_search else ""
+        intro_confidence = float(getattr(intro_search, "confidence", 0.0) or 0.0) if intro_search else 0.0
+        intro_verdict = self._derive_intro_verdict(intro_search)
+        intro_summary = self._summarize_intro_evidence(intro_search)
+        has_concrete_intro = bool(intro_search and intro_search.target_commit)
         if intro_search and intro_search.target_commit:
             info = self.git_mgr.find_commit_by_id(intro_search.target_commit, target_version)
             if info and info.get("timestamp"):
@@ -183,6 +237,7 @@ class DependencyAgent:
                 dryrun_baseline_passed=False,
                 dryrun_method="",
                 analysis_narrative=[
+                    f"Step 0: 影响判断 — {intro_summary.get('summary', '')}",
                     "Step 1: 建候选集 — 在时间窗口内搜索修改同文件的 commit",
                     "  结果: 0 个候选 commit (无其他修改)",
                     "Step 2: 空集基线 DryRun — 不带任何前置补丁直接应用修复补丁",
@@ -195,6 +250,10 @@ class DependencyAgent:
                     "检查是否引入新 struct 字段或 API 变更（可能有隐性依赖）",
                     "验证关键路径编译和单测通过",
                 ],
+                intro_verdict=intro_verdict,
+                intro_strategy=intro_strategy,
+                intro_confidence=round(intro_confidence, 3),
+                intro_evidence_summary=intro_summary,
             )
             result["analysis_details"] = details
             result["recommendations"].append("时间窗口内无修改同文件的其他commit")
@@ -255,6 +314,11 @@ class DependencyAgent:
             direct_semantic = bool(direct_overlaps > 0 and (func_overlap or semantic_overlap))
             adjacent_semantic = bool(adjacent_overlaps > 0 and semantic_overlap)
             strong_semantic = bool(shared_locks or shared_states)
+            missing_intro_text_only = (
+                not has_concrete_intro
+                and not semantic_overlap
+                and len(func_overlap) <= 1
+            )
 
             if (
                 (direct_semantic and strong_semantic and score >= 0.45)
@@ -271,6 +335,8 @@ class DependencyAgent:
             ):
                 grade = "medium"
             else:
+                grade = "weak"
+            if missing_intro_text_only and grade in ("strong", "medium"):
                 grade = "weak"
 
             patch = PrerequisitePatch(
@@ -339,6 +405,7 @@ class DependencyAgent:
                 "不进入前置补丁阻塞集合"
             )
             narrative = [
+                f"Step 0: 影响判断 — {intro_summary.get('summary', '')}",
                 f"Step 1: 建候选集 — 在时间窗口内搜索修改同文件的 commit",
                 f"  结果: {len(intervening)} 个候选 commit",
                 f"Step 2: 依赖分级 — 按 hunk 重叠、函数交集和语义域交集分级",
@@ -360,6 +427,7 @@ class DependencyAgent:
             if evidence_parts:
                 reason += "；证据包含 " + " / ".join(evidence_parts)
             narrative = [
+                f"Step 0: 影响判断 — {intro_summary.get('summary', '')}",
                 f"Step 1: 建候选集 — 在时间窗口内搜索修改同文件的 commit",
                 f"  结果: {len(intervening)} 个候选 commit",
                 f"Step 2: 依赖分级 — 按 hunk 重叠、函数交集和语义域交集分级",
@@ -406,6 +474,10 @@ class DependencyAgent:
             ],
             semantic_overlap_summary=semantic_overlap_summary,
             prerequisite_evidence_samples=evidence_samples,
+            intro_verdict=intro_verdict,
+            intro_strategy=intro_strategy,
+            intro_confidence=round(intro_confidence, 3),
+            intro_evidence_summary=intro_summary,
         )
         result["analysis_details"] = details
 

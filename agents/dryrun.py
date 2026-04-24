@@ -98,10 +98,16 @@ class DryRunAgent:
         first_err = None
         for opts, label in _quick_levels:
             r = self._apply_check(mapped_diff, rp_path, opts)
+            failure_class = "" if r.applies_cleanly else self._classify_apply_failure(
+                r.error_output, mapped_diff)
+            detail = (r.error_output or "")[:180]
+            if failure_class:
+                detail = f"{failure_class}: {detail}"
             apply_attempts.append({
                 "method": label,
                 "success": "yes" if r.applies_cleanly else "no",
-                "detail": (r.error_output or "")[:180],
+                "detail": detail,
+                "failure_class": failure_class,
             })
             if first_err is None and not r.applies_cleanly:
                 first_err = r
@@ -136,6 +142,7 @@ class DryRunAgent:
                 "method": "verified-direct",
                 "success": "yes",
                 "detail": "in-memory verified regeneration",
+                "failure_class": "",
             }]
             r5.stat_output = self._get_stat(
                 mapped_diff, target_version) or ""
@@ -165,6 +172,7 @@ class DryRunAgent:
                         "method": f"regenerated/{l3_label}",
                         "success": "yes",
                         "detail": "context regenerated and checked",
+                        "failure_class": "",
                     }]
                     logger.info("[DryRun] 上下文重生成成功 [%s]: %s",
                                 l3_label, patch.commit_id[:12])
@@ -191,6 +199,7 @@ class DryRunAgent:
                         "method": f"regenerated-zero/{zc_label}",
                         "success": "yes",
                         "detail": "zero-context regenerated and checked",
+                        "failure_class": "",
                     }]
                     logger.info("[DryRun] L3.5 零上下文成功 [%s]: %s",
                                 zc_label, patch.commit_id[:12])
@@ -229,6 +238,7 @@ class DryRunAgent:
                         "method": f"conflict-adapted/{l4_label}",
                         "success": "yes",
                         "detail": "conflict-adapted patch checked",
+                        "failure_class": "",
                     }]
                     logger.info("[DryRun] 冲突适配成功 [%s]: %s",
                                 l4_label, patch.commit_id[:12])
@@ -272,6 +282,32 @@ class DryRunAgent:
                     patch.commit_id[:12], len(r0.conflicting_files),
                     len(r0.conflict_hunks))
         return r0
+
+    @staticmethod
+    def _classify_apply_failure(error_output: str, diff_text: str = "") -> str:
+        err = (error_output or "").lower()
+        if not err:
+            return "unknown_apply_failure"
+        if (
+            "no such file or directory" in err
+            or "can't find file to patch" in err
+            or "does not exist in index" in err
+            or "outside repository" in err
+        ):
+            return "path_mismatch"
+        if "patch is empty" in err or "reversed (or previously applied)" in err:
+            return "already_applied_or_fixed"
+        if "does not apply" in err or "patch failed" in err or "hunk #" in err:
+            if re.search(r"^-", diff_text or "", re.MULTILINE) and (
+                "does not match index" in err or "does not apply" in err
+            ):
+                return "delete_line_missing_or_context_drift"
+            return "context_drift"
+        if "conflict" in err or "with conflicts" in err:
+            return "semantic_conflict_suspected"
+        if "corrupt patch" in err or "unrecognized input" in err:
+            return "patch_format_error"
+        return "unknown_apply_failure"
 
     def _try_ai_patch_suggestion(self, mapped_diff: str, analysis: dict,
                                  repo_path: str, target_version: str,

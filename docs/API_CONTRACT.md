@@ -256,7 +256,7 @@
 | --- | --- | --- |
 | `result_status` | 是 | 当前结果状态，不允许靠空字段猜测 |
 | `analysis_framework` | 是 | 过程 / 证据 / 结论骨架 |
-| `intro_analysis` | 建议 | introduced commit 缺失或检测时的受影响判断证据；`missing_intro_patch_probe` 表示基于 fix patch 代码形态探测，不等于找到了真实 intro commit |
+| `intro_analysis` | 建议 | introduced commit 缺失或检测时的受影响判断证据；`missing_intro_patch_probe` 表示基于 fix patch 代码形态探测，不等于找到了真实 intro commit；`candidates[0].verdict` 可为 `vulnerable_like / fixed_like / uncertain` |
 | `l0_l5.current_level` | 是 | 最终执行通道 |
 | `l0_l5.base_level` | 是 | DryRun 基线级别 |
 | `validation_details.ai_evidence` | 可选 | GLM5/LLM advisory task 输出；未启用 AI 时为空 |

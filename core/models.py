@@ -230,6 +230,10 @@ class DependencyAnalysisDetails:
     manual_review_checklist: List[str] = field(default_factory=list)  # 人工审查清单
     semantic_overlap_summary: Dict[str, int] = field(default_factory=dict)
     prerequisite_evidence_samples: List[Dict[str, Any]] = field(default_factory=list)
+    intro_verdict: str = ""                    # vulnerable_like / fixed_like / uncertain / exact_intro
+    intro_strategy: str = ""                   # introduced_search strategy used for the verdict
+    intro_confidence: float = 0.0              # confidence of intro/patch-probe evidence
+    intro_evidence_summary: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

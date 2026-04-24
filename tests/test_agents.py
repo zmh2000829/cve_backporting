@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.config import ConfigLoader
 from core.git_manager import GitRepoManager
+from core.models import PatchInfo
 from agents.crawler import CrawlerAgent
 from agents.analysis import AnalysisAgent
 from agents.dependency import DependencyAgent
@@ -78,6 +79,66 @@ class AgentSmokeDiscoveryTests(unittest.TestCase):
 
         self.assertEqual(detect_report_mode(analyze_payload), "analyze")
         self.assertEqual(detect_report_mode(validate_payload), "validate")
+
+
+class MissingIntroProbeTests(unittest.TestCase):
+    def _pipeline_with_files(self, files):
+        class FakeGit:
+            def get_file_content(self, path, target):
+                return files.get(path)
+
+        pipe = Pipeline.__new__(Pipeline)
+        pipe.git_mgr = FakeGit()
+        pipe.analysis_config = {}
+        pipe.analysis = type("Analysis", (), {"path_mapper": None})()
+        return pipe
+
+    def test_missing_intro_probe_vulnerable_like_removed_lines(self):
+        diff = """diff --git a/foo.c b/foo.c
+--- a/foo.c
++++ b/foo.c
+@@ -1,4 +1,4 @@ static int f(struct ctx *ctx)
+-	if (ctx->old_state)
+-		return -EINVAL;
++	if (ctx->new_state)
++		return -EAGAIN;
+ 	return 0;
+"""
+        pipe = self._pipeline_with_files({"foo.c": "static int f(struct ctx *ctx)\n\tif (ctx->old_state)\n\t\treturn -EINVAL;\n\treturn 0;\n"})
+        sr = pipe._probe_missing_intro_by_fix_patch(PatchInfo("abc", diff_code=diff), "target")
+        self.assertTrue(sr.found)
+        self.assertEqual(sr.candidates[0]["verdict"], "vulnerable_like")
+        self.assertGreater(sr.candidates[0]["removed_hunk_match_rate"], 0)
+
+    def test_missing_intro_probe_fixed_like_added_lines(self):
+        diff = """diff --git a/foo.c b/foo.c
+--- a/foo.c
++++ b/foo.c
+@@ -1,4 +1,4 @@ static int f(struct ctx *ctx)
+-	if (ctx->old_state)
+-		return -EINVAL;
++	if (ctx->new_state)
++		return -EAGAIN;
+ 	return 0;
+"""
+        pipe = self._pipeline_with_files({"foo.c": "static int f(struct ctx *ctx)\n\tif (ctx->new_state)\n\t\treturn -EAGAIN;\n\treturn 0;\n"})
+        sr = pipe._probe_missing_intro_by_fix_patch(PatchInfo("abc", diff_code=diff), "target")
+        self.assertFalse(sr.found)
+        self.assertEqual(sr.candidates[0]["verdict"], "fixed_like")
+
+    def test_missing_intro_probe_ignores_low_signal_only_lines(self):
+        diff = """diff --git a/foo.c b/foo.c
+--- a/foo.c
++++ b/foo.c
+@@ -1,3 +1,3 @@
+-{
++}
+-	pr_info("old");
++	pr_info("new");
+"""
+        pipe = self._pipeline_with_files({"foo.c": "{\n}\n"})
+        sr = pipe._probe_missing_intro_by_fix_patch(PatchInfo("abc", diff_code=diff), "target")
+        self.assertEqual(sr.candidates[0]["verdict"], "uncertain")
 
 
 # ─── Tests ───────────────────────────────────────────────────────────
@@ -250,6 +311,10 @@ def test_full(cve_id: str, repo: str = None):
         "recommendations": result.recommendations,
     })
     return True
+
+
+for _script_helper in (test_analysis, test_dryrun, test_full):
+    _script_helper.__test__ = False
 
 
 # ─── CLI ─────────────────────────────────────────────────────────────

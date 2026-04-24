@@ -48,6 +48,10 @@ class AIAssistant:
             if task:
                 tasks.append(task)
 
+        task = self._run_missing_intro_task(dependency_details)
+        if task:
+            tasks.append(task)
+
         if bool(getattr(self.config, "enable_dependency_triage", False)):
             task = self._run_dependency_task(prerequisite_patches, dependency_details)
             if task:
@@ -65,6 +69,31 @@ class AIAssistant:
             if item.get("status") == "success"
         ][:6]
         return evidence
+
+    def _run_missing_intro_task(self, dependency_details) -> Optional[Dict[str, Any]]:
+        if not bool(getattr(self.config, "enable_missing_intro_adjudication", True)):
+            return None
+        if not dependency_details:
+            return None
+        verdict = str(getattr(dependency_details, "intro_verdict", "") or "")
+        strategy = str(getattr(dependency_details, "intro_strategy", "") or "")
+        if verdict not in {"vulnerable_like", "fixed_like", "uncertain"} and "patch_probe" not in strategy:
+            return None
+        prompt = self._build_json_prompt(
+            task="missing_intro_adjudication",
+            instruction=(
+                "判断缺少 introduced commit 时的 fix patch 形态探测证据是否支持继续回移。"
+                "只能基于输入中的 removed/added/context/hunk 命中率，不要引入外部事实。"
+            ),
+            payload={
+                "intro_verdict": verdict,
+                "intro_strategy": strategy,
+                "intro_confidence": getattr(dependency_details, "intro_confidence", 0.0),
+                "intro_evidence_summary": getattr(dependency_details, "intro_evidence_summary", {}) or {},
+                "expected_decisions": ["vulnerable_like", "fixed_like", "uncertain"],
+            },
+        )
+        return self._run_task("missing_intro_adjudication", prompt)
 
     def _new_evidence(self) -> Dict[str, Any]:
         return {

@@ -6,6 +6,7 @@ v2.0 扩展: --deep 模式触发深度分析 (Community/Vuln/PatchReview/RiskBen
 """
 
 import logging
+import re
 from collections import Counter
 from typing import Optional, Callable
 
@@ -140,7 +141,7 @@ class Pipeline:
 
     def _probe_missing_intro_by_fix_patch(self, patch: PatchInfo,
                                           target_version: str) -> SearchResult:
-        changes_by_file = self._extract_changed_lines_by_file(patch.diff_code or "")
+        hunk_evidence = self._extract_probe_hunks_by_file(patch.diff_code or "")
         min_len = int(self._analysis_cfg("missing_intro_min_changed_line_length", 4) or 4)
         min_removed = float(self._analysis_cfg(
             "missing_intro_min_removed_line_match", 0.30) or 0.30)
@@ -157,9 +158,16 @@ class Pipeline:
         total_added = matched_added = 0
         candidates = []
 
-        for file_path, changes in changes_by_file.items():
-            removed = self._filter_probe_lines(changes.get("removed", []), min_len)
-            added = self._filter_probe_lines(changes.get("added", []), min_len)
+        total_hunks = matched_removed_hunks = matched_added_hunks = 0
+        total_context = matched_context = 0
+
+        for file_path, hunks in hunk_evidence.items():
+            removed = self._filter_probe_lines(
+                [line for h in hunks for line in h.get("removed", [])], min_len)
+            added = self._filter_probe_lines(
+                [line for h in hunks for line in h.get("added", [])], min_len)
+            context = self._filter_probe_lines(
+                [line for h in hunks for line in h.get("context", [])], min_len)
             if not removed and not added:
                 continue
             total_files += 1
@@ -177,13 +185,23 @@ class Pipeline:
             target_lines = Counter(
                 line.strip() for line in content.splitlines() if line.strip()
             )
+            content_lines = [line.strip() for line in content.splitlines() if line.strip()]
             rm_match = self._count_probe_matches(removed, target_lines)
             add_match = self._count_probe_matches(added, target_lines)
+            ctx_match = self._count_probe_matches(context, target_lines)
+
+            hunk_total, hunk_removed, hunk_added = self._score_probe_hunks(
+                hunks, content_lines, min_len)
 
             total_removed += len(removed)
             matched_removed += rm_match
             total_added += len(added)
             matched_added += add_match
+            total_context += len(context)
+            matched_context += ctx_match
+            total_hunks += hunk_total
+            matched_removed_hunks += hunk_removed
+            matched_added_hunks += hunk_added
 
             candidates.append({
                 "file": resolved_path or file_path,
@@ -194,11 +212,37 @@ class Pipeline:
                 "added_lines": len(added),
                 "added_matched": add_match,
                 "added_match_rate": round(add_match / len(added), 3) if added else 0.0,
+                "context_lines": len(context),
+                "context_matched": ctx_match,
+                "context_match_rate": round(ctx_match / len(context), 3) if context else 0.0,
+                "hunks": hunk_total,
+                "removed_hunks_matched": hunk_removed,
+                "added_hunks_matched": hunk_added,
+                "removed_hunk_match_rate": round(hunk_removed / hunk_total, 3) if hunk_total else 0.0,
+                "added_hunk_match_rate": round(hunk_added / hunk_total, 3) if hunk_total else 0.0,
+                "function_hints": sorted(set(
+                    h.get("function_hint", "") for h in hunks if h.get("function_hint")
+                ))[:6],
             })
 
         file_coverage = covered_files / total_files if total_files else 0.0
         removed_rate = matched_removed / total_removed if total_removed else 0.0
         added_rate = matched_added / total_added if total_added else 0.0
+        context_rate = matched_context / total_context if total_context else 0.0
+        removed_hunk_rate = matched_removed_hunks / total_hunks if total_hunks else 0.0
+        added_hunk_rate = matched_added_hunks / total_hunks if total_hunks else 0.0
+
+        vulnerable_score = (
+            removed_rate * 0.45
+            + removed_hunk_rate * 0.30
+            + file_coverage * 0.15
+            + context_rate * 0.10
+        )
+        fixed_score = (
+            added_rate * 0.55
+            + added_hunk_rate * 0.30
+            + file_coverage * 0.15
+        )
 
         evidence = {
             "files_checked": covered_files,
@@ -206,6 +250,11 @@ class Pipeline:
             "file_coverage": round(file_coverage, 3),
             "removed_match_rate": round(removed_rate, 3),
             "added_match_rate": round(added_rate, 3),
+            "context_match_rate": round(context_rate, 3),
+            "removed_hunk_match_rate": round(removed_hunk_rate, 3),
+            "added_hunk_match_rate": round(added_hunk_rate, 3),
+            "vulnerable_score": round(vulnerable_score, 3),
+            "fixed_score": round(fixed_score, 3),
             "thresholds": {
                 "min_removed_line_match": min_removed,
                 "min_file_coverage": min_coverage,
@@ -219,21 +268,30 @@ class Pipeline:
             strategy = "missing_intro_patch_probe_uncertain_assume" if found else "missing_intro_patch_probe_no_signal"
             confidence = 0.0
             subject = "fix patch 中缺少可用于探测的有效变更行"
+            verdict = "uncertain"
         elif file_coverage >= min_coverage and removed_rate >= min_removed:
             found = True
             strategy = "missing_intro_patch_probe"
-            confidence = min(1.0, (removed_rate * 0.8) + (file_coverage * 0.2))
+            confidence = min(1.0, max(removed_rate, vulnerable_score))
             subject = "目标代码命中修复补丁 removed 行，保留修复前代码形态"
+            verdict = "vulnerable_like"
         elif file_coverage >= min_coverage and added_rate >= fixed_threshold and removed_rate < min_removed:
             found = False
             strategy = "missing_intro_patch_probe_fixed_like"
-            confidence = added_rate
+            confidence = min(1.0, max(added_rate, fixed_score))
             subject = "目标代码更接近修复后形态，未确认仍受影响"
+            verdict = "fixed_like"
         else:
             found = assume_uncertain
             strategy = "missing_intro_patch_probe_uncertain_assume" if found else "missing_intro_patch_probe_uncertain"
-            confidence = max(removed_rate, file_coverage * 0.5)
+            confidence = max(removed_rate, vulnerable_score, file_coverage * 0.5)
             subject = "补丁形态探测证据不足，按配置处理不确定状态"
+            verdict = "uncertain"
+        evidence["verdict"] = verdict
+        evidence["low_signal_filter"] = {
+            "min_changed_line_length": min_len,
+            "ignored_line_types": ["blank", "brace_only", "comment_only", "logging_only", "short_token"],
+        }
 
         return SearchResult(
             found=found,
@@ -242,6 +300,40 @@ class Pipeline:
             target_subject=subject,
             candidates=candidates,
         )
+
+    _LOG_ONLY_RE = re.compile(
+        r"^\s*(?:printk|pr_(?:debug|info|notice|warn|err)|"
+        r"dev_(?:dbg|info|warn|err)|netdev_(?:dbg|info|warn|err)|"
+        r"trace_[A-Za-z0-9_]+)\s*\("
+    )
+
+    @classmethod
+    def _is_low_signal_probe_line(cls, line: str, min_len: int) -> bool:
+        s = (line or "").strip()
+        if len(s) < min_len:
+            return True
+        if s in {"{", "}", "};", "(", ")"}:
+            return True
+        if re.match(r"^(?://|/\*|\*|\*/)", s):
+            return True
+        if cls._LOG_ONLY_RE.match(s):
+            return True
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*;?$", s) and len(s) < max(8, min_len + 2):
+            return True
+        return False
+
+    @classmethod
+    def _filter_probe_lines(cls, lines, min_len: int) -> list:
+        filtered = []
+        seen = Counter()
+        for line in lines:
+            s = (line or "").strip()
+            if cls._is_low_signal_probe_line(s, min_len):
+                continue
+            seen[s] += 1
+            if seen[s] <= 3:
+                filtered.append(s)
+        return filtered
 
     def _read_target_file_variant(self, file_path: str,
                                   target_version: str) -> tuple:
@@ -259,15 +351,6 @@ class Pipeline:
         return "", None
 
     @staticmethod
-    def _filter_probe_lines(lines, min_len: int) -> list:
-        filtered = []
-        for line in lines:
-            s = (line or "").strip()
-            if len(s) >= min_len:
-                filtered.append(s)
-        return filtered
-
-    @staticmethod
     def _count_probe_matches(lines, target_lines: Counter) -> int:
         bag = target_lines.copy()
         matched = 0
@@ -276,6 +359,81 @@ class Pipeline:
                 matched += 1
                 bag[line] -= 1
         return matched
+
+    @classmethod
+    def _score_probe_hunks(cls, hunks, content_lines, min_len: int) -> tuple:
+        line_set = set(content_lines or [])
+        total = removed_hit = added_hit = 0
+        for hunk in hunks or []:
+            removed = cls._filter_probe_lines(hunk.get("removed", []), min_len)
+            added = cls._filter_probe_lines(hunk.get("added", []), min_len)
+            if not removed and not added:
+                continue
+            total += 1
+            if removed and any(line in line_set for line in removed):
+                removed_hit += 1
+            if added and any(line in line_set for line in added):
+                added_hit += 1
+        return total, removed_hit, added_hit
+
+    @staticmethod
+    def _extract_function_hint_from_hunk(header: str) -> str:
+        text = (header or "").strip()
+        if "@@" in text:
+            text = text.split("@@", 2)[-1].strip()
+        m = re.search(r"([A-Za-z_]\w*)\s*\([^;]*\)", text)
+        if m:
+            return m.group(1)
+        return text[:80]
+
+    @classmethod
+    def _extract_probe_hunks_by_file(cls, diff_text: str) -> dict:
+        files = {}
+        current_file = ""
+        old_path = ""
+        current_hunk = None
+        for raw in (diff_text or "").splitlines():
+            if raw.startswith("diff --git "):
+                parts = raw.split()
+                old_path = parts[2][2:] if len(parts) >= 4 and parts[2].startswith("a/") else ""
+                current_file = parts[3][2:] if len(parts) >= 4 and parts[3].startswith("b/") else old_path
+                current_hunk = None
+                if current_file and current_file != "/dev/null":
+                    files.setdefault(current_file, [])
+                continue
+            if raw.startswith("--- "):
+                path = raw[4:].strip()
+                old_path = path[2:] if path.startswith("a/") else path
+                continue
+            if raw.startswith("+++ "):
+                path = raw[4:].strip()
+                new_path = path[2:] if path.startswith("b/") else path
+                current_file = old_path if new_path == "/dev/null" else new_path
+                current_hunk = None
+                if current_file and current_file != "/dev/null":
+                    files.setdefault(current_file, [])
+                continue
+            if not current_file or current_file == "/dev/null":
+                continue
+            if raw.startswith("@@"):
+                current_hunk = {
+                    "header": raw,
+                    "function_hint": cls._extract_function_hint_from_hunk(raw),
+                    "removed": [],
+                    "added": [],
+                    "context": [],
+                }
+                files.setdefault(current_file, []).append(current_hunk)
+                continue
+            if current_hunk is None:
+                continue
+            if raw.startswith("-") and not raw.startswith("---"):
+                current_hunk["removed"].append(raw[1:])
+            elif raw.startswith("+") and not raw.startswith("+++"):
+                current_hunk["added"].append(raw[1:])
+            elif raw.startswith(" "):
+                current_hunk["context"].append(raw[1:])
+        return files
 
     @staticmethod
     def _extract_changed_lines_by_file(diff_text: str) -> dict:
@@ -376,8 +534,31 @@ class Pipeline:
                 result.recommendations.append(
                     f"目标仓库包含漏洞引入commit ({result.introduced_search.target_commit[:12]})")
             else:
-                _cb("analysis_intro", "warn", "未找到, 可能不受影响")
-                result.recommendations.append("未找到漏洞引入commit, 可能不受影响(建议人工确认)")
+                probe = self._probe_missing_intro_by_fix_patch(fix_patch, target_version)
+                original_intro = result.introduced_search
+                if probe.found:
+                    probe.strategy = f"intro_search_failed_{probe.strategy}"
+                    probe.candidates.append({
+                        "original_intro_search": {
+                            "strategy": original_intro.strategy,
+                            "confidence": original_intro.confidence,
+                            "failure": original_intro.failure.__dict__ if original_intro.failure else {},
+                            "steps": [
+                                step.__dict__ for step in (original_intro.steps or [])
+                            ],
+                        },
+                        "note": "introduced commit 未能在目标仓定位；以下结论来自 fix patch 代码形态探测，不等同于命中真实 intro commit",
+                    })
+                    result.introduced_search = probe
+                    result.is_vulnerable = True
+                    _cb("analysis_intro", "warn",
+                        f"intro未命中，但补丁探测疑似受影响 ({probe.confidence:.0%})")
+                    result.recommendations.append(
+                        "未定位到漏洞引入commit；但目标仓命中修复补丁 removed 行，"
+                        "按疑似受影响继续回溯，需人工确认影响范围。")
+                else:
+                    _cb("analysis_intro", "warn", "未找到, 可能不受影响")
+                    result.recommendations.append("未找到漏洞引入commit, 可能不受影响(建议人工确认)")
         else:
             self._handle_missing_intro(fix_patch, target_version, result, _cb)
 

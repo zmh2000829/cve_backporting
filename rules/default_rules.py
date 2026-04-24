@@ -435,6 +435,36 @@ class IndependentPatchRule(PolicyRule):
         }
 
 
+class MissingIntroUncertainRule(PolicyRule):
+    rule_id = "missing_intro_uncertain"
+    name = "Missing Intro Uncertain"
+    severity = "warn"
+    rule_class = "low_level_veto"
+    rule_scope = "low_level"
+
+    def evaluate(self, ctx: RuleContext) -> Optional[Dict]:
+        details = getattr(ctx, "dependency_details", None)
+        if not details:
+            return None
+        verdict = getattr(details, "intro_verdict", "") or ""
+        strategy = getattr(details, "intro_strategy", "") or ""
+        if verdict != "uncertain" and "uncertain" not in strategy:
+            return None
+        return {
+            "rule_id": self.rule_id,
+            "name": self.name,
+            "severity": self.severity,
+            "level_floor": "L1",
+            "message": "缺少稳定 introduced commit，且 fix patch 形态探测不确定，禁止进入 L0 自动通道",
+            "evidence": {
+                "intro_verdict": verdict,
+                "intro_strategy": strategy,
+                "intro_confidence": getattr(details, "intro_confidence", 0.0),
+                "intro_evidence_summary": getattr(details, "intro_evidence_summary", {}),
+            },
+        }
+
+
 class DirectBackportRule(PolicyRule):
     rule_id = "direct_backport_candidate"
     name = "Direct Backport Candidate"
@@ -806,6 +836,7 @@ def register_rules(registry: RuleRegistry, config=None):
         registry.register(PrerequisiteRequiredRule())
         registry.register(PrerequisiteRecommendedRule())
         registry.register(IndependentPatchRule())
+        registry.register(MissingIntroUncertainRule())
 
     if not config or getattr(config, "direct_backport_rules_enabled", True):
         registry.register(DirectBackportRule(direct_line_threshold, direct_hunk_threshold))

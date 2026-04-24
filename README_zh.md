@@ -194,7 +194,7 @@ analysis:
   missing_intro_fixed_line_threshold: 0.70
 ```
 
-`patch_probe` 的判断逻辑是：目标分支命中修复补丁的 `- removed` 行，说明仍保留修复前代码形态，继续补丁回溯；目标分支高度命中 `+ added` 行且未命中 removed 行，说明更接近修复后形态，不再盲目判定受影响。该证据会写入 `intro_analysis`。
+`patch_probe` 的判断逻辑是：目标分支命中修复补丁的 `- removed` 行，说明仍保留修复前代码形态，继续补丁回溯；目标分支高度命中 `+ added` 行且未命中 removed 行，说明更接近修复后形态，不再盲目判定受影响。探测会按文件、hunk、上下文和函数提示聚合证据，并过滤空行、单独括号、注释、日志等低信息行，输出 `vulnerable_like / fixed_like / uncertain` 三类结论。该证据会写入 `intro_analysis`；`uncertain` 场景即使配置允许继续 DryRun，也不会进入 `L0` 自动通道。
 
 ### 4.4 首次构建缓存
 

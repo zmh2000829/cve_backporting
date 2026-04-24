@@ -626,6 +626,24 @@ int foo(void) {
         self.assertEqual(vd.level_decision.confidence, "low")
         self.assertEqual(vd.rule_version, "v2")
 
+    def test_missing_intro_uncertain_blocks_l0(self):
+        p = _patch("diff --git a/z.c b/z.c\n--- a/z.c\n+++ b/z.c\n@@ -1,1 +1,1 @@\n- old();\n+ new();\n", ["z.c"])
+        dr = DryRunResult(applies_cleanly=True, apply_method="strict")
+        dep = DependencyAnalysisDetails(
+            candidate_count=0,
+            strong_count=0,
+            medium_count=0,
+            weak_count=0,
+            intro_verdict="uncertain",
+            intro_strategy="missing_intro_patch_probe_uncertain_assume",
+            intro_confidence=0.2,
+        )
+        eng = PolicyEngine(PolicyConfig(profile="balanced"), llm_enabled=False)
+        vd = eng.evaluate(p, dr, _MockGit({}), "any", dependency_details=dep)
+        self.assertEqual(vd.level_decision.base_level, "L0")
+        self.assertEqual(vd.level_decision.level, "L1")
+        self.assertTrue(any(hit.get("rule_id") == "missing_intro_uncertain" for hit in vd.level_decision.rule_hits))
+
     def test_empty_patch_keeps_v2_schema_and_profile(self):
         eng = PolicyEngine(PolicyConfig(profile="conservative"), llm_enabled=False)
         vd = eng.evaluate(None, None, _MockGit({}), "any")

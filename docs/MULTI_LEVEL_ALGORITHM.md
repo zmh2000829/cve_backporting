@@ -37,7 +37,13 @@
 | L3 | Diff 级匹配 / 包含度 | squash、改 subject、合并提交 | 中等 |
 | missing-intro probe | fix patch 代码形态探测 | 上游没有 introduced commit，但有 fix patch | 启发式证据 |
 
-`missing-intro probe` 不会伪造 introduced commit。它只把 fix patch 的 removed/added 行与目标分支当前文件对比，输出 `intro_analysis`，用于判断是否继续后续依赖分析和 DryRun。
+`missing-intro probe` 不会伪造 introduced commit。它把 fix patch 的 removed/added/context 行按文件和 hunk 与目标分支当前文件对比，结合函数提示、hunk 命中率和文件覆盖率输出 `intro_analysis`，用于判断是否继续后续依赖分析和 DryRun。
+
+| verdict | 含义 | 后续处理 |
+| --- | --- | --- |
+| `vulnerable_like` | 目标代码命中修复补丁 removed 行或 removed hunk，仍像修复前代码 | 继续依赖分析和 DryRun |
+| `fixed_like` | 目标代码更像修复后 added 行，未确认仍受影响 | 不盲目回移，建议人工确认 |
+| `uncertain` | 证据不足或只有低信息行/文件缺失/混合命中 | 可按配置继续 DryRun，但最终至少进入人工复核，不允许 L0 自动通道 |
 
 ### 2.2 前置依赖算法
 
@@ -173,6 +179,7 @@ final_level = max(base_level, 所有命中规则给出的 level_floor)
 | `call_chain_propagation` | `L2/L4` | 风险沿调用链扩散 |
 | `large_change` | `L2` | patch/hunk 规模明显变大 |
 | `single_line_high_impact` | `L2/L3` | 单行修改但影响控制流或同步语义 |
+| `missing_intro_uncertain` | `L1` | 缺少稳定 introduced commit 且 patch_probe 不确定，阻止误入 L0 |
 
 逐条规则请看 `docs/RULEBOOK.md`。
 

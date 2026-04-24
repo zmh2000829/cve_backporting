@@ -62,6 +62,7 @@ ai:
 | Task | 触发输入 | 输出决策 | 当前用途 |
 | --- | --- | --- | --- |
 | `low_signal_adjudication` | diff、规则命中、变更行数 | `semantic_risk / likely_low_signal / uncertain` | 识别普通条件、字段、日志、rename 等误升级高发样本 |
+| `missing_intro_adjudication` | `missing_intro_patch_probe` 的文件/hunk/removed/added/context 证据 | `vulnerable_like / fixed_like / uncertain` | 解释无 introduced commit 时是否应继续回移，默认不改写最终级别 |
 | `dependency_triage` | strong/medium/weak 前置候选证据 | `required / helpful / background / unrelated / uncertain` | 帮助区分真正前置依赖和同文件历史噪声 |
 | `risk_semantic_explainer` | 风险规则、锁/生命周期/状态机/字段/错误路径命中 | `high_risk / attention / likely_low_risk / uncertain` | 给人工审查补充对象级解释 |
 | `ai_patch_suggestion` | 上游 diff、目标文件上下文、冲突分析 | unified diff 候选 | 仅在确定性路径失败且显式开启时兜底 |

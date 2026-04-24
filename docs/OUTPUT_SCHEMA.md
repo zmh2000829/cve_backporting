@@ -97,6 +97,10 @@
 | `candidates[0].file_coverage` | number | patch_probe 中可读取到的补丁涉及文件覆盖率 |
 | `candidates[0].removed_match_rate` | number | 目标分支命中修复前 removed 行的比例 |
 | `candidates[0].added_match_rate` | number | 目标分支命中修复后 added 行的比例 |
+| `candidates[0].removed_hunk_match_rate` | number | 目标分支命中修复前 hunk 的比例 |
+| `candidates[0].added_hunk_match_rate` | number | 目标分支命中修复后 hunk 的比例 |
+| `candidates[0].context_match_rate` | number | 目标分支命中上下文行的比例 |
+| `candidates[0].verdict` | string | `vulnerable_like / fixed_like / uncertain` |
 
 ### 5.2 读取口径
 
@@ -104,7 +108,7 @@
 | --- | --- |
 | `missing_intro_patch_probe` | 目标命中 removed 行，说明仍保留修复前代码形态，可继续回溯 |
 | `missing_intro_patch_probe_fixed_like` | 目标更接近修复后形态，不应盲目判定受影响 |
-| `missing_intro_patch_probe_uncertain_assume` | 证据不足，但配置允许在不确定时继续 |
+| `missing_intro_patch_probe_uncertain_assume` | 证据不足，但配置允许在不确定时继续；最终至少进入人工复核，不允许 L0 自动通道 |
 | `missing_intro_strict_unknown` | 配置要求不做受影响假设 |
 
 ---
@@ -166,6 +170,8 @@
 | `confidence` | 0 到 1 的置信度 |
 | `evidence_lines` | 模型引用的输入证据行 |
 | `used_for_final_decision` | 是否实际参与最终路径选择；分析类 task 默认 `false` |
+
+新增 `missing_intro_adjudication` task 用于解释无 introduced commit 时的代码形态探测证据。该 task 只消费 deterministic evidence，不会默认改写最终级别。
 
 ---
 
