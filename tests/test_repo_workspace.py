@@ -96,8 +96,9 @@ class RepoWorkspaceTests(unittest.TestCase):
 
     def test_manifest_includes_are_loaded_recursively(self):
         root = Path(tempfile.mkdtemp(dir=self.root))
-        (root / ".repo/manifests/android").mkdir(parents=True)
-        (root / ".repo/manifests/hisi").mkdir(parents=True)
+        (root / ".repo").mkdir(parents=True)
+        (root / "manifest_store/android").mkdir(parents=True)
+        (root / "manifest_store/hisi").mkdir(parents=True)
         (root / ".repo/manifest.xml").write_text(
             """<manifest>
   <default revision="main" remote="origin" />
@@ -107,14 +108,14 @@ class RepoWorkspaceTests(unittest.TestCase):
 """,
             encoding="utf-8",
         )
-        (root / ".repo/manifests/android/common.xml").write_text(
+        (root / "manifest_store/android/common.xml").write_text(
             """<manifest>
   <project name="platform/frameworks/base" path="frameworks/base" />
 </manifest>
 """,
             encoding="utf-8",
         )
-        (root / ".repo/manifests/hisi/system.xml").write_text(
+        (root / "manifest_store/hisi/system.xml").write_text(
             """<manifest>
   <project name="vendor/hisi/system" path="vendor/hisi/system" revision="dev" />
 </manifest>
@@ -122,7 +123,12 @@ class RepoWorkspaceTests(unittest.TestCase):
             encoding="utf-8",
         )
         mgr = GitRepoManager(
-            {"android-inc": {"type": "repo", "path": str(root), "manifest": ".repo/manifest.xml"}},
+            {"android-inc": {
+                "type": "repo",
+                "path": str(root),
+                "manifest": ".repo/manifest.xml",
+                "manifest_include_dirs": ["manifest_store"],
+            }},
             use_cache=False,
         )
 

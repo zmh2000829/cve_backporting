@@ -62,7 +62,17 @@ class GitRepoManager:
             return None
         cfg = self.repo_configs.get(rv) or {}
         manifest_path = cfg.get("manifest", ".repo/manifest.xml") if isinstance(cfg, dict) else ".repo/manifest.xml"
-        manifest = RepoManifest(root, manifest_path)
+        include_dirs = []
+        if isinstance(cfg, dict):
+            include_dirs = (
+                cfg.get("manifest_include_dirs")
+                or cfg.get("include_dirs")
+                or cfg.get("manifest_dirs")
+                or []
+            )
+            if isinstance(include_dirs, str):
+                include_dirs = [include_dirs]
+        manifest = RepoManifest(root, manifest_path, include_dirs=include_dirs)
         self._repo_manifests[rv] = manifest
         return manifest
 

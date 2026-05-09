@@ -168,10 +168,12 @@ repositories:
     type: "repo"
     path: "/path/to/aosp"
     manifest: ".repo/manifest.xml"
+    manifest_include_dirs:
+      - ".repo/manifests"
     branch: "HEAD"
 ```
 
-配置为 `type: repo` 后，工具会解析 `.repo/manifest.xml`，把 `frameworks/base/...`、`system/core/...`、`external/...` 等路径自动路由到对应 Git project。搜索、文件读取、同文件历史、DryRun 都会在子仓内执行；对 CLI/API 用户仍然只暴露 `target_version=android-14`。
+配置为 `type: repo` 后，工具会解析 `.repo/manifest.xml` 和其中的 `<include name="..."/>`。`manifest_include_dirs` 是可选项；未配置时默认查 `.repo/manifests` 和 `.repo/local_manifests`，你的 `/home/tangjing/platform/.repo/manifests/android/toolchain.xml` 这种布局可以直接支持。工具会把 `frameworks/base/...`、`system/core/...`、`external/...` 等路径自动路由到对应 Git project；搜索、文件读取、同文件历史、DryRun 都会在子仓内执行；对 CLI/API 用户仍然只暴露 `target_version=android-14`。
 
 如需启用 LLM：
 

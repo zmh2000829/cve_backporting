@@ -157,7 +157,7 @@ services/reporting.py
 
 | 能力 | repo workspace 处理 |
 | --- | --- |
-| manifest | `core/repo_workspace.py` 解析 `.repo/manifest.xml` 的 `project path/name/revision/remote` |
+| manifest | `core/repo_workspace.py` 解析 `.repo/manifest.xml` 及递归 `<include>` 的 `project path/name/revision/remote`；`manifest_include_dirs` 可配置 include 搜索根，默认查 `.repo/manifests` 和 `.repo/local_manifests` |
 | 文件读取 | `frameworks/base/foo.java` 路由到 `frameworks/base` 子仓后执行 `git show HEAD:foo.java` |
 | 同文件历史 | 先按文件路径定位 project，再在子仓内执行 `git log -- <relative-file>` |
 | commit diff | 在包含该 commit 的 project 中执行 `git show`，再把 diff 路径补回 workspace 前缀 |

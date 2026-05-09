@@ -27,12 +27,14 @@ class RepoProject:
 class RepoManifest:
     """Parsed view of a repo manifest."""
 
-    def __init__(self, root: str, manifest_path: str = ".repo/manifest.xml"):
+    def __init__(self, root: str, manifest_path: str = ".repo/manifest.xml",
+                 include_dirs: List[str] = None):
         self.root = os.path.abspath(root)
         self.manifest_path = (
             manifest_path if os.path.isabs(manifest_path)
             else os.path.join(self.root, manifest_path)
         )
+        self.include_dirs = self._normalize_include_dirs(include_dirs or [])
         self.projects: List[RepoProject] = []
         self._by_path: Dict[str, RepoProject] = {}
         self.include_errors: List[str] = []
@@ -99,15 +101,35 @@ class RepoManifest:
 
         return projects
 
+    def _normalize_include_dirs(self, include_dirs: List[str]) -> List[str]:
+        roots: List[str] = []
+        for item in include_dirs or []:
+            if not item:
+                continue
+            roots.append(item if os.path.isabs(item) else os.path.join(self.root, item))
+        # Generic repo defaults. They are appended after user config, so vendors
+        # can override or add alternate include roots without code changes.
+        roots.extend([
+            os.path.join(self.root, ".repo", "manifests"),
+            os.path.join(self.root, ".repo", "local_manifests"),
+        ])
+        seen = set()
+        out = []
+        for root in roots:
+            root = os.path.normpath(root)
+            if root not in seen:
+                seen.add(root)
+                out.append(root)
+        return out
+
     def _resolve_include(self, current_manifest: str, include_name: str) -> Optional[str]:
         if os.path.isabs(include_name) and os.path.exists(include_name):
             return include_name
         candidates = [
             os.path.join(os.path.dirname(current_manifest), include_name),
             os.path.join(os.path.dirname(os.path.realpath(current_manifest)), include_name),
-            os.path.join(self.root, ".repo", "manifests", include_name),
-            os.path.join(self.root, ".repo", "local_manifests", include_name),
         ]
+        candidates.extend(os.path.join(root, include_name) for root in self.include_dirs)
         for candidate in candidates:
             if os.path.exists(candidate):
                 return candidate

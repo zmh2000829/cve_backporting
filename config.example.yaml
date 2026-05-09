@@ -16,6 +16,9 @@ repositories:
   #   type: "repo"
   #   path: "/path/to/aosp"
   #   manifest: ".repo/manifest.xml"
+  #   # 可选：manifest include 的搜索根。未配置时默认查 .repo/manifests 和 .repo/local_manifests
+  #   manifest_include_dirs:
+  #     - ".repo/manifests"
   #   branch: "HEAD"
 
 # ─── 缓存 ────────────────────────────────────────────────────
