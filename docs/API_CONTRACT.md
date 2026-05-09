@@ -111,7 +111,7 @@
 | `deep` | 否 | 是否追加深度分析 |
 | `enable_p2` / `disable_p2` | 否 | 是否启用专项高风险规则 |
 
-如果未传 `mainline_intro`，且上游 CVE 也没有 introduced commit，服务端按配置文件中的 `analysis.missing_intro_policy` 处理。默认 `patch_probe` 会使用 fix patch 的 removed/added 行探测目标代码形态，并把证据写入响应的 `intro_analysis`。
+如果未传 `mainline_intro`，且上游 CVE 也没有 introduced commit，服务端按配置文件中的 `analysis.missing_intro_policy` 处理。默认 `patch_probe` 会使用 fix patch 的 removed/added 行和 hunk 探测目标代码形态，并把证据写入响应的 `intro_analysis`。`vulnerable_like` 会继续依赖分析和 DryRun；`fixed_like` 默认不继续生产回移补丁；`uncertain` 可按配置继续，但不会进入 L0 自动通道。
 
 ### 4.2 最小请求模板
 

@@ -54,6 +54,7 @@ class AIConfig:
     max_candidates_for_rerank: int = 20
     max_diff_chars: int = 12000
     enable_search_rerank: bool = False
+    enable_missing_intro_adjudication: bool = True
     enable_dependency_triage: bool = False
     enable_low_signal_adjudication: bool = False
     enable_risk_explainer: bool = False
@@ -72,12 +73,18 @@ class AnalysisConfig:
     missing_intro_assume_on_uncertain: bool = True
     # 判断目标仍保留修复前代码所需的 removed 行命中率
     missing_intro_min_removed_line_match: float = 0.30
+    # 判断目标仍保留修复前代码所需的 removed hunk 命中率
+    missing_intro_min_removed_hunk_match: float = 0.30
     # 判断有效探测所需的目标文件覆盖率
     missing_intro_min_file_coverage: float = 0.50
     # added 行高度命中且 removed 行不命中时，认为目标可能已有等价修复
     missing_intro_fixed_line_threshold: float = 0.70
+    # added hunk 高度命中且 removed hunk 不命中时，认为目标可能已有等价修复
+    missing_intro_fixed_hunk_threshold: float = 0.60
     # 过滤过短的噪声变更行，如单独的 "}" / "};"
     missing_intro_min_changed_line_length: int = 4
+    # fixed_like 时是否仍继续依赖分析和 DryRun；默认不生产补丁
+    missing_intro_continue_on_fixed_like: bool = False
 
 
 SEARCH_PROFILE_PRESETS: Dict[str, Dict[str, Any]] = {
@@ -226,6 +233,7 @@ class ConfigLoader:
                         "max_candidates_for_rerank",
                         "max_diff_chars",
                         "enable_search_rerank",
+                        "enable_missing_intro_adjudication",
                         "enable_dependency_triage",
                         "enable_low_signal_adjudication",
                         "enable_risk_explainer",
@@ -239,9 +247,12 @@ class ConfigLoader:
                         "missing_intro_policy",
                         "missing_intro_assume_on_uncertain",
                         "missing_intro_min_removed_line_match",
+                        "missing_intro_min_removed_hunk_match",
                         "missing_intro_min_file_coverage",
                         "missing_intro_fixed_line_threshold",
+                        "missing_intro_fixed_hunk_threshold",
                         "missing_intro_min_changed_line_length",
+                        "missing_intro_continue_on_fixed_like",
                     )
                 })
             if "search" in data and isinstance(data["search"], dict):

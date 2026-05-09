@@ -44,6 +44,7 @@ ai:
   max_candidates_for_rerank: 20
   max_diff_chars: 12000
   enable_search_rerank: false
+  enable_missing_intro_adjudication: true
   enable_dependency_triage: false
   enable_low_signal_adjudication: false
   enable_risk_explainer: false
@@ -60,12 +61,18 @@ analysis:
   missing_intro_assume_on_uncertain: true
   # 目标文件中命中多少 removed 行，认为仍保留修复前代码形态
   missing_intro_min_removed_line_match: 0.30
+  # 目标文件中命中多少 removed hunk，认为仍保留修复前代码形态
+  missing_intro_min_removed_hunk_match: 0.30
   # 至少有多少补丁涉及文件能在目标分支中找到，探测结果才可信
   missing_intro_min_file_coverage: 0.50
   # added 行高度命中且 removed 行不命中时，认为目标更接近修复后形态
   missing_intro_fixed_line_threshold: 0.70
+  # added hunk 高度命中且 removed hunk 不命中时，认为目标更接近修复后形态
+  missing_intro_fixed_hunk_threshold: 0.60
   # 过滤过短噪声变更行，如单独的 "}" / "};"
   missing_intro_min_changed_line_length: 4
+  # fixed_like 表示目标代码已接近修复后形态，默认不继续生产回移补丁
+  missing_intro_continue_on_fixed_like: false
 
 # ─── Commit 搜索策略 ─────────────────────────────────────────
 search:

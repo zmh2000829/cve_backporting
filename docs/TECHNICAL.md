@@ -78,7 +78,7 @@ services/reporting.py
 
 | 策略 | 行为 | 适用场景 |
 | --- | --- | --- |
-| `patch_probe` | 解析 fix patch 的 removed/added 行，读取目标分支对应文件，计算文件覆盖率、removed 命中率、added 命中率 | 默认策略。适合只有 fix、没有 intro 的上游情报 |
+| `patch_probe` | 解析 fix patch 的 removed/added/context 行，读取目标分支对应文件，计算文件覆盖率、行命中率、hunk 命中率和函数提示 | 默认策略。适合只有 fix、没有 intro 的上游情报 |
 | `assume_vulnerable` | 保持旧行为：无 intro 时直接按受影响继续依赖分析和 DryRun | 内部流程倾向“宁可多回溯，不漏补丁” |
 | `strict_unknown` | 不做受影响假设，输出需人工确认 | 高保守流程，不希望自动推进低证据补丁 |
 
@@ -86,11 +86,13 @@ services/reporting.py
 
 | 条件 | 结论 |
 | --- | --- |
-| `file_coverage >= missing_intro_min_file_coverage` 且 `removed_match_rate >= missing_intro_min_removed_line_match` | 目标仍保留修复前代码形态，按受影响继续补丁回溯 |
-| `added_match_rate >= missing_intro_fixed_line_threshold` 且 removed 未命中 | 目标更接近修复后形态，不再盲目判定受影响 |
-| 探测信号不足 | 由 `missing_intro_assume_on_uncertain` 决定是否继续 |
+| `file_coverage >= missing_intro_min_file_coverage` 且 removed 行或 removed hunk 命中阈值 | 目标仍保留修复前代码形态，输出 `vulnerable_like` 并继续补丁回溯 |
+| added 行或 added hunk 高度命中，且 removed 行/hunk 未命中 | 目标更接近修复后形态，输出 `fixed_like`；默认不继续生产回移补丁 |
+| 探测信号不足 | 输出 `uncertain`，由 `missing_intro_assume_on_uncertain` 决定是否继续；规则层阻止其进入 L0 自动通道 |
 
-探测证据会进入 `SearchResult.candidates`，并在 JSON 中暴露为 `intro_analysis`。
+探测证据会进入 `SearchResult.candidates`，并在 JSON 中暴露为 `intro_analysis`。低信息行如空行、单独括号、注释、日志会被过滤，避免无 intro 场景误判受影响。
+
+默认通用策略适合 Android 等只披露修复 commit 的开源项目：`vulnerable_like` 才进入依赖分析和 DryRun；`fixed_like` 默认停止补丁生产；`uncertain` 可按配置继续，但最终至少需要人工复核。
 
 ### 2.4 深度分析流
 
@@ -238,9 +240,10 @@ services/reporting.py
 | Task | 输入 | 输出 | 边界 |
 | --- | --- | --- | --- |
 | `low_signal_adjudication` | diff、规则命中、变更规模 | 是否可能为低信号误升级 | advisory，不直接降级 |
-| `dependency_triage` | strong/medium/weak 前置候选证据 | `required/helpful/background/unrelated` | 不把 weak 自动升为 required |
+| `missing_intro_adjudication` | `patch_probe` 的文件/hunk/removed/added/context 证据 | `vulnerable_like/fixed_like/uncertain` | 不伪造 introduced commit |
+| `dependency_triage` | strong/medium/weak 前置候选证据和候选 `diff_summary` | `required/helpful/background/unrelated` | 不把 weak 自动升为 required |
 | `risk_semantic_explainer` | 风险规则和专项命中 | 风险对象和人工核对重点 | 不凭空创建高风险 |
-| `ai_patch_suggestion` | 上游 diff、目标文件上下文、冲突分析 | unified diff 候选 | 必须通过 `git apply --check`，仍为高风险 |
+| `ai_patch_suggestion` | 上游 diff、目标文件上下文、冲突分析和 `conflict_context_pack` | unified diff 候选 | 必须通过 `git apply --check`，仍为高风险 |
 
 必须强调：
 
@@ -248,6 +251,7 @@ services/reporting.py
 | --- | --- |
 | 搜索、依赖、DryRun、分级、validate、batch 统计都不依赖 LLM | 核心链路必须可复现、可验证、可审计 |
 | 分析类 AI task 默认只写证据 | `used_for_final_decision=false`，便于审计和 batch 校准 |
+| `confidence_calibration` 只做冲突标红 | 高置信 AI 结论与确定性证据不一致时输出 `severity=red`，提示人工优先复核 |
 | `ai-generated` 只是 DryRun 兜底候选 | 它通过 apply check 后仍按 L5/人工审批通道处理 |
 
 ---

@@ -42,7 +42,7 @@
 | verdict | 含义 | 后续处理 |
 | --- | --- | --- |
 | `vulnerable_like` | 目标代码命中修复补丁 removed 行或 removed hunk，仍像修复前代码 | 继续依赖分析和 DryRun |
-| `fixed_like` | 目标代码更像修复后 added 行，未确认仍受影响 | 不盲目回移，建议人工确认 |
+| `fixed_like` | 目标代码更像修复后 added 行或 added hunk，未确认仍受影响 | 默认停止补丁生产，建议人工确认是否已有等价修复 |
 | `uncertain` | 证据不足或只有低信息行/文件缺失/混合命中 | 可按配置继续 DryRun，但最终至少进入人工复核，不允许 L0 自动通道 |
 
 ### 2.2 前置依赖算法

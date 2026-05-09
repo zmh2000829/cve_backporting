@@ -263,11 +263,13 @@ DryRun 主链路本身默认是确定性的。
 | 字段 | 含义 |
 | --- | --- |
 | `dryrun_detail.apply_method` | 最终成功或最接近成功的内部方法 |
-| `dryrun_detail.apply_attempts` | 依次尝试过哪些路径，以及是否成功 |
+| `dryrun_detail.apply_attempts` | 依次尝试过哪些路径、是否成功，以及失败分类 `failure_class` |
 | `adapted_patch` | 供后续对比或落地的 patch 文本 |
 | `search_reports` | 冲突/定位阶段的搜索证据 |
-| `dryrun_detail.ai_evidence` | AI 候选补丁的生成、拒绝、接受和语义差异摘要 |
+| `dryrun_detail.ai_evidence` | AI 候选补丁的生成、拒绝、接受、语义差异摘要和 `conflict_context_pack` |
 | `generated_vs_real` | validate 场景下与真实修复的对比结果 |
+
+`failure_class` 用来快速区分失败原因，例如 `path_mismatch`、`context_drift`、`delete_line_missing_or_context_drift`、`already_applied_or_fixed`、`semantic_conflict_suspected`。当开启 AI patch suggestion 时，DryRun 会把冲突 hunk 周围的目标仓真实代码打包成 `conflict_context_pack` 给模型，避免模型只凭上游 diff 猜测落点。
 
 ---
 

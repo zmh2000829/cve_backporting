@@ -38,6 +38,7 @@ ai:
   prompt_version: "ai-v1"
   max_candidates_for_rerank: 20
   max_diff_chars: 12000
+  enable_missing_intro_adjudication: true
   enable_dependency_triage: true
   enable_low_signal_adjudication: true
   enable_risk_explainer: true
@@ -53,6 +54,7 @@ ai:
 | `ai.mode=off` | 完全关闭 AI task |
 | `ai.mode=advisory` | 运行 AI task，但分析类 task 只写入 `ai_evidence` |
 | `ai.mode=gated` | 预留给经过 batch validate 校准后的门控模式 |
+| `enable_missing_intro_adjudication` | 是否让 AI 解释无 introduced commit 时的 `patch_probe` 证据 |
 | `enable_conflict_patch_suggestion` | 是否允许 DryRun 失败后调用 AI 生成候选补丁 |
 
 ---
@@ -63,7 +65,7 @@ ai:
 | --- | --- | --- | --- |
 | `low_signal_adjudication` | diff、规则命中、变更行数 | `semantic_risk / likely_low_signal / uncertain` | 识别普通条件、字段、日志、rename 等误升级高发样本 |
 | `missing_intro_adjudication` | `missing_intro_patch_probe` 的文件/hunk/removed/added/context 证据 | `vulnerable_like / fixed_like / uncertain` | 解释无 introduced commit 时是否应继续回移，默认不改写最终级别 |
-| `dependency_triage` | strong/medium/weak 前置候选证据 | `required / helpful / background / unrelated / uncertain` | 帮助区分真正前置依赖和同文件历史噪声 |
+| `dependency_triage` | strong/medium/weak 前置候选证据和候选 `diff_summary` | `required / helpful / background / unrelated / uncertain` | 帮助区分真正前置依赖和同文件历史噪声 |
 | `risk_semantic_explainer` | 风险规则、锁/生命周期/状态机/字段/错误路径命中 | `high_risk / attention / likely_low_risk / uncertain` | 给人工审查补充对象级解释 |
 | `ai_patch_suggestion` | 上游 diff、目标文件上下文、冲突分析 | unified diff 候选 | 仅在确定性路径失败且显式开启时兜底 |
 
@@ -119,6 +121,8 @@ AI 证据统一写入 `ai_evidence`：
 
 如果 AI 高置信结论与确定性证据冲突，task 会输出 `confidence_calibration.status=conflict` 和 `severity=red`。例如 strong 前置依赖被 AI 判为 background，或 missing-intro 的 `patch_probe` 判为 `vulnerable_like` 但 AI 判为 `fixed_like`，都需要人工优先复核。该标红只改变证据展示，不默认改写最终 L0-L5。
 
+`dependency_triage` 的输入包含候选补丁的 `diff_summary`：文件数量、增删行数量、代表性 added/removed 行。`ai_patch_suggestion` 的输入包含 `conflict_context_pack`：DryRun 从冲突 hunk 周围截取的目标仓真实代码，用来帮助模型定位落点。
+
 ---
 
 ## 5. AI 生成补丁的门禁
@@ -129,7 +133,7 @@ AI 证据统一写入 `ai_evidence`：
 
 1. 确定性 DryRun 路径全部失败。
 2. `ai.enable_conflict_patch_suggestion=true`。
-3. 能读取目标文件上下文。
+3. 能读取目标文件上下文；若 DryRun 已定位冲突 hunk，会附带 `conflict_context_pack`。
 4. 模型返回有效 unified diff。
 5. 候选 diff 通过 `git apply --check`、`--ignore-whitespace` 或 `-C1` 中至少一种。
 6. 结果标记为 `apply_method=ai-generated`。

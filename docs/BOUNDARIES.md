@@ -23,10 +23,10 @@
 | 跨文件、多级、长链路传播的关键信号升级 | 当前调用链分析是局部图，主要覆盖修改文件集合内的 direct caller/callee 和有限跨文件唯一符号连接，不是全仓多跳传播和全局数据流分析 | 不应过度承诺“全局调用链安全”；若命中关键结构或局部传播，应升到 `L3/L4` 并人工审查 |
 | 涉及 `Kconfig` / `Makefile` / `CONFIG_*` / defconfig 的 CVE | 当前没有构建期配置模型，也不判断某个修复是否依赖特定编译选项、发行配置或 build target | 不应把代码 patch 命中解释成“发行配置层面已闭环”；应人工补配置审查 |
 | 依赖运行时环境或外部配套的修复 | 如 sysctl、firmware、device tree、用户态协议、特定硬件初始化顺序，静态 patch 和代码文本无法完整覆盖 | 系统最多给出代码层面判断；用户必须补运行时验证 |
-| 上游情报不足或 `fix / intro` 无法稳定定位 | 缺少稳定的上游 fix 或 stable backport 锚点时，搜索、DryRun、validate 都会失去稳定基准；仅缺少 introduced commit 时，可用 `patch_probe` 从 fix patch 的 removed/added 行探测目标代码形态，但这仍是受影响性启发式而不是上游 intro 真值 | 有效探测时输出 `intro_analysis` 证据；信号不足时应进入不确定或人工确认通道，而不是强行给低级别结论 |
+| 上游情报不足或 `fix / intro` 无法稳定定位 | 缺少稳定的上游 fix 或 stable backport 锚点时，搜索、DryRun、validate 都会失去稳定基准；仅缺少 introduced commit 时，可用 `patch_probe` 从 fix patch 的 removed/added 行和 hunk 探测目标代码形态，但这仍是受影响性启发式而不是上游 intro 真值 | `vulnerable_like` 才继续补丁生产；`fixed_like` 默认停止生产并建议人工确认等价修复；`uncertain` 不应强行给低级别结论 |
 | 宏展开、生成代码、架构特定汇编主导语义的修复 | 当前主要基于 C 代码文本、diff、局部函数关系，缺少复杂宏语义、代码生成结果和汇编行为的稳定模型 | 即使 apply 成功也不能自动宣称“语义已理解”；应人工复核关键路径 |
 | `AI-Generated` 兜底补丁 | 这一路不是确定性主链路，结果受模型输出波动影响；通过 `git apply --check` 也只证明文本可应用 | 只能作为最后兜底候选，必须进入高风险/L5 和人工审批通道 |
-| AI advisory 证据 | `low_signal_adjudication`、`dependency_triage`、`risk_semantic_explainer` 是模型建议，不是真值 | 只能作为审查辅助和 batch 校准输入；默认不直接改最终级别 |
+| AI advisory 证据 | `missing_intro_adjudication`、`low_signal_adjudication`、`dependency_triage`、`risk_semantic_explainer` 是模型建议，不是真值；`confidence_calibration.severity=red` 只说明 AI 与确定性证据冲突 | 只能作为审查辅助和 batch 校准输入；默认不直接改最终级别，红色冲突应优先人工复核 |
 
 ---
 
@@ -52,6 +52,7 @@
 | `intro_analysis.strategy = missing_intro_patch_probe` | “系统找到了真实 introduced commit” | 不是。它只说明目标代码命中 fix patch 的修复前 removed 行，可作为继续回溯的证据 |
 | `AI-Generated` 命中 | “系统给出了最终修复” | 只说明 AI 候选 diff 通过了确定性 apply check，仍需专家确认语义 |
 | `ai_evidence.decision = likely_low_signal` | “可以自动降级” | 当前只是 advisory 证据；是否降级仍由规则、真值回放和人工审查决定 |
+| `confidence_calibration.severity = red` | “AI 或规则一定错了” | 只说明模型结论和确定性证据冲突，需要人工优先核对，不会默认自动改最终级别 |
 
 ---
 

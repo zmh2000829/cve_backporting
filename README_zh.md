@@ -172,13 +172,14 @@ llm:
 
 ai:
   mode: "advisory"        # off / advisory / gated
+  enable_missing_intro_adjudication: true
   enable_dependency_triage: true
   enable_low_signal_adjudication: true
   enable_risk_explainer: true
   enable_conflict_patch_suggestion: false
 ```
 
-`ai.mode=advisory` 时，低信号裁决、前置补丁 triage、风险语义解释只写入 `validation_details.ai_evidence`，不会直接改最终级别。`enable_conflict_patch_suggestion=true` 会允许 DryRun 失败后生成 AI 候选补丁；即使候选通过 `git apply --check`，仍按 `ai-generated` 高风险/L5 通道处理。
+`ai.mode=advisory` 时，missing-intro 裁决、低信号裁决、前置补丁 triage、风险语义解释只写入 `validation_details.ai_evidence`，不会直接改最终级别。如果 AI 高置信结论和确定性证据冲突，会输出 `confidence_calibration.status=conflict`、`severity=red`，用于提示人工优先复核。`enable_conflict_patch_suggestion=true` 会允许 DryRun 失败后生成 AI 候选补丁；即使候选通过 `git apply --check`，仍按 `ai-generated` 高风险/L5 通道处理。
 
 如果上游 CVE 没有提供 introduced commit，可以通过 `analysis` 配置选择处理策略：
 
@@ -190,11 +191,16 @@ analysis:
   missing_intro_policy: "patch_probe"
   missing_intro_assume_on_uncertain: true
   missing_intro_min_removed_line_match: 0.30
+  missing_intro_min_removed_hunk_match: 0.30
   missing_intro_min_file_coverage: 0.50
   missing_intro_fixed_line_threshold: 0.70
+  missing_intro_fixed_hunk_threshold: 0.60
+  missing_intro_continue_on_fixed_like: false
 ```
 
-`patch_probe` 的判断逻辑是：目标分支命中修复补丁的 `- removed` 行，说明仍保留修复前代码形态，继续补丁回溯；目标分支高度命中 `+ added` 行且未命中 removed 行，说明更接近修复后形态，不再盲目判定受影响。探测会按文件、hunk、上下文和函数提示聚合证据，并过滤空行、单独括号、注释、日志等低信息行，输出 `vulnerable_like / fixed_like / uncertain` 三类结论。该证据会写入 `intro_analysis`；`uncertain` 场景即使配置允许继续 DryRun，也不会进入 `L0` 自动通道。
+`patch_probe` 的判断逻辑是：目标分支命中修复补丁的 `- removed` 行或 removed hunk，说明仍保留修复前代码形态，继续补丁回溯；目标分支高度命中 `+ added` 行或 added hunk，且 removed 侧未命中，说明更接近修复后形态，不再盲目生产回移补丁。探测会按文件、hunk、上下文和函数提示聚合证据，并过滤空行、单独括号、注释、日志等低信息行，输出 `vulnerable_like / fixed_like / uncertain` 三类结论。该证据会写入 `intro_analysis`；`fixed_like` 默认停止补丁生产，`uncertain` 场景即使配置允许继续 DryRun，也不会进入 `L0` 自动通道。
+
+这就是面向 Android 等“只披露修复 commit、不披露 introduced commit”的通用模式：工具不伪造引入点，而是把社区 fix patch 当作代码形态探针，先判断目标仓像修复前、修复后还是证据不足，再决定是否继续依赖分析和补丁生产。
 
 ### 4.4 首次构建缓存
 
@@ -455,8 +461,10 @@ README 里只保留最小字段视图：
 | --- | --- |
 | `result_status` | 当前结果是否完整、是否报错、是否不适用 |
 | `analysis_framework` | 过程 / 证据 / 结论骨架 |
-| `intro_analysis` | introduced commit 缺失或检测时的受影响判断证据，包含策略、置信度、文件覆盖率和 removed/added 行命中率 |
+| `intro_analysis` | introduced commit 缺失或检测时的受影响判断证据，包含策略、置信度、文件覆盖率、hunk 命中率和 `vulnerable_like / fixed_like / uncertain` |
 | `l0_l5` | `base_level`、`current_level`、`review_mode` |
+| `validation_details.ai_evidence.confidence_calibration` | AI 结论与确定性证据是否冲突；`severity=red` 表示要优先人工复核 |
+| `dryrun_detail.ai_evidence.tasks[].conflict_context_pack` | AI 兜底补丁使用的目标仓冲突上下文包 |
 | `analysis_narrative` | 面向人的过程说明 |
 | `traceability` | 规则 profile、目标仓 HEAD、数据源等追溯信息 |
 
@@ -503,13 +511,13 @@ python cli.py batch-validate --file cve_data.json --target 5.10-hulk --workers 2
 | 风险收益评估 | 否 | 输出确定性评分与说明 |
 | 合入建议 | 否 | 输出确定性建议 |
 | validate 差异解释 | 否 | 不再生成 LLM 差异总结 |
-| AI advisory 证据 | 是 | 不输出 `validation_details.ai_evidence.tasks` |
+| AI advisory 证据 | 是 | 不输出 `validation_details.ai_evidence.tasks`；包括 missing-intro 裁决、依赖候选 triage、风险解释和冲突标红 |
 | AI 兜底补丁生成 | 是 | 不进入 AI-generated 路径 |
 
 一句话总结：
 
 - **核心判断不依赖 LLM**
-- **LLM 主要用于结构化证据增强和 AI 兜底补丁生成**
+- **LLM 主要用于结构化证据增强、确定性证据冲突标红和 AI 兜底补丁生成**
 - **AI 生成补丁即使通过 apply check，也不等于可自动合入**
 
 ---

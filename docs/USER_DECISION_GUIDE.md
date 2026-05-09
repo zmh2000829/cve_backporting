@@ -35,6 +35,14 @@
 
 所以 `base=L0, current=L3` 是合理的：它表示补丁文本能直接打上，但代码语义命中了高风险规则。
 
+没有 introduced commit 时，优先看 `intro_analysis.candidates[0].verdict`：
+
+| verdict | 怎么理解 |
+| --- | --- |
+| `vulnerable_like` | 目标仓仍像修复前代码，工具会继续依赖分析和补丁生产 |
+| `fixed_like` | 目标仓更像修复后代码，默认停止补丁生产，人工确认是否已有等价修复 |
+| `uncertain` | 证据不足，可按配置继续 DryRun，但最终至少人工复核，不进入 L0 自动通道 |
+
 ---
 
 ## 2. L0-L5 是执行通道，不是简单难度分
@@ -124,10 +132,13 @@ git 尝试把 base -> theirs 的变化搬到 ours 上
 | `validation_details.ai_evidence.tasks[].task` | 模型做了哪类分析，例如低信号裁决、前置候选 triage、风险语义解释 |
 | `decision` / `confidence` | 模型建议和置信度，只能作为审查参考 |
 | `evidence_lines` | 模型引用的输入证据，人工应优先核对这些行 |
+| `confidence_calibration` | AI 结论和确定性证据是否冲突；`status=conflict`、`severity=red` 时要优先人工复核 |
 | `used_for_final_decision=false` | 当前没有直接改变最终分级 |
-| `dryrun_detail.ai_evidence` | 只用于 AI 候选补丁，重点看是否通过 apply check、是否被拒绝、保留了哪些上游 `+` 行 |
+| `dryrun_detail.ai_evidence` | 只用于 AI 候选补丁，重点看是否通过 apply check、是否被拒绝、保留了哪些上游 `+` 行，以及是否带有 `conflict_context_pack` |
 
 看到 `likely_low_signal` 不代表系统已经自动降级；看到 `ai-generated` 也不代表系统已经给出可合入补丁。前者是降低误报的审查线索，后者是高风险候选补丁。
+
+如果看到 `confidence_calibration.severity=red`，含义不是“AI 错了”或“确定性规则错了”，而是两边证据发生冲突。例如 strong 依赖被 AI 判成 background，或 `patch_probe` 判为 `vulnerable_like` 但 AI 判为 `fixed_like`。这种结果应优先进入人工复核，不应用来自动降级。
 
 ---
 
@@ -180,6 +191,8 @@ git 尝试把 base -> theirs 的变化搬到 ours 上
 | 5 | 读取候选 diff，提取 hunk、函数、字段、锁域、状态点 | 构造文本和语义证据 |
 | 6 | 计算 hunk 重叠、12 行内相邻 hunk、函数交集、共享字段/锁/状态 | 判断关联强度 |
 | 7 | 评分并分成 `strong / medium / weak` | `strong/medium` 给 Policy Engine；`weak` 只保留为背景证据 |
+
+启用 AI advisory 后，`dependency_triage` 还会收到候选补丁的 `diff_summary`，包括文件数量、增删行数量和代表性 added/removed 行。它的作用是帮助模型区分“真正前置依赖”和“只是同文件历史噪声”，但结论仍默认只作为审查证据。
 
 分级口径：
 

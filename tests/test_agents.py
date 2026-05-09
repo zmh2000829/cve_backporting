@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.config import ConfigLoader
 from core.git_manager import GitRepoManager
-from core.models import PatchInfo
+from core.models import AnalysisResult, PatchInfo, SearchResult
 from agents.crawler import CrawlerAgent
 from agents.analysis import AnalysisAgent
 from agents.dependency import DependencyAgent
@@ -139,6 +139,39 @@ class MissingIntroProbeTests(unittest.TestCase):
         pipe = self._pipeline_with_files({"foo.c": "{\n}\n"})
         sr = pipe._probe_missing_intro_by_fix_patch(PatchInfo("abc", diff_code=diff), "target")
         self.assertEqual(sr.candidates[0]["verdict"], "uncertain")
+
+    def test_missing_intro_probe_uses_hunk_match_for_verdict(self):
+        diff = """diff --git a/foo.c b/foo.c
+--- a/foo.c
++++ b/foo.c
+@@ -1,4 +1,4 @@ static int f(struct ctx *ctx)
+-	if (ctx->old_state)
+-		return -EINVAL;
++	if (ctx->new_state)
++		return -EAGAIN;
+ 	return 0;
+"""
+        pipe = self._pipeline_with_files({"foo.c": "static int f(struct ctx *ctx)\n\tif (ctx->old_state)\n\treturn 0;\n"})
+        pipe.analysis_config = {
+            "missing_intro_min_removed_line_match": 0.95,
+            "missing_intro_min_removed_hunk_match": 0.5,
+        }
+        sr = pipe._probe_missing_intro_by_fix_patch(PatchInfo("abc", diff_code=diff), "target")
+        self.assertTrue(sr.found)
+        self.assertEqual(sr.candidates[0]["verdict"], "vulnerable_like")
+
+    def test_fixed_like_skips_patch_production_by_default(self):
+        pipe = Pipeline.__new__(Pipeline)
+        pipe.analysis_config = {}
+        result = AnalysisResult("CVE-X", "target")
+        result.introduced_search = SearchResult(
+            found=False,
+            strategy="missing_intro_patch_probe_fixed_like",
+            candidates=[{"verdict": "fixed_like"}],
+        )
+        self.assertTrue(pipe._should_skip_patch_production_after_intro(result))
+        pipe.analysis_config = {"missing_intro_continue_on_fixed_like": True}
+        self.assertFalse(pipe._should_skip_patch_production_after_intro(result))
 
 
 # ─── Tests ───────────────────────────────────────────────────────────

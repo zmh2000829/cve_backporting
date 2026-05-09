@@ -88,6 +88,30 @@ class Pipeline:
             return self.analysis_config.get(name, default)
         return getattr(self.analysis_config, name, default)
 
+    @staticmethod
+    def _intro_probe_verdict(search: SearchResult) -> str:
+        if not search:
+            return ""
+        candidates = list(getattr(search, "candidates", []) or [])
+        first = candidates[0] if candidates and isinstance(candidates[0], dict) else {}
+        verdict = first.get("verdict", "")
+        if verdict:
+            return str(verdict)
+        strategy = getattr(search, "strategy", "") or ""
+        if "fixed_like" in strategy:
+            return "fixed_like"
+        if "uncertain" in strategy:
+            return "uncertain"
+        if "patch_probe" in strategy and getattr(search, "found", False):
+            return "vulnerable_like"
+        return ""
+
+    def _should_skip_patch_production_after_intro(self, result: AnalysisResult) -> bool:
+        verdict = self._intro_probe_verdict(result.introduced_search)
+        if verdict != "fixed_like":
+            return False
+        return not bool(self._analysis_cfg("missing_intro_continue_on_fixed_like", False))
+
     def _handle_missing_intro(self, fix_patch: PatchInfo, target_version: str,
                               result: AnalysisResult, stage_cb) -> None:
         policy = str(self._analysis_cfg(
@@ -145,10 +169,14 @@ class Pipeline:
         min_len = int(self._analysis_cfg("missing_intro_min_changed_line_length", 4) or 4)
         min_removed = float(self._analysis_cfg(
             "missing_intro_min_removed_line_match", 0.30) or 0.30)
+        min_removed_hunk = float(self._analysis_cfg(
+            "missing_intro_min_removed_hunk_match", 0.30) or 0.30)
         min_coverage = float(self._analysis_cfg(
             "missing_intro_min_file_coverage", 0.50) or 0.50)
         fixed_threshold = float(self._analysis_cfg(
             "missing_intro_fixed_line_threshold", 0.70) or 0.70)
+        fixed_hunk_threshold = float(self._analysis_cfg(
+            "missing_intro_fixed_hunk_threshold", 0.60) or 0.60)
         assume_uncertain = bool(self._analysis_cfg(
             "missing_intro_assume_on_uncertain", True))
 
@@ -257,8 +285,10 @@ class Pipeline:
             "fixed_score": round(fixed_score, 3),
             "thresholds": {
                 "min_removed_line_match": min_removed,
+                "min_removed_hunk_match": min_removed_hunk,
                 "min_file_coverage": min_coverage,
                 "fixed_line_threshold": fixed_threshold,
+                "fixed_hunk_threshold": fixed_hunk_threshold,
             },
         }
         candidates.insert(0, evidence)
@@ -269,13 +299,17 @@ class Pipeline:
             confidence = 0.0
             subject = "fix patch 中缺少可用于探测的有效变更行"
             verdict = "uncertain"
-        elif file_coverage >= min_coverage and removed_rate >= min_removed:
+        elif file_coverage >= min_coverage and (
+            removed_rate >= min_removed or removed_hunk_rate >= min_removed_hunk
+        ):
             found = True
             strategy = "missing_intro_patch_probe"
             confidence = min(1.0, max(removed_rate, vulnerable_score))
             subject = "目标代码命中修复补丁 removed 行，保留修复前代码形态"
             verdict = "vulnerable_like"
-        elif file_coverage >= min_coverage and added_rate >= fixed_threshold and removed_rate < min_removed:
+        elif file_coverage >= min_coverage and (
+            added_rate >= fixed_threshold or added_hunk_rate >= fixed_hunk_threshold
+        ) and removed_rate < min_removed and removed_hunk_rate < min_removed_hunk:
             found = False
             strategy = "missing_intro_patch_probe_fixed_like"
             confidence = min(1.0, max(added_rate, fixed_score))
@@ -557,8 +591,23 @@ class Pipeline:
                         "未定位到漏洞引入commit；但目标仓命中修复补丁 removed 行，"
                         "按疑似受影响继续回溯，需人工确认影响范围。")
                 else:
+                    probe.candidates.append({
+                        "original_intro_search": {
+                            "strategy": original_intro.strategy,
+                            "confidence": original_intro.confidence,
+                            "failure": original_intro.failure.__dict__ if original_intro.failure else {},
+                            "steps": [
+                                step.__dict__ for step in (original_intro.steps or [])
+                            ],
+                        },
+                        "note": "introduced commit 未能在目标仓定位；以下结论来自 fix patch 代码形态探测，不等同于命中真实 intro commit",
+                    })
+                    result.introduced_search = probe
+                    result.is_vulnerable = False
                     _cb("analysis_intro", "warn", "未找到, 可能不受影响")
-                    result.recommendations.append("未找到漏洞引入commit, 可能不受影响(建议人工确认)")
+                    result.recommendations.append(
+                        "未找到漏洞引入commit；补丁形态探测未确认目标仍保留修复前代码，"
+                        "可能不受影响或已有等价修复，建议人工确认。")
         else:
             self._handle_missing_intro(fix_patch, target_version, result, _cb)
 
@@ -608,6 +657,14 @@ class Pipeline:
                 _cb("dependency", "skip", "force-dryrun")
             else:
                 _cb("analysis_bp", "warn", "无可用backport")
+
+                if self._should_skip_patch_production_after_intro(result) and not force_dryrun:
+                    _cb("dependency", "skip", "无 intro 且目标呈 fixed-like")
+                    _cb("dryrun", "skip", "目标代码接近修复后形态")
+                    result.recommendations.append(
+                        "无 introduced commit 场景下，patch_probe 判定目标代码更接近修复后形态；"
+                        "默认不继续生产回移补丁，建议人工确认是否已有等价修复。")
+                    return result
 
                 # ── Step 5: Dependency ───────────────────────────────
                 _cb("dependency", "running")

@@ -107,7 +107,7 @@
 | 策略 | 解释 |
 | --- | --- |
 | `missing_intro_patch_probe` | 目标命中 removed 行，说明仍保留修复前代码形态，可继续回溯 |
-| `missing_intro_patch_probe_fixed_like` | 目标更接近修复后形态，不应盲目判定受影响 |
+| `missing_intro_patch_probe_fixed_like` | 目标更接近修复后形态，默认不继续生产回移补丁 |
 | `missing_intro_patch_probe_uncertain_assume` | 证据不足，但配置允许在不确定时继续；最终至少进入人工复核，不允许 L0 自动通道 |
 | `missing_intro_strict_unknown` | 配置要求不做受影响假设 |
 
