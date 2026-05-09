@@ -14,7 +14,7 @@
 | --- | --- | --- |
 | `commands/` | CLI 命令入口、参数解析、运行模式分流 | `analyze.py`、`validate.py`、`checks.py`、`server.py` |
 | `agents/` | 具体分析动作的执行体 | `crawler.py`、`analysis.py`、`dependency.py`、`dryrun.py` |
-| `core/` | 配置、模型、UI、规则引擎、序列化、LLM/AI 客户端 | `config.py`、`policy_engine.py`、`ai_assistant.py`、`output_serializers.py` |
+| `core/` | 配置、模型、UI、规则引擎、序列化、LLM/AI 客户端、仓库访问 | `config.py`、`git_manager.py`、`repo_workspace.py`、`policy_engine.py`、`ai_assistant.py`、`output_serializers.py` |
 | `services/` | 报告组装、输出路径、历史兼容 | `reporting.py`、`output_support.py`、`history_loader.py` |
 | `rules/` | `L0-L5` 策略和规则实现 | `default_rules.py`、`level_policies.py` |
 | `tests/` | 回归测试和 golden fixtures | `test_policy_engine.py`、`test_reports.py` |
@@ -25,7 +25,8 @@
 | --- | --- |
 | `pipeline.py` | 主编排器，串联 crawl / search / dependency / dryrun / deep analysis；包含缺失 introduced commit 时的 `patch_probe` 受影响探测 |
 | `core/config.py` | 加载配置，合并 `policy.profile` 预设，并提供 `analysis.missing_intro_*` 和 `ai.*` 策略开关 |
-| `core/git_manager.py` | 统一 Git 访问与 worktree 操作；支持按目标分支读取文件内容用于代码形态探测 |
+| `core/git_manager.py` | 统一 Git 访问、repo workspace 路由与 worktree 操作；支持按目标分支读取文件内容用于代码形态探测 |
+| `core/repo_workspace.py` | 解析 Android `.repo/manifest.xml`，把 workspace 路径映射到具体 Git project |
 | `core/models.py` | `PatchInfo`、`DryRunResult`、`LevelDecision` 等数据模型 |
 | `core/policy_engine.py` | 汇总规则命中并生成 `L0-L5` |
 | `core/ai_assistant.py` | 运行 GLM5 advisory task，生成 `validation_details.ai_evidence` |
@@ -149,6 +150,19 @@ services/reporting.py
 | `Analysis Agent` 的 subject / keyword 搜索 | 优先使用缓存和 FTS |
 | `batch-validate` | 复用缓存避免每个样本重复扫全仓 |
 | diff 读取、文件历史、DryRun apply、3-way merge | 不使用缓存，直接调用真实 Git 仓库 |
+
+### 4.1 Android repo workspace
+
+当 `repositories.<target>.type=repo` 时，`target_version` 仍然是一个对外别名，但底层按 manifest 中的 project 执行 Git 操作。
+
+| 能力 | repo workspace 处理 |
+| --- | --- |
+| manifest | `core/repo_workspace.py` 解析 `.repo/manifest.xml` 的 `project path/name/revision/remote` |
+| 文件读取 | `frameworks/base/foo.java` 路由到 `frameworks/base` 子仓后执行 `git show HEAD:foo.java` |
+| 同文件历史 | 先按文件路径定位 project，再在子仓内执行 `git log -- <relative-file>` |
+| commit diff | 在包含该 commit 的 project 中执行 `git show`，再把 diff 路径补回 workspace 前缀 |
+| DryRun | 要求单个 patch 属于唯一 project；自动剥离 project 前缀后在子仓内 `git apply --check` |
+| cache | repo target 的缓存 key 使用 `target::project/path`，避免不同 project 的 commit id 混淆 |
 
 ---
 

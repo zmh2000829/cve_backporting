@@ -321,6 +321,7 @@ class AnalysisAgent:
             all_cands.append({
                 "commit_id": c.commit_id,
                 "subject": c.subject,
+                "project_path": getattr(c, "project_path", ""),
                 "similarity": sim,
                 "confidence": sim,
                 "threshold": threshold,
@@ -379,15 +380,23 @@ class AnalysisAgent:
         targets = []
         diff_failures = 0
         for gc in fc:
-            d = self.git_mgr.get_commit_diff(gc.commit_id, tv)
+            project_path = getattr(gc, "project_path", "")
+            try:
+                d = self.git_mgr.get_commit_diff(
+                    gc.commit_id, tv, project_path=project_path)
+            except TypeError:
+                d = self.git_mgr.get_commit_diff(gc.commit_id, tv)
             if d is None:
                 diff_failures += 1
                 continue
-            targets.append(CommitInfo(
+            info = CommitInfo(
                 commit_id=gc.commit_id, subject=gc.subject,
                 diff_code=d,
                 modified_files=extract_files_from_diff(d),
-            ))
+            )
+            if getattr(gc, "project_path", ""):
+                setattr(info, "project_path", getattr(gc, "project_path", ""))
+            targets.append(info)
         if not targets:
             return self._failure_from_git(
                 sr,

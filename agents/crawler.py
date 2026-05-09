@@ -270,6 +270,15 @@ class CrawlerAgent:
         rp = self.git_mgr._get_repo_path(target_version)
         if not rp:
             return None
+        if getattr(self.git_mgr, "is_repo_workspace", lambda _rv: False)(target_version):
+            project = self.git_mgr._find_commit_project(commit_id, target_version)
+            if not project:
+                return None
+            manifest = self.git_mgr._get_manifest(target_version)
+            rp = manifest.abs_path(project) if manifest else rp
+            project_prefix = project.norm_path
+        else:
+            project_prefix = ""
 
         patch = PatchInfo(commit_id=commit_id)
         try:
@@ -296,7 +305,10 @@ class CrawlerAgent:
                                   cwd=rp, capture_output=True, text=True,
                                   encoding="utf-8", errors="replace", timeout=30)
             if diff.returncode == 0 and diff.stdout.strip():
-                patch.diff_code = diff.stdout
+                patch.diff_code = (
+                    self.git_mgr._prefix_diff_paths(diff.stdout, project_prefix)
+                    if project_prefix else diff.stdout
+                )
                 patch.modified_files = self._files_from_diff(patch.diff_code)
 
             # 获取修改文件列表 (如果 diff 提取失败)
@@ -304,7 +316,11 @@ class CrawlerAgent:
                 files_out = subprocess.run(["git", "show", "--name-only", "--format=", commit_id],
                                            cwd=rp, capture_output=True, text=True, timeout=10)
                 if files_out.returncode == 0:
-                    patch.modified_files = [f.strip() for f in files_out.stdout.strip().split("\n") if f.strip()]
+                    patch.modified_files = [
+                        f"{project_prefix}/{f.strip()}" if project_prefix else f.strip()
+                        for f in files_out.stdout.strip().split("\n")
+                        if f.strip()
+                    ]
 
         except Exception as e:
             logger.debug("[Crawler] 本地git获取异常: %s", e)

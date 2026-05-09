@@ -32,6 +32,8 @@
 | `analysis_narrative` | 建议 | 面向人的过程说明 |
 | `artifacts` | 建议 | 输出目录、patch 文件路径 |
 
+Android `repo` workspace 的输出仍使用同一个 `target_version`。若 `traceability` 中出现 `repo_type=repo`、`manifest`、`project_count`，表示底层已按 manifest 路由到子 Git project；补丁路径仍保持 workspace 视角，便于用户和平台查看。
+
 ---
 
 ## 3. `result_status`

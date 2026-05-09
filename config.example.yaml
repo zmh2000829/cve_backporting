@@ -10,6 +10,13 @@ repositories:
   # "5.15-custom":
   #   path: "/path/to/another/linux"
   #   branch: "linux-5.15.y"
+  # Android / AOSP repo workspace。用户仍然用 --target android-14，
+  # 工具会自动解析 manifest 并路由到 frameworks/base、system/core 等子 Git project。
+  # "android-14":
+  #   type: "repo"
+  #   path: "/path/to/aosp"
+  #   manifest: ".repo/manifest.xml"
+  #   branch: "HEAD"
 
 # ─── 缓存 ────────────────────────────────────────────────────
 cache:

@@ -38,6 +38,8 @@ def build_repo_traceability(config, git_mgr, target_version: str) -> dict:
     repo_cfg = (getattr(config, "repositories", {}) or {}).get(target_version, {}) or {}
     repo_path = repo_cfg.get("path") if isinstance(repo_cfg, dict) else repo_cfg
     configured_branch = repo_cfg.get("branch", "") if isinstance(repo_cfg, dict) else ""
+    repo_type = str(repo_cfg.get("type", "git") if isinstance(repo_cfg, dict) else "git").lower()
+    manifest = repo_cfg.get("manifest", ".repo/manifest.xml") if isinstance(repo_cfg, dict) else ""
 
     def _run(cmd, timeout=10):
         if not git_mgr:
@@ -47,14 +49,28 @@ def build_repo_traceability(config, git_mgr, target_version: str) -> dict:
         except Exception:
             return ""
 
-    head_commit = _run(["git", "rev-parse", "HEAD"])
-    current_branch = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"])
-    head_commit_time = _run(["git", "log", "-1", "--format=%cI", "HEAD"])
-    remote_url = _run(["git", "remote", "get-url", "origin"])
+    if repo_type == "repo":
+        projects = (
+            git_mgr.list_repo_projects(target_version)
+            if git_mgr and hasattr(git_mgr, "list_repo_projects") else []
+        )
+        head_commit = ""
+        current_branch = ""
+        head_commit_time = ""
+        remote_url = ""
+    else:
+        projects = []
+        head_commit = _run(["git", "rev-parse", "HEAD"])
+        current_branch = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"])
+        head_commit_time = _run(["git", "log", "-1", "--format=%cI", "HEAD"])
+        remote_url = _run(["git", "remote", "get-url", "origin"])
 
     return {
         "target_version": target_version,
         "path": repo_path or "",
+        "repo_type": repo_type,
+        "manifest": manifest if repo_type == "repo" else "",
+        "project_count": len(projects),
         "configured_branch": configured_branch,
         "current_branch": current_branch,
         "head_commit": head_commit,

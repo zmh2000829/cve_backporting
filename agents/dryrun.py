@@ -47,6 +47,7 @@ from agents.dryrun_helpers import (
 )
 from core.models import PatchInfo, DryRunResult
 from core.git_manager import GitRepoManager
+from core.matcher import extract_files_from_diff
 from core.code_matcher import CodeMatcher, PatchContextExtractor
 from core.search_report import HunkSearchReport, StrategyResult, DetailedSearchReport
 
@@ -83,9 +84,13 @@ class DryRunAgent:
         if base_result is not None:
             return base_result
 
-        rp_path = self.git_mgr._get_repo_path(target_version)
         diff_text = self._extract_pure_diff(patch.diff_code)
         mapped_diff = self._rewrite_diff_paths(diff_text)
+        rp_path, mapped_diff, route_error = self._route_diff_workspace(mapped_diff, target_version)
+        if route_error:
+            r = DryRunResult()
+            r.error_output = route_error
+            return r
 
         _quick_levels = [
             ([], "strict"),
@@ -115,7 +120,7 @@ class DryRunAgent:
                 r.apply_method = label
                 r.apply_attempts = apply_attempts
                 r.stat_output = self._get_stat(
-                    mapped_diff, target_version)
+                    mapped_diff, target_version, repo_path=rp_path)
                 if label != "strict":
                     r.error_output = f"(通过 {label} 成功适配)"
                 logger.info("[DryRun] %s 成功: %s",
@@ -145,7 +150,7 @@ class DryRunAgent:
                 "failure_class": "",
             }]
             r5.stat_output = self._get_stat(
-                mapped_diff, target_version) or ""
+                mapped_diff, target_version, repo_path=rp_path) or ""
             logger.info("[DryRun] 直接验证成功: %s",
                         patch.commit_id[:12])
             return r5
@@ -163,7 +168,7 @@ class DryRunAgent:
                 if r3.applies_cleanly:
                     r3.apply_method = "regenerated"
                     r3.stat_output = self._get_stat(
-                        adapted, target_version)
+                        adapted, target_version, repo_path=rp_path)
                     r3.adapted_patch = adapted
                     r3.error_output = (
                         f"(上下文重生成成功 [{l3_label}]: "
@@ -190,7 +195,7 @@ class DryRunAgent:
                 if r35.applies_cleanly:
                     r35.apply_method = "regenerated"
                     r35.stat_output = self._get_stat(
-                        zero_ctx, target_version)
+                        zero_ctx, target_version, repo_path=rp_path)
                     r35.adapted_patch = zero_ctx
                     r35.error_output = (
                         f"(零上下文重建成功 [{zc_label}]: "
@@ -206,7 +211,7 @@ class DryRunAgent:
                     return r35
 
         # ── L4: 冲突分析适配 ─────────────────────────────────────
-        r0.stat_output = self._get_stat(mapped_diff, target_version)
+        r0.stat_output = self._get_stat(mapped_diff, target_version, repo_path=rp_path)
         analysis = self._analyze_conflicts(mapped_diff, rp_path)
         r0.conflict_hunks = analysis["hunks"]
 
@@ -225,7 +230,7 @@ class DryRunAgent:
                 if r4.applies_cleanly:
                     r4.apply_method = "conflict-adapted"
                     r4.stat_output = self._get_stat(
-                        analysis["adapted_diff"], target_version)
+                        analysis["adapted_diff"], target_version, repo_path=rp_path)
                     r4.adapted_patch = analysis["adapted_diff"]
                     r4.conflict_hunks = analysis["hunks"]
                     r4.search_reports = analysis.get(
@@ -379,7 +384,8 @@ class DryRunAgent:
                 checked.adapted_patch = patch_text
                 checked.conflict_hunks = analysis.get("hunks", []) if analysis else []
                 checked.search_reports = analysis.get("search_reports", []) if analysis else []
-                checked.stat_output = self._get_stat(patch_text, target_version)
+                checked.stat_output = self._get_stat(
+                    patch_text, target_version, repo_path=repo_path)
                 checked.error_output = (
                     f"(AI patch suggestion 通过 {label} apply check；"
                     "仅作为高风险候选，需人工审查)"
@@ -1804,6 +1810,55 @@ class DryRunAgent:
 
     # ─── 内部方法 ─────────────────────────────────────────────────
 
+    def _route_diff_workspace(self, diff_text: str, target_version: str):
+        """Return (repo_path, project-local diff, error) for git/repo targets."""
+        root = self.git_mgr._get_repo_path(target_version)
+        if not root or not os.path.exists(root):
+            return root, diff_text, f"仓库路径不可用: {target_version}"
+        if not getattr(self.git_mgr, "is_repo_workspace", lambda _rv: False)(target_version):
+            return root, diff_text, ""
+
+        files = extract_files_from_diff(diff_text)
+        project, problems = self.git_mgr.resolve_project_for_files(target_version, files)
+        if not project:
+            detail = ", ".join(problems[:6]) if problems else "no files"
+            return root, diff_text, (
+                "Android repo workspace 补丁无法定位到唯一 project；"
+                f"请检查 patch 文件路径或拆分多 project 补丁: {detail}"
+            )
+        project_path = self.git_mgr.get_project_abs_path(target_version, project.norm_path)
+        if not project_path or not os.path.isdir(project_path):
+            return root, diff_text, f"Android project 路径不可用: {project.norm_path}"
+        return project_path, self._strip_repo_project_prefix(diff_text, project.norm_path), ""
+
+    @staticmethod
+    def _strip_repo_project_prefix(diff_text: str, project_path: str) -> str:
+        prefix = (project_path or "").strip("/")
+        if not prefix:
+            return diff_text
+        out = []
+        for line in (diff_text or "").splitlines():
+            if line.startswith("diff --git "):
+                m = re.match(r"diff --git a/(.*?) b/(.*)$", line)
+                if m:
+                    a_path = DryRunAgent._strip_one_project_prefix(m.group(1), prefix)
+                    b_path = DryRunAgent._strip_one_project_prefix(m.group(2), prefix)
+                    out.append(f"diff --git a/{a_path} b/{b_path}")
+                    continue
+            if line.startswith("--- a/") or line.startswith("+++ b/"):
+                out.append(line[:6] + DryRunAgent._strip_one_project_prefix(line[6:], prefix))
+            else:
+                out.append(line)
+        return "\n".join(out) + ("\n" if (diff_text or "").endswith("\n") else "")
+
+    @staticmethod
+    def _strip_one_project_prefix(path: str, project_path: str) -> str:
+        path = (path or "").strip()
+        if path == "/dev/null":
+            return path
+        prefix = project_path.strip("/") + "/"
+        return path[len(prefix):] if path.startswith(prefix) else path
+
     def _prepare(self, patch, target_version):
         result = DryRunResult()
         if not patch.diff_code:
@@ -1813,8 +1868,14 @@ class DryRunAgent:
         if not rp or not os.path.exists(rp):
             result.error_output = f"仓库路径不可用: {target_version}"
             return result
-        if not self._extract_pure_diff(patch.diff_code):
+        diff_text = self._extract_pure_diff(patch.diff_code)
+        if not diff_text:
             result.error_output = "无法提取有效的diff内容"
+            return result
+        _, _, route_error = self._route_diff_workspace(
+            self._rewrite_diff_paths(diff_text), target_version)
+        if route_error:
+            result.error_output = route_error
             return result
         return None
 
@@ -1832,9 +1893,13 @@ class DryRunAgent:
             result.error_output = "无法提取有效的diff内容"
             return result
         mapped = self._rewrite_diff_paths(diff_text)
+        rp, mapped, route_error = self._route_diff_workspace(mapped, target_version)
+        if route_error:
+            result.error_output = route_error
+            return result
         extra = {"3way": ["--3way"], "context-C1": ["-C1"]}.get(method, [])
         r = self._apply_check(mapped, rp, extra)
-        r.stat_output = self._get_stat(mapped, target_version)
+        r.stat_output = self._get_stat(mapped, target_version, repo_path=rp)
         if r.applies_cleanly:
             r.apply_method = method
         return r
@@ -1862,12 +1927,20 @@ class DryRunAgent:
                 pass
         return result
 
-    def _get_stat(self, diff_text, target_version):
+    def _get_stat(self, diff_text, target_version, repo_path=None):
         patch_file = self._write_temp_patch(diff_text)
         try:
-            out = self.git_mgr.run_git(
-                ["git", "apply", "--stat", patch_file],
-                target_version, timeout=30)
+            if repo_path:
+                import subprocess
+                proc = subprocess.run(
+                    ["git", "apply", "--stat", patch_file],
+                    cwd=repo_path, capture_output=True, text=True,
+                    encoding="utf-8", errors="replace", timeout=30)
+                out = proc.stdout if proc.returncode == 0 else ""
+            else:
+                out = self.git_mgr.run_git(
+                    ["git", "apply", "--stat", patch_file],
+                    target_version, timeout=30)
             return out.strip() if out else ""
         finally:
             try:

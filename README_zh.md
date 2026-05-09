@@ -160,6 +160,19 @@ repositories:
     branch: "linux-5.10.y"
 ```
 
+Android / AOSP 这类 `repo` workspace 也使用同一个 `--target`，不需要用户手动指定子仓：
+
+```yaml
+repositories:
+  "android-14":
+    type: "repo"
+    path: "/path/to/aosp"
+    manifest: ".repo/manifest.xml"
+    branch: "HEAD"
+```
+
+配置为 `type: repo` 后，工具会解析 `.repo/manifest.xml`，把 `frameworks/base/...`、`system/core/...`、`external/...` 等路径自动路由到对应 Git project。搜索、文件读取、同文件历史、DryRun 都会在子仓内执行；对 CLI/API 用户仍然只暴露 `target_version=android-14`。
+
 如需启用 LLM：
 
 ```yaml

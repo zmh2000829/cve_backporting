@@ -29,6 +29,8 @@
 | AI 增强 | 当前由服务端 `config.yaml` 控制；API 请求暂不直接传密钥、endpoint 或 `ai.mode` |
 | 策略风格 | API 当前不直接暴露 `policy-profile` 字符串；按配置文件和开关行为运行 |
 
+`target_version` 可以指向普通 Git 仓，也可以指向 Android/AOSP `repo` workspace。后者只需要在服务端配置中设置 `repositories.<target>.type=repo`，API 请求仍然传同一个目标别名，服务端会按 manifest 自动路由到对应子 Git project。
+
 ---
 
 ## 3. `POST /api/analyze`

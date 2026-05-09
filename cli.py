@@ -80,7 +80,7 @@ def _make_git_mgr(config, tv: str) -> GitRepoManager:
         console.print(f"[red bold]错误:[/] 未配置版本 {tv}")
         sys.exit(1)
     return GitRepoManager(
-        {tv: {"path": rc["path"], "branch": rc.get("branch")}},
+        {tv: dict(rc)},
         use_cache=config.cache.enabled,
     )
 
