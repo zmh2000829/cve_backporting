@@ -35,19 +35,38 @@ class RepoManifest:
         )
         self.projects: List[RepoProject] = []
         self._by_path: Dict[str, RepoProject] = {}
+        self.include_errors: List[str] = []
         self._load()
 
     def _load(self):
         if not os.path.exists(self.manifest_path):
             return
-        tree = ET.parse(self.manifest_path)
+        projects = self._load_file(
+            self.manifest_path,
+            default_revision="",
+            default_remote="",
+            visited=set(),
+        )
+        projects.sort(key=lambda p: len(p.norm_path), reverse=True)
+        self.projects = projects
+        self._by_path = {p.norm_path: p for p in projects}
+
+    def _load_file(self, path: str, *, default_revision: str,
+                   default_remote: str, visited: set) -> List[RepoProject]:
+        real_path = os.path.realpath(path)
+        if real_path in visited:
+            return []
+        visited.add(real_path)
+        if not os.path.exists(real_path):
+            self.include_errors.append(real_path)
+            return []
+
+        tree = ET.parse(real_path)
         root = tree.getroot()
-        default_revision = ""
-        default_remote = ""
         default = root.find("default")
         if default is not None:
-            default_revision = default.attrib.get("revision", "")
-            default_remote = default.attrib.get("remote", "")
+            default_revision = default.attrib.get("revision", default_revision)
+            default_remote = default.attrib.get("remote", default_remote)
 
         projects: List[RepoProject] = []
         for node in root.findall("project"):
@@ -63,9 +82,36 @@ class RepoManifest:
             )
             projects.append(project)
 
-        projects.sort(key=lambda p: len(p.norm_path), reverse=True)
-        self.projects = projects
-        self._by_path = {p.norm_path: p for p in projects}
+        for node in root.findall("include"):
+            name = node.attrib.get("name", "").strip()
+            if not name:
+                continue
+            include_path = self._resolve_include(real_path, name)
+            if not include_path:
+                self.include_errors.append(name)
+                continue
+            projects.extend(self._load_file(
+                include_path,
+                default_revision=default_revision,
+                default_remote=default_remote,
+                visited=visited,
+            ))
+
+        return projects
+
+    def _resolve_include(self, current_manifest: str, include_name: str) -> Optional[str]:
+        if os.path.isabs(include_name) and os.path.exists(include_name):
+            return include_name
+        candidates = [
+            os.path.join(os.path.dirname(current_manifest), include_name),
+            os.path.join(os.path.dirname(os.path.realpath(current_manifest)), include_name),
+            os.path.join(self.root, ".repo", "manifests", include_name),
+            os.path.join(self.root, ".repo", "local_manifests", include_name),
+        ]
+        for candidate in candidates:
+            if os.path.exists(candidate):
+                return candidate
+        return None
 
     def project_for_file(self, file_path: str) -> Optional[RepoProject]:
         path = (file_path or "").strip().strip("/")

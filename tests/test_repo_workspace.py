@@ -94,6 +94,45 @@ class RepoWorkspaceTests(unittest.TestCase):
         self.assertTrue(result.applies_cleanly, result.error_output)
         self.assertEqual(result.apply_method, "strict")
 
+    def test_manifest_includes_are_loaded_recursively(self):
+        root = Path(tempfile.mkdtemp(dir=self.root))
+        (root / ".repo/manifests/android").mkdir(parents=True)
+        (root / ".repo/manifests/hisi").mkdir(parents=True)
+        (root / ".repo/manifest.xml").write_text(
+            """<manifest>
+  <default revision="main" remote="origin" />
+  <include name="android/common.xml" />
+  <include name="hisi/system.xml" />
+</manifest>
+""",
+            encoding="utf-8",
+        )
+        (root / ".repo/manifests/android/common.xml").write_text(
+            """<manifest>
+  <project name="platform/frameworks/base" path="frameworks/base" />
+</manifest>
+""",
+            encoding="utf-8",
+        )
+        (root / ".repo/manifests/hisi/system.xml").write_text(
+            """<manifest>
+  <project name="vendor/hisi/system" path="vendor/hisi/system" revision="dev" />
+</manifest>
+""",
+            encoding="utf-8",
+        )
+        mgr = GitRepoManager(
+            {"android-inc": {"type": "repo", "path": str(root), "manifest": ".repo/manifest.xml"}},
+            use_cache=False,
+        )
+
+        projects = mgr.list_repo_projects("android-inc")
+        paths = {p.norm_path: p for p in projects}
+        self.assertIn("frameworks/base", paths)
+        self.assertIn("vendor/hisi/system", paths)
+        self.assertEqual(paths["frameworks/base"].revision, "main")
+        self.assertEqual(paths["vendor/hisi/system"].revision, "dev")
+
 
 if __name__ == "__main__":
     unittest.main()
