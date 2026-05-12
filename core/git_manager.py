@@ -9,6 +9,7 @@ import re
 import os
 import logging
 import sqlite3
+import time
 from typing import List, Dict, Optional, Callable
 from core.models import GitCommit
 from core.repo_workspace import RepoManifest, RepoProject
@@ -850,8 +851,27 @@ class GitRepoManager:
         if max_commits and max_commits > 0:
             per_project_limit = max(1, max_commits // max(1, total_projects))
         logger.info("构建 repo workspace 缓存: %s (%d projects)", rv, total_projects)
+        started_at = time.time()
+
+        conn = sqlite3.connect(self.cache_db_path)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=OFF")
+        conn.execute("PRAGMA cache_size=-512000")
+        conn.execute("PRAGMA temp_store=MEMORY")
+        conn.execute("PRAGMA mmap_size=1073741824")
+        if not incremental:
+            try:
+                conn.execute("DROP TRIGGER IF EXISTS commits_ai")
+            except Exception:
+                pass
+        sql = ("INSERT OR IGNORE INTO commits "
+               "(repo_version,commit_id,short_id,subject,author,timestamp) "
+               "VALUES (?,?,?,?,?,?)")
+        global_batch = []
+        batch_size = 50000
 
         for idx, project in enumerate(projects, 1):
+            project_started_at = time.time()
             br = self._resolve_project_ref(rv, project)
             if not br:
                 err = getattr(self, "last_error", {}) or {}
@@ -886,28 +906,23 @@ class GitRepoManager:
                 logger.warning("跳过 project %s: %s", project.norm_path, exc)
                 continue
 
-            conn = sqlite3.connect(self.cache_db_path)
-            batch = []
             count = 0
-            batch_size = 10000
-            sql = ("INSERT OR IGNORE INTO commits "
-                   "(repo_version,commit_id,short_id,subject,author,timestamp) "
-                   "VALUES (?,?,?,?,?,?)")
             for line in proc.stdout:
                 p = line.strip().split(FIELD_SEP)
                 if len(p) < 4:
                     continue
                 cid = p[0].strip()
-                batch.append((cache_key, cid, cid[:12], p[1].strip(), p[2].strip(),
-                              int(p[3].strip()) if p[3].strip().isdigit() else 0))
+                global_batch.append((
+                    cache_key, cid, cid[:12], p[1].strip(), p[2].strip(),
+                    int(p[3].strip()) if p[3].strip().isdigit() else 0,
+                ))
                 count += 1
-                if len(batch) >= batch_size:
-                    conn.executemany(sql, batch)
+                if len(global_batch) >= batch_size:
+                    conn.executemany(sql, global_batch)
                     conn.commit()
-                    batch.clear()
-            if batch:
-                conn.executemany(sql, batch)
-                conn.commit()
+                    global_batch.clear()
+                    if progress_cb:
+                        progress_cb(total_done + count, max_commits or 0)
             stderr = proc.stderr.read() if proc.stderr else ""
             proc.wait()
             if proc.returncode != 0:
@@ -918,20 +933,29 @@ class GitRepoManager:
                     " ".join(run_cmd[:8]),
                     (stderr or "").strip()[:300],
                 )
-            try:
-                conn.execute(
-                    "INSERT OR IGNORE INTO commits_fts(rowid, commit_id, subject) "
-                    "SELECT id, commit_id, subject FROM commits WHERE repo_version=?",
-                    (cache_key,))
-                conn.commit()
-            except sqlite3.OperationalError:
-                pass
-            conn.close()
             total_done += count
             if progress_cb:
-                progress_cb(idx, total_projects)
-            logger.info("repo cache project %s: %d commits", project.norm_path, count)
-        logger.info("repo workspace 缓存完成[%s]: %d commits", rv, total_done)
+                progress_cb(total_done, max_commits or 0)
+            elapsed = max(time.time() - project_started_at, 0.001)
+            logger.info(
+                "repo cache project %s: %d commits (%.0f/s)",
+                project.norm_path, count, count / elapsed,
+            )
+        if global_batch:
+            conn.executemany(sql, global_batch)
+            conn.commit()
+        if incremental:
+            conn.commit()
+        else:
+            logger.info("repo workspace FTS 索引重建中...")
+            self._rebuild_fts_for_prefix(conn, rv)
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.close()
+        total_elapsed = max(time.time() - started_at, 0.001)
+        logger.info(
+            "repo workspace 缓存完成[%s]: %d commits (%.0f/s)",
+            rv, total_done, total_done / total_elapsed,
+        )
 
     def _rebuild_fts(self, conn: sqlite3.Connection, rv: str):
         """完整重建 FTS 索引"""
@@ -949,6 +973,29 @@ class GitRepoManager:
             conn.commit()
         except sqlite3.OperationalError as e:
             logger.warning("FTS重建失败(不影响核心功能): %s", e)
+
+    def _rebuild_fts_for_prefix(self, conn: sqlite3.Connection, rv: str):
+        """完整重建 FTS 索引。
+
+        FTS 是全局虚表，DROP 后必须从 commits 全表恢复，避免构建一个
+        repo workspace 缓存时清掉其他已缓存目标的 subject 搜索能力。
+        """
+        try:
+            conn.execute("DROP TABLE IF EXISTS commits_fts")
+            conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS commits_fts "
+                         "USING fts5(commit_id,subject,content='commits',content_rowid='id')")
+            conn.execute(
+                "INSERT INTO commits_fts(rowid, commit_id, subject) "
+                "SELECT id, commit_id, subject FROM commits"
+            )
+            conn.execute("DROP TRIGGER IF EXISTS commits_ai")
+            conn.execute(
+                "CREATE TRIGGER IF NOT EXISTS commits_ai AFTER INSERT ON commits BEGIN "
+                "INSERT INTO commits_fts(rowid,commit_id,subject) "
+                "VALUES(new.id,new.commit_id,new.subject); END")
+            conn.commit()
+        except sqlite3.OperationalError as e:
+            logger.warning("repo FTS重建失败(不影响核心功能): %s", e)
 
     # ─── internals ───────────────────────────────────────────────────
 

@@ -164,6 +164,8 @@ services/reporting.py
 | DryRun | 要求单个 patch 属于唯一 project；自动剥离 project 前缀后在子仓内 `git apply --check` |
 | cache | repo target 的缓存 key 使用 `target::project/path`，避免不同 project 的 commit id 混淆 |
 
+repo workspace 首次 `build-cache` 需要遍历 manifest 中所有 project。Android 这类仓库有几百万 commit 时，首次缓存本身会消耗较长时间，但稳定只有每秒几个 commit 通常不是正常 Git 读取速度，而是索引写入链路或存储环境瓶颈。当前实现对 repo workspace 使用单个 SQLite 连接、批量事务写入，并在全量构建结束后统一重建一次 FTS；日志会输出 `repo cache project <path>: <n> commits (<rate>/s)`，用于区分某个子仓 Git 读取慢、数据库所在磁盘慢，还是最终 FTS 重建慢。
+
 ---
 
 ## 5. 关联补丁技术口径

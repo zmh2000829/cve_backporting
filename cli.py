@@ -82,6 +82,7 @@ def _make_git_mgr(config, tv: str) -> GitRepoManager:
     return GitRepoManager(
         {tv: dict(rc)},
         use_cache=config.cache.enabled,
+        cache_db_path=getattr(config.cache, "database_path", "commit_cache.db"),
     )
 
 

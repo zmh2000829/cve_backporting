@@ -233,6 +233,8 @@ python cli.py build-cache --target 5.10-hulk
 
 真实 diff、文件历史、`git apply`、3-way merge 仍然直接在本地 Git 仓库上执行。更多说明见 [用户决策指南：为什么要建立缓存索引](docs/USER_DECISION_GUIDE.md#4-为什么要建立缓存索引)。
 
+Android repo workspace 首次构建会遍历 manifest 中所有 project，几百万 commit 的首次缓存可能需要较长时间。若日志长期显示每秒只有几个 commit，通常不是正常现象；优先检查缓存数据库是否在慢盘或网络盘、子仓 `.git` 是否走远端/异常对象库，以及日志中的 `repo cache project <path>: <n> commits (<rate>/s)` 是否只集中在个别 project 变慢。全量构建会批量写入 SQLite，并在最后统一重建 FTS；后续再次执行 `build-cache` 默认走增量更新。
+
 ---
 
 ## 5. 先跑哪个命令
