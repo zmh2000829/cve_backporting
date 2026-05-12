@@ -102,6 +102,26 @@ class GitRepoManager:
     def _project_branch(self, rv: str, project: Optional[RepoProject] = None) -> Optional[str]:
         return self._get_repo_branch(rv) or (project.revision if project else None)
 
+    def _project_revision_candidates(self, rv: str, project: RepoProject) -> List[str]:
+        values = []
+        configured = self._get_repo_branch(rv)
+        for value in (configured, project.revision, "HEAD"):
+            if value and value not in values:
+                values.append(value)
+        expanded = []
+        for value in values:
+            if value not in expanded:
+                expanded.append(value)
+            remote = project.remote or "origin"
+            for candidate in (
+                f"{remote}/{value}",
+                f"refs/remotes/{remote}/{value}",
+                f"refs/heads/{value}",
+            ):
+                if value != "HEAD" and candidate not in expanded:
+                    expanded.append(candidate)
+        return expanded
+
     def _cache_key(self, rv: str, project_path: str = "") -> str:
         if self.is_repo_workspace(rv) and project_path:
             return f"{rv}::{project_path}"
@@ -141,10 +161,49 @@ class GitRepoManager:
 
     def _run_git_project(self, cmd: List[str], rv: str, project: RepoProject,
                          timeout: int = 600) -> Optional[str]:
+        context = self._project_git_context(rv, project)
+        if not context:
+            self.last_error = {
+                "reason": "repo_project_git_missing",
+                "detail": f"project 不是有效 Git worktree/bare repo: {project.norm_path}",
+            }
+            return None
+        cwd, prefix = context
+        if prefix and cmd and cmd[0] == "git":
+            cmd = prefix + cmd[1:]
+        return self._run_git_cwd(cmd, cwd, timeout=timeout)
+
+    def _project_git_context(self, rv: str, project: RepoProject):
         manifest = self._get_manifest(rv)
         if not manifest:
             return None
-        return self._run_git_cwd(cmd, manifest.abs_path(project), timeout=timeout)
+        worktree = manifest.abs_path(project)
+        if os.path.isdir(worktree):
+            try:
+                r = subprocess.run(
+                    ["git", "rev-parse", "--is-inside-work-tree"],
+                    cwd=worktree, capture_output=True, text=True, timeout=10)
+                if r.returncode == 0 and r.stdout.strip() == "true":
+                    return worktree, []
+            except Exception:
+                pass
+        bare_candidates = [
+            os.path.join(manifest.root, ".repo", "projects", project.norm_path + ".git"),
+            os.path.join(manifest.root, ".repo", "project-objects", project.name + ".git"),
+        ]
+        for git_dir in bare_candidates:
+            if os.path.isdir(git_dir):
+                return manifest.root, ["git", "--git-dir", git_dir]
+        return None
+
+    def _resolve_project_ref(self, rv: str, project: RepoProject) -> Optional[str]:
+        for candidate in self._project_revision_candidates(rv, project):
+            out = self._run_git_project(
+                ["git", "rev-parse", "--verify", f"{candidate}^{{commit}}"],
+                rv, project, timeout=10)
+            if out and out.strip():
+                return candidate
+        return None
 
     # ─── git execution ───────────────────────────────────────────────
 
@@ -582,12 +641,18 @@ class GitRepoManager:
         if self.is_repo_workspace(rv):
             total = 0
             for project in self.list_repo_projects(rv):
-                br = self._project_branch(rv, project)
-                cmd = ["git", "rev-list", "--count"] + ([br] if br else ["HEAD"])
-                manifest = self._get_manifest(rv)
+                br = self._resolve_project_ref(rv, project)
+                if not br:
+                    continue
+                context = self._project_git_context(rv, project)
+                if not context:
+                    continue
+                cwd, prefix = context
+                cmd = ["git", "rev-list", "--count", br]
+                run_cmd = prefix + cmd[1:] if prefix else cmd
                 try:
                     r = subprocess.run(
-                        cmd, cwd=manifest.abs_path(project), capture_output=True,
+                        run_cmd, cwd=cwd, capture_output=True,
                         text=True, timeout=min(timeout, 120))
                     if r.returncode == 0 and r.stdout.strip().isdigit():
                         total += int(r.stdout.strip())
@@ -787,20 +852,33 @@ class GitRepoManager:
         logger.info("构建 repo workspace 缓存: %s (%d projects)", rv, total_projects)
 
         for idx, project in enumerate(projects, 1):
-            br = self._project_branch(rv, project)
+            br = self._resolve_project_ref(rv, project)
+            if not br:
+                err = getattr(self, "last_error", {}) or {}
+                logger.warning(
+                    "跳过 project %s: 无可用 revision (configured=%s, manifest=%s, last_error=%s)",
+                    project.norm_path,
+                    self._get_repo_branch(rv) or "",
+                    project.revision or "",
+                    err.get("detail", err.get("reason", "")),
+                )
+                continue
             cache_key = self._cache_key(rv, project.norm_path)
-            cmd = ["git", "log"] + ([br] if br else [])
+            cmd = ["git", "log", br]
             if per_project_limit and not incremental:
                 cmd.append(f"--max-count={per_project_limit}")
             fmt = f"%H{FIELD_SEP}%s{FIELD_SEP}%an{FIELD_SEP}%at"
             cmd.append(f"--format={fmt}")
-            project_path = manifest.abs_path(project)
-            if not os.path.isdir(project_path):
+            context = self._project_git_context(rv, project)
+            if not context:
+                logger.warning("跳过 project %s: 不是有效 Git worktree/bare repo", project.norm_path)
                 continue
+            cwd, prefix = context
+            run_cmd = prefix + cmd[1:] if prefix else cmd
             try:
                 proc = subprocess.Popen(
-                    cmd, cwd=project_path, stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL, text=True,
+                    run_cmd, cwd=cwd, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, text=True,
                     encoding="utf-8", errors="replace",
                     bufsize=1 << 20,
                 )
@@ -830,7 +908,16 @@ class GitRepoManager:
             if batch:
                 conn.executemany(sql, batch)
                 conn.commit()
+            stderr = proc.stderr.read() if proc.stderr else ""
             proc.wait()
+            if proc.returncode != 0:
+                logger.warning(
+                    "project %s git log 失败: ref=%s cmd=%s stderr=%s",
+                    project.norm_path,
+                    br,
+                    " ".join(run_cmd[:8]),
+                    (stderr or "").strip()[:300],
+                )
             try:
                 conn.execute(
                     "INSERT OR IGNORE INTO commits_fts(rowid, commit_id, subject) "

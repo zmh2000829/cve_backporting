@@ -139,6 +139,42 @@ class RepoWorkspaceTests(unittest.TestCase):
         self.assertEqual(paths["frameworks/base"].revision, "main")
         self.assertEqual(paths["vendor/hisi/system"].revision, "dev")
 
+    def test_build_cache_can_use_repo_projects_bare_git_dir(self):
+        root = Path(tempfile.mkdtemp(dir=self.root))
+        (root / ".repo/projects/frameworks").mkdir(parents=True)
+        (root / ".repo").mkdir(exist_ok=True)
+        (root / ".repo/manifest.xml").write_text(
+            """<manifest>
+  <default revision="main" remote="origin" />
+  <project name="platform/frameworks/base" path="frameworks/base" revision="main" />
+</manifest>
+""",
+            encoding="utf-8",
+        )
+        src = root / "src-base"
+        src.mkdir()
+        _git(src, "init")
+        _git(src, "config", "user.email", "test@example.com")
+        _git(src, "config", "user.name", "Tester")
+        (src / "foo.c").write_text("int f(void) { return 1; }\n", encoding="utf-8")
+        _git(src, "add", "foo.c")
+        _git(src, "commit", "-m", "add foo")
+        _git(src, "branch", "-M", "main")
+        bare = root / ".repo/projects/frameworks/base.git"
+        subprocess.run(
+            ["git", "clone", "--bare", str(src), str(bare)],
+            check=True, capture_output=True, text=True,
+        )
+        mgr = GitRepoManager(
+            {"android-bare": {"type": "repo", "path": str(root), "manifest": ".repo/manifest.xml"}},
+            use_cache=True,
+            cache_db_path=str(root / "cache.db"),
+        )
+
+        self.assertEqual(mgr.count_commits("android-bare"), 1)
+        mgr.build_commit_cache("android-bare")
+        self.assertEqual(mgr.get_cache_count("android-bare"), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
