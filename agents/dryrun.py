@@ -518,11 +518,23 @@ class DryRunAgent:
         n = len(removed)
         ctx_all = ctx_before + ctx_after
 
-        # A) 直接搜索 removed 行
-        pos = self._locate_in_file(
-            removed, ctx_all, file_lines, hint_line, func_name)
+        # A) 严格搜索完整 removed 行。这里不能回退到 context-only 命中，
+        # 否则 removed 中的历史注释缺失时会从上下文锚点误删一大片真实代码。
+        pos = self._find_exact_sequence(removed, file_lines)
+        if pos is None:
+            pos = self._find_normalized_sequence(removed, file_lines)
+        if pos is None and func_name:
+            pos = self._find_in_function(removed, file_lines, func_name)
         if pos is not None:
             return pos, n
+
+        # A2) Android/AOSP backport 常见漂移：上游 removed 中包含历史注释，
+        # 目标分支可能已经没有这些注释，但仍保留真正需要删除的代码行。
+        # 此时不能因为整段 removed 匹配失败就跳过语义删除。
+        subset = self._locate_removed_code_subset(
+            removed, ctx_before, ctx_after, file_lines, hint_line)
+        if subset is not None:
+            return subset
 
         # B) 用 before-context 最后一行做锚点, 候选位置验证 removed 行
         if ctx_before:
@@ -539,8 +551,6 @@ class DryRunAgent:
                     expect = [l.strip() for l in removed]
                     if self._line_fuzzy_score(expect, actual) >= 0.50:
                         return pos, n
-            if candidates:
-                return candidates[0] + 1, n
 
         # C) 用 after-context 第一行做锚点, 候选位置验证 removed 行
         if ctx_after:
@@ -557,8 +567,6 @@ class DryRunAgent:
                     expect = [l.strip() for l in removed]
                     if self._line_fuzzy_score(expect, actual) >= 0.50:
                         return pos, n
-            if candidates:
-                return max(0, candidates[0] - n), n
 
         # D) Level 8: 代码语义匹配 (context 被打断时的最后手段)
         if removed:
@@ -588,6 +596,105 @@ class DryRunAgent:
                         return pos, n
 
         return None, n
+
+    def _locate_removed_code_subset(self, removed, ctx_before, ctx_after,
+                                    file_lines, hint_line):
+        meaningful = [
+            (idx, line) for idx, line in enumerate(removed or [])
+            if self._is_meaningful_removed_code_line(line)
+        ]
+        if not meaningful or len(meaningful) == len(removed or []):
+            return None
+
+        groups = []
+        cur = []
+        for idx, line in meaningful:
+            if cur and idx != cur[-1][0] + 1:
+                groups.append(cur)
+                cur = []
+            cur.append((idx, line))
+        if cur:
+            groups.append(cur)
+
+        groups.sort(key=lambda g: (-len(g), -sum(len(x[1].strip()) for x in g)))
+        for group in groups:
+            seq = [line for _idx, line in group]
+            candidates = []
+            pos = self._find_exact_sequence(seq, file_lines)
+            if pos is not None:
+                candidates.append(pos)
+            pos = self._find_normalized_sequence(seq, file_lines)
+            if pos is not None:
+                candidates.append(pos)
+            if hint_line is not None and hint_line > 0:
+                pos = self._find_near_hint(seq, file_lines, hint_line, window=500)
+                if pos is not None:
+                    candidates.append(pos)
+            if len(seq) == 1:
+                candidates.extend(self._find_anchor_line_candidates(
+                    seq[0], file_lines, hint_line, window=700, max_candidates=8))
+
+            seen = set()
+            for candidate in candidates:
+                if candidate in seen:
+                    continue
+                seen.add(candidate)
+                actual = file_lines[candidate:candidate + len(seq)]
+                if self._line_fuzzy_score(
+                        [l.strip() for l in seq],
+                        [l.strip() for l in actual]) < 0.85:
+                    continue
+                if self._check_removal_span_context(
+                        ctx_before, ctx_after, file_lines, candidate, len(seq)):
+                    return candidate, len(seq)
+        return None
+
+    @staticmethod
+    def _is_meaningful_removed_code_line(line: str) -> bool:
+        text = (line or "").strip()
+        if not text or len(text) < 6:
+            return False
+        if text.startswith(("//", "/*", "*")):
+            return False
+        if text in ("{", "}", "};", ");"):
+            return False
+        return bool(re.search(r"[A-Za-z_]\w*", text))
+
+    def _check_removal_span_context(self, ctx_before, ctx_after,
+                                    file_lines, pos: int, n_remove: int) -> bool:
+        checked = 0
+        matched = 0.0
+
+        for offset, expected in enumerate(reversed((ctx_before or [])[-4:]), 1):
+            if _is_trivial_anchor(expected):
+                continue
+            idx = pos - offset
+            if idx < 0:
+                continue
+            checked += 1
+            matched += self._context_line_match_score(expected, file_lines[idx])
+
+        for offset, expected in enumerate((ctx_after or [])[:4]):
+            if _is_trivial_anchor(expected):
+                continue
+            idx = pos + n_remove + offset
+            if idx >= len(file_lines):
+                continue
+            checked += 1
+            matched += self._context_line_match_score(expected, file_lines[idx])
+
+        if checked == 0:
+            return not ctx_before and not ctx_after
+        return (matched / checked) >= 0.45
+
+    def _context_line_match_score(self, expected: str, actual: str) -> float:
+        e = self._normalize_ws(expected)
+        a = self._normalize_ws(actual)
+        if not e or not a:
+            return 0.0
+        if e == a:
+            return 1.0
+        return 1.0 if difflib.SequenceMatcher(None, e, a).ratio() >= 0.80 else 0.0
 
     def _check_insertion_context(self, ctx_after: List[str],
                                 file_lines: List[str],
@@ -1298,6 +1405,11 @@ class DryRunAgent:
 
         if verified_hunks == 0:
             return None, False
+        if verified_hunks != total_hunks:
+            logger.info(
+                "[L5] 直接验证未全量覆盖: %d/%d hunk，禁止返回部分补丁",
+                verified_hunks, total_hunks)
+            return None, False
         return "\n".join(all_diff_parts) + "\n", True
 
     # ─── 上下文重生成 (L3) ────────────────────────────────────────
@@ -1537,6 +1649,11 @@ class DryRunAgent:
         logger.info("[L3.5] 零上下文重建: %d/%d hunk",
                     adapted_hunks, total_hunks)
         if adapted_hunks == 0:
+            return None
+        if adapted_hunks != total_hunks:
+            logger.info(
+                "[L3.5] 零上下文未全量覆盖: %d/%d hunk，禁止返回部分补丁",
+                adapted_hunks, total_hunks)
             return None
         return "\n".join(new_parts) + "\n"
 
