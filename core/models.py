@@ -13,6 +13,7 @@ class CveInfo:
     introduced_commits: List[Dict] = field(default_factory=list)
     fix_commits: List[Dict] = field(default_factory=list)
     mainline_fix_commit: str = ""
+    mainline_fix_repo: str = ""
     mainline_version: str = ""
     version_commit_mapping: Dict[str, str] = field(default_factory=dict)
 

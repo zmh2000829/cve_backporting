@@ -19,6 +19,11 @@ repositories:
   #   # 可选：manifest include 的搜索根。未配置时默认查 .repo/manifests 和 .repo/local_manifests
   #   manifest_include_dirs:
   #     - ".repo/manifests"
+  #   # 可选：当社区修复补丁在 googlesource 的具体 project 中时使用。
+  #   # validate/analyze 提供 source_repo=platform/frameworks/base 时会拼成:
+  #   # https://android.googlesource.com/platform/frameworks/base
+  #   patch_sources:
+  #     googlesource_base: "https://android.googlesource.com"
   #   branch: "HEAD"
 
 # ─── 缓存 ────────────────────────────────────────────────────

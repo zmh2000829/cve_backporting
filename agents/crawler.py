@@ -3,7 +3,7 @@ Crawler Agent
 负责从外部数据源获取CVE漏洞信息和补丁内容：
   - MITRE CVE API (cveawg.mitre.org)
   - git.kernel.org (主要补丁源，format-patch 格式)
-  - kernel.googlesource.com (备选)
+  - kernel.googlesource.com / android.googlesource.com (备选或显式 project)
 """
 
 import re
@@ -32,6 +32,7 @@ class CrawlerAgent:
     KERNEL_ORG_STABLE = "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git"
     KERNEL_ORG_TORVALDS = "https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git"
     GOOGLESOURCE = "https://kernel.googlesource.com/pub/scm/linux/kernel/git/stable/linux"
+    ANDROID_GOOGLESOURCE_BASE = "https://android.googlesource.com"
 
     _PATCH_RETRIES = 3
     _REMOTE_TIMEOUT = 30
@@ -62,16 +63,20 @@ class CrawlerAgent:
         return info
 
     def fetch_patch(self, commit_id: str, target_version: str = None,
-                    local_first: bool = False) -> Optional[PatchInfo]:
+                    local_first: bool = False,
+                    source_repo: str = None) -> Optional[PatchInfo]:
         """
         获取补丁元数据+diff。
         local_first=False (默认): kernel.org > googlesource > 本地
         local_first=True:  本地 > kernel.org > googlesource
             适用于 batch-validate 等场景，commit 大概率已在本地对象库中，
             跳过网络请求可节省数十秒/个。
+        source_repo: 可选的上游仓库路径或 URL，例如 platform/frameworks/base
+            或 https://android.googlesource.com/platform/frameworks/base。
+            提供后优先从该 googlesource project 获取补丁。
         """
-        logger.info("[Crawler] 获取 patch %s (local_first=%s) ...",
-                    commit_id[:12], local_first)
+        logger.info("[Crawler] 获取 patch %s (local_first=%s, source_repo=%s) ...",
+                    commit_id[:12], local_first, source_repo or "")
 
         if local_first and self.git_mgr and target_version:
             patch_local = self._fetch_patch_local(commit_id, target_version)
@@ -79,11 +84,24 @@ class CrawlerAgent:
                 logger.info("[Crawler] 本地仓库命中: %s", commit_id[:12])
                 return patch_local
 
+        if source_repo:
+            patch_gs = self._fetch_from_googlesource(
+                commit_id, source_repo=source_repo, target_version=target_version)
+            if patch_gs:
+                patch_gs = self._adapt_patch_paths_for_repo_target(
+                    patch_gs, source_repo, target_version)
+            if patch_gs and patch_gs.subject and patch_gs.diff_code:
+                return patch_gs
+
         patch = self._fetch_from_kernel_org(commit_id)
         if patch and patch.subject and patch.diff_code:
             return patch
 
-        patch_gs = self._fetch_from_googlesource(commit_id)
+        patch_gs = self._fetch_from_googlesource(
+            commit_id, source_repo=source_repo, target_version=target_version)
+        if patch_gs and source_repo:
+            patch_gs = self._adapt_patch_paths_for_repo_target(
+                patch_gs, source_repo, target_version)
         if patch_gs and patch_gs.subject and patch_gs.diff_code:
             return patch_gs
         if patch_gs:
@@ -210,13 +228,22 @@ class CrawlerAgent:
 
     # ─── googlesource.com (JSON + TEXT, 备选) ────────────────────────
 
-    def _fetch_from_googlesource(self, commit_id: str) -> Optional[PatchInfo]:
-        """从 kernel.googlesource.com 获取 (含重试)"""
-        patch = PatchInfo(commit_id=commit_id)
+    def _fetch_from_googlesource(self, commit_id: str, source_repo: str = None,
+                                 target_version: str = None) -> Optional[PatchInfo]:
+        """从 googlesource project 获取 (含重试)"""
+        for repo_url in self._googlesource_repo_urls(source_repo, target_version):
+            patch = PatchInfo(commit_id=commit_id)
+            json_url = f"{repo_url}/+/{commit_id}?format=JSON"
+            diff_url = f"{repo_url}/+/{commit_id}%5E%21?format=TEXT"
+            fetched = self._fetch_from_googlesource_urls(patch, json_url, diff_url)
+            if fetched:
+                logger.info("[Crawler] googlesource 获取成功: %s %s",
+                            repo_url, commit_id[:12])
+                return fetched
+        return None
 
-        json_url = f"{self.GOOGLESOURCE}/+/{commit_id}?format=JSON"
-        diff_url = f"{self.GOOGLESOURCE}/+/{commit_id}%5E%21?format=TEXT"
-
+    def _fetch_from_googlesource_urls(self, patch: PatchInfo, json_url: str,
+                                      diff_url: str) -> Optional[PatchInfo]:
         for attempt in range(1, self._PATCH_RETRIES + 1):
             if not patch.subject:
                 try:
@@ -263,6 +290,84 @@ class CrawlerAgent:
                 time.sleep(attempt)
 
         return patch if (patch.subject or patch.diff_code) else None
+
+    def _googlesource_repo_urls(self, source_repo: str = None,
+                                target_version: str = None) -> List[str]:
+        source = (source_repo or "").strip()
+        if not source:
+            return [self.GOOGLESOURCE]
+        normalized = self._normalize_googlesource_repo(source)
+        if normalized.startswith("http://") or normalized.startswith("https://"):
+            return [normalized]
+        return [f"{base.rstrip('/')}/{normalized}"
+                for base in self._configured_googlesource_bases(target_version)]
+
+    def _configured_googlesource_bases(self, target_version: str = None) -> List[str]:
+        bases = []
+        cfg = None
+        if self.git_mgr and target_version:
+            cfg = (self.git_mgr.repo_configs or {}).get(target_version)
+        if isinstance(cfg, dict):
+            patch_sources = cfg.get("patch_sources") or {}
+            for value in (
+                patch_sources.get("googlesource_base"),
+                cfg.get("googlesource_base"),
+            ):
+                if value:
+                    bases.append(str(value).rstrip("/"))
+        if not bases:
+            bases.append(self.ANDROID_GOOGLESOURCE_BASE)
+        return list(dict.fromkeys(bases))
+
+    @staticmethod
+    def _normalize_googlesource_repo(source_repo: str) -> str:
+        source = (source_repo or "").strip().rstrip("/")
+        if "/+/" in source:
+            source = source.split("/+/", 1)[0].rstrip("/")
+        if source.endswith(".git"):
+            source = source[:-4]
+        if source.startswith("http://") or source.startswith("https://"):
+            return source
+        if source.startswith("android.googlesource.com/"):
+            return "https://" + source
+        return source.strip("/")
+
+    def _adapt_patch_paths_for_repo_target(self, patch: PatchInfo, source_repo: str,
+                                           target_version: str = None) -> PatchInfo:
+        if not patch or not source_repo or not self.git_mgr or not target_version:
+            return patch
+        if not getattr(self.git_mgr, "is_repo_workspace", lambda _rv: False)(target_version):
+            return patch
+        manifest = self.git_mgr._get_manifest(target_version)
+        if not manifest:
+            return patch
+        project = self._match_manifest_project(manifest, source_repo)
+        if not project or not project.norm_path:
+            return patch
+        prefix = project.norm_path
+        files = patch.modified_files or self._files_from_diff(patch.diff_code)
+        if files and all(f == prefix or f.startswith(prefix + "/") for f in files):
+            return patch
+        patch.diff_code = self.git_mgr._prefix_diff_paths(patch.diff_code, prefix)
+        patch.modified_files = [
+            f if (f == prefix or f.startswith(prefix + "/")) else f"{prefix}/{f.strip('/')}"
+            for f in files
+            if f
+        ]
+        return patch
+
+    def _match_manifest_project(self, manifest, source_repo: str):
+        source = self._normalize_googlesource_repo(source_repo)
+        if source.startswith("http://") or source.startswith("https://"):
+            source = re.sub(r"^https?://[^/]+/", "", source)
+        source = source.strip("/")
+        candidates = {source}
+        if source.startswith("platform/"):
+            candidates.add(source[len("platform/"):])
+        for project in manifest.projects:
+            if project.name.strip("/") in candidates or project.norm_path in candidates:
+                return project
+        return None
 
     def _fetch_patch_local(self, commit_id: str, target_version: str) -> Optional[PatchInfo]:
         """从本地 git 仓库获取 commit 信息 (commit 可能在对象库中但不在目标分支上)"""

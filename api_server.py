@@ -83,17 +83,19 @@ def _coerce_workers(payload: Dict[str, Any], deep: bool = False) -> int:
 
 def _build_mainline_cve_info(payload: Dict[str, Any], cve_id: str) -> CveInfo:
     mainline_fix = (payload.get("mainline_fix") or "").strip()
+    mainline_repo = (payload.get("mainline_repo") or payload.get("source_repo") or "").strip()
     mainline_intro = (payload.get("mainline_intro") or "").strip()
     if not mainline_fix:
         return None
 
-    fix_commits = [{"commit_id": mainline_fix, "subject": ""}]
+    fix_commits = [{"commit_id": mainline_fix, "subject": "", "repo": mainline_repo}]
     intro_commits = ([{"commit_id": mainline_intro, "subject": ""}]
                      if mainline_intro else [])
     return CveInfo(
         cve_id=cve_id,
         fix_commits=fix_commits,
         mainline_fix_commit=mainline_fix,
+        mainline_fix_repo=mainline_repo,
         introduced_commits=intro_commits,
     )
 
@@ -210,10 +212,12 @@ def _default_batch_validate_handler(payload: Dict[str, Any], config):
         mainline_fix = (item.get("mainline_fix") or "").strip()
         if mainline_fix:
             intro = (item.get("mainline_intro") or "").strip()
+            mainline_repo = (item.get("mainline_repo") or item.get("source_repo") or "").strip()
             cve_info = CveInfo(
                 cve_id=cve_id,
-                fix_commits=[{"commit_id": mainline_fix, "subject": ""}],
+                fix_commits=[{"commit_id": mainline_fix, "subject": "", "repo": mainline_repo}],
                 mainline_fix_commit=mainline_fix,
+                mainline_fix_repo=mainline_repo,
                 introduced_commits=[{"commit_id": intro, "subject": ""}] if intro else [],
             )
 

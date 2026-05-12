@@ -2,6 +2,8 @@
 """Android repo workspace routing tests."""
 
 import os
+import base64
+import json
 import subprocess
 import sys
 import tempfile
@@ -11,6 +13,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from agents.dryrun import DryRunAgent
+from agents.crawler import CrawlerAgent
 from core.git_manager import GitRepoManager
 from core.models import PatchInfo
 
@@ -174,6 +177,69 @@ class RepoWorkspaceTests(unittest.TestCase):
         self.assertEqual(mgr.count_commits("android-bare"), 1)
         mgr.build_commit_cache("android-bare")
         self.assertEqual(mgr.get_cache_count("android-bare"), 1)
+
+    def test_crawler_fetches_android_googlesource_project_and_prefixes_paths(self):
+        commit = "a" * 40
+        diff = """diff --git a/foo.c b/foo.c
+--- a/foo.c
++++ b/foo.c
+@@ -1 +1 @@
+-int f(void) { return 1; }
++int f(void) { return 3; }
+"""
+
+        class Resp:
+            def __init__(self, status_code, text):
+                self.status_code = status_code
+                self.text = text
+
+        class FakeSession:
+            def __init__(self):
+                self.headers = {}
+                self.urls = []
+
+            def get(self, url, **_kwargs):
+                self.urls.append(url)
+                if url.endswith("?format=JSON"):
+                    return Resp(200, ")]}'\n" + json.dumps({
+                        "message": "Fix foo\n\nBody",
+                        "author": {"name": "Tester", "email": "test@example.com", "time": "now"},
+                        "tree_diff": [{"old_path": "foo.c", "new_path": "foo.c"}],
+                    }))
+                return Resp(200, base64.b64encode(diff.encode("utf-8")).decode("ascii"))
+
+        crawler = CrawlerAgent(git_mgr=self.git_mgr)
+        fake = FakeSession()
+        crawler.session = fake
+
+        patch = crawler.fetch_patch(
+            commit,
+            target_version="android",
+            source_repo="platform/frameworks/base",
+        )
+
+        self.assertIsNotNone(patch)
+        self.assertIn(
+            "https://android.googlesource.com/platform/frameworks/base/+/" + commit,
+            fake.urls[0],
+        )
+        self.assertEqual(patch.modified_files, ["frameworks/base/foo.c"])
+        self.assertIn("diff --git a/frameworks/base/foo.c b/frameworks/base/foo.c", patch.diff_code)
+
+    def test_repo_validate_worktree_is_created_for_commit_project(self):
+        wt = Path(tempfile.mkdtemp(dir=self.root))
+        rollback = f"{self.base_commit}~0"
+        self.assertTrue(self.git_mgr.create_worktree("android", rollback, str(wt)))
+        try:
+            self.assertTrue((wt / "frameworks/base/foo.c").exists())
+            mgr = GitRepoManager(
+                {"android": {"type": "repo", "path": str(wt), "manifest": ".repo/manifest.xml", "branch": "HEAD"}},
+                use_cache=False,
+            )
+            content = mgr.get_file_content("frameworks/base/foo.c", "android")
+            self.assertIn("return 1", content)
+        finally:
+            self.git_mgr.remove_worktree("android", str(wt))
 
 
 if __name__ == "__main__":

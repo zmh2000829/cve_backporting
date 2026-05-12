@@ -170,6 +170,7 @@ def register(subparsers, parent):
     validate.add_argument("--known-fix", required=True, help="本地仓库中真实修复的 commit ID；多个可用逗号分隔")
     validate.add_argument("--known-prereqs", default="", help="实际先合入的前置commit列表 (逗号分隔)")
     validate.add_argument("--mainline-fix", default="", help="社区 mainline 修复 commit ID (提供后跳过 MITRE 爬取)")
+    validate.add_argument("--mainline-repo", default="", help="社区修复 commit 所在 googlesource project/URL，如 platform/frameworks/base")
     validate.add_argument("--mainline-intro", default="", help="社区 mainline 引入 commit ID (可选)")
     validate.add_argument("--deep", action="store_true", help="深度分析模式: 漏洞分析+补丁检视+风险收益+合入建议")
     add_policy_profile_arg(validate)
@@ -210,14 +211,21 @@ def _build_cve_info_from_json(info: dict, cve_id: str):
 
     fix_commits = []
     mainline_fix = ""
+    mainline_repo = ""
     for patch in (mainline_fixes if isinstance(mainline_fixes, list) else []):
         if isinstance(patch, dict) and patch.get("commit"):
+            repo = (
+                patch.get("repo") or patch.get("source_repo") or patch.get("project")
+                or patch.get("repository") or patch.get("source_url") or patch.get("url") or ""
+            )
             fix_commits.append({
                 "commit_id": patch["commit"],
                 "subject": patch.get("subject", ""),
+                "repo": repo,
             })
             if not mainline_fix:
                 mainline_fix = patch["commit"]
+                mainline_repo = repo
 
     intro_commits = []
     for patch in (mainline_intros if isinstance(mainline_intros, list) else []):
@@ -234,6 +242,7 @@ def _build_cve_info_from_json(info: dict, cve_id: str):
         cve_id=cve_id,
         fix_commits=fix_commits,
         mainline_fix_commit=mainline_fix,
+        mainline_fix_repo=mainline_repo,
         introduced_commits=intro_commits,
     )
 
@@ -505,16 +514,22 @@ def run_validate(args, config, runtime):
 
     cve_info = None
     mainline_fix = getattr(args, "mainline_fix", "") or ""
+    mainline_repo = getattr(args, "mainline_repo", "") or ""
     mainline_intro = getattr(args, "mainline_intro", "") or ""
+    if mainline_fix and not mainline_repo and getattr(git_mgr, "is_repo_workspace", lambda _rv: False)(tv):
+        project = git_mgr._find_commit_project(primary_known_fix, tv)
+        if project:
+            mainline_repo = project.name
     if mainline_fix:
         from core.models import CveInfo
 
-        fix_commits = [{"commit_id": mainline_fix, "subject": ""}]
+        fix_commits = [{"commit_id": mainline_fix, "subject": "", "repo": mainline_repo}]
         intro_commits = ([{"commit_id": mainline_intro, "subject": ""}] if mainline_intro else [])
         cve_info = CveInfo(
             cve_id=args.cve_id,
             fix_commits=fix_commits,
             mainline_fix_commit=mainline_fix,
+            mainline_fix_repo=mainline_repo,
             introduced_commits=intro_commits,
         )
 
@@ -525,6 +540,8 @@ def run_validate(args, config, runtime):
     ]
     if mainline_fix:
         info_lines.append(f"[bold]Mainline Fix:[/] {mainline_fix[:12]}  [dim](跳过 MITRE 爬取)[/]")
+    if mainline_repo:
+        info_lines.append(f"[bold]Mainline Repo:[/] {mainline_repo}")
     if mainline_intro:
         info_lines.append(f"[bold]Mainline Intro:[/] {mainline_intro[:12]}")
     runtime.console.print(Panel(

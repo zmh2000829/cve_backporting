@@ -170,10 +170,14 @@ repositories:
     manifest: ".repo/manifest.xml"
     manifest_include_dirs:
       - ".repo/manifests"
+    patch_sources:
+      googlesource_base: "https://android.googlesource.com"
     branch: "HEAD"
 ```
 
 配置为 `type: repo` 后，工具会解析 `.repo/manifest.xml` 和其中的 `<include name="..."/>`。`manifest_include_dirs` 是可选项；未配置时默认查 `.repo/manifests` 和 `.repo/local_manifests`，你的 `/home/tangjing/platform/.repo/manifests/android/toolchain.xml` 这种布局可以直接支持。工具会把 `frameworks/base/...`、`system/core/...`、`external/...` 等路径自动路由到对应 Git project；搜索、文件读取、同文件历史、DryRun 都会在子仓内执行；对 CLI/API 用户仍然只暴露 `target_version=android-14`。
+
+Android 社区修复 commit 常在具体 googlesource project 下，例如 `platform/frameworks/base`。工具支持通过 `--mainline-repo platform/frameworks/base` 显式指定，也支持完整 URL `https://android.googlesource.com/platform/frameworks/base`。validate 场景如果未传 `--mainline-repo`，工具会尝试从本地真实合入 commit 所在的 manifest project 反推上游 project name。远程 diff 是 project 相对路径，工具会自动补回本地 workspace 前缀，例如把 `foo/bar.java` 转为 `frameworks/base/foo/bar.java` 后再进入 missing-intro、依赖分析和 DryRun。
 
 如需启用 LLM：
 
@@ -290,6 +294,7 @@ CVE-2024-26635
 | --- | --- |
 | 基本验证 | `python cli.py validate --cve CVE-2024-26633 --target 5.10-hulk --known-fix <commit>` |
 | 直接指定上游 fix | `python cli.py validate --cve CVE-2024-26633 --target 5.10-hulk --known-fix <commit> --mainline-fix <upstream_fix>` |
+| Android googlesource fix | `python cli.py validate --cve CVE-2024-XXXX --target android-14 --known-fix <local_fix> --mainline-fix <aosp_fix> --mainline-repo platform/frameworks/base` |
 | 同时指定 introduced commit | `python cli.py validate --cve CVE-2024-26633 --target 5.10-hulk --known-fix <commit> --mainline-fix <fix> --mainline-intro <intro>` |
 | 深度验证 | `python cli.py validate --cve CVE-2024-26633 --target 5.10-hulk --known-fix <commit> --deep` |
 
@@ -318,7 +323,7 @@ python cli.py server --host 127.0.0.1 --port 8000
 | `analyze` | `--target` + `--cve` 或 `--batch` | `--deep`、`--no-dryrun`、`--policy-profile`、`--enable-p2` / `--disable-p2` | TUI + `report.json` |
 | `check-intro` | `--target` + `--cve` 或 `--commit` | 无 | TUI |
 | `check-fix` | `--target` + `--cve` 或 `--commit` | 无 | TUI |
-| `validate` | `--target` + `--cve` + `--known-fix` | `--mainline-fix`、`--mainline-intro`、`--deep`、`--policy-profile`、`--enable-p2` / `--disable-p2` | TUI + `report.json` + patch artifacts |
+| `validate` | `--target` + `--cve` + `--known-fix` | `--mainline-fix`、`--mainline-repo`、`--mainline-intro`、`--deep`、`--policy-profile`、`--enable-p2` / `--disable-p2` | TUI + `report.json` + patch artifacts |
 | `batch-validate` | `--target` + `--file` | `--offset`、`--limit`、`--workers`、`--deep`、`--xlsx`、`--policy-profile`、`--enable-p2` / `--disable-p2` | TUI + batch summary JSON；加 `--xlsx` 时额外输出 Excel 明细 |
 | `server` | 无 | `--host`、`--port` | HTTP API 服务 |
 
@@ -445,6 +450,7 @@ python cli.py server --host 127.0.0.1 --port 8000
   "cve_id": "CVE-2024-26633",
   "known_fix": "da23bd709b46",
   "mainline_fix": "d375b98e0248",
+  "mainline_repo": "platform/frameworks/base",
   "mainline_intro": "fbfa743a9d2a"
 }
 ```
@@ -469,7 +475,7 @@ README 里只保留最小字段视图：
 | 路由 | 必填字段 | 可选字段 | 说明 |
 | --- | --- | --- | --- |
 | `POST /api/analyze` | `target_version` + `cve_id` | `deep`、`no_dryrun`、`enable_p2` / `disable_p2` | 支持 `cves` / `cve_ids` 批量 |
-| `POST /api/validate` | `target_version` + `cve_id` + `known_fix` | `known_fixes`、`known_prereqs`、`mainline_fix`、`mainline_intro`、`deep`、`enable_p2` / `disable_p2` | `known_fix` 可是单个 commit 或逗号分隔字符串 |
+| `POST /api/validate` | `target_version` + `cve_id` + `known_fix` | `known_fixes`、`known_prereqs`、`mainline_fix`、`mainline_repo`、`mainline_intro`、`deep`、`enable_p2` / `disable_p2` | `known_fix` 可是单个 commit 或逗号分隔字符串 |
 | `POST /api/batch-validate` | `target_version` + `items[]` | `workers`、`deep`、`enable_p2` / `disable_p2` | `items[*]` 至少要有 `cve_id` + `known_fix` |
 
 ### 8.4 API 返回里先看什么

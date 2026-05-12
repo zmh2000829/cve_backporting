@@ -89,6 +89,21 @@ class Pipeline:
         return getattr(self.analysis_config, name, default)
 
     @staticmethod
+    def _source_repo_for_commit(cve_info, commit_id: str) -> str:
+        if not cve_info or not commit_id:
+            return ""
+        for entry in list(getattr(cve_info, "fix_commits", []) or []) + list(getattr(cve_info, "introduced_commits", []) or []):
+            if not isinstance(entry, dict):
+                continue
+            entry_commit = entry.get("commit_id") or entry.get("commit") or ""
+            if entry_commit and not commit_id.startswith(entry_commit) and not entry_commit.startswith(commit_id):
+                continue
+            for key in ("repo", "source_repo", "project", "repository", "source_url", "url"):
+                if entry.get(key):
+                    return str(entry[key])
+        return str(getattr(cve_info, "mainline_fix_repo", "") or "")
+
+    @staticmethod
     def _intro_probe_verdict(search: SearchResult) -> str:
         if not search:
             return ""
@@ -536,9 +551,11 @@ class Pipeline:
 
         # ── Step 2: Crawler - Patch ──────────────────────────────────
         _cb("crawler_patch", "running")
+        fix_source_repo = self._source_repo_for_commit(cve_info, cve_info.fix_commit_id)
         fix_patch = self.crawler.fetch_patch(
             cve_info.fix_commit_id, target_version,
-            local_first=prefer_local)
+            local_first=prefer_local,
+            source_repo=fix_source_repo)
         if not fix_patch:
             _cb("crawler_patch", "fail", "获取补丁失败 (远程+本地均不可用)")
             result.recommendations.append("无法获取修复补丁内容 (googlesource不可达且本地仓库无此commit)")
@@ -550,9 +567,11 @@ class Pipeline:
         # ── Step 3: Analysis - 引入commit (启用包含度匹配) ─────────────
         if cve_info.introduced_commit_id:
             _cb("analysis_intro", "running")
+            intro_source_repo = self._source_repo_for_commit(cve_info, cve_info.introduced_commit_id)
             intro_patch = self.crawler.fetch_patch(
                 cve_info.introduced_commit_id, target_version,
-                local_first=prefer_local)
+                local_first=prefer_local,
+                source_repo=intro_source_repo)
             result.introduced_search = self.analysis.search(
                 cve_info.introduced_commit_id,
                 intro_patch.subject if intro_patch else "",

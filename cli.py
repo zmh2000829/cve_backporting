@@ -1718,6 +1718,15 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
     if not known_fix_commits:
         known_fix_commits = [known_fix]
     primary_known_fix = known_fix_commits[0]
+    if cve_info and getattr(cve_info, "mainline_fix_commit", ""):
+        has_source_repo = bool(getattr(cve_info, "mainline_fix_repo", ""))
+        if not has_source_repo and getattr(git_mgr, "is_repo_workspace", lambda _rv: False)(tv):
+            project = git_mgr._find_commit_project(primary_known_fix, tv)
+            if project:
+                cve_info.mainline_fix_repo = project.name
+                for entry in getattr(cve_info, "fix_commits", []) or []:
+                    if isinstance(entry, dict) and (entry.get("commit_id") or entry.get("commit")) == cve_info.mainline_fix_commit:
+                        entry.setdefault("repo", project.name)
     actual_solution_commits = _dedupe_commit_list(list(known_fix_commits) + list(known_prereqs or []))
 
     missing_fixes = []
@@ -1769,8 +1778,11 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
     stage_events, record_stage = _make_stage_trace_tracker(stage_callback=stage_callback)
 
     try:
+        wt_repo_config = {"path": wt_dir, "branch": "HEAD"}
+        if getattr(git_mgr, "is_repo_workspace", lambda _rv: False)(tv):
+            wt_repo_config.update({"type": "repo", "manifest": ".repo/manifest.xml"})
         wt_mgr = GitRepoManager(
-            {tv: {"path": wt_dir, "branch": "HEAD"}},
+            {tv: wt_repo_config},
             use_cache=False,
         )
         pipe = Pipeline(wt_mgr, path_mappings=config.path_mappings,

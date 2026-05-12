@@ -10,6 +10,7 @@ import os
 import logging
 import sqlite3
 import time
+import shutil
 from typing import List, Dict, Optional, Callable
 from core.models import GitCommit
 from core.repo_workspace import RepoManifest, RepoProject
@@ -302,6 +303,9 @@ class GitRepoManager:
                 continue
             if re.fullmatch(r"[0-9a-fA-F]{7,40}", arg):
                 return arg
+            m = re.fullmatch(r"([0-9a-fA-F]{7,40})(?:[~^].*)", arg)
+            if m:
+                return m.group(1)
         return ""
 
     # ─── commit lookup ───────────────────────────────────────────────
@@ -583,6 +587,8 @@ class GitRepoManager:
         rp = self._get_repo_path(rv)
         if not rp:
             return False
+        if self.is_repo_workspace(rv):
+            return self._create_repo_project_worktree(rv, commit, worktree_path)
         try:
             subprocess.run(
                 ["git", "worktree", "add", "--detach", worktree_path, commit],
@@ -602,6 +608,9 @@ class GitRepoManager:
         rp = self._get_repo_path(rv)
         if not rp:
             return
+        if self.is_repo_workspace(rv):
+            self._remove_repo_project_worktree(rv, worktree_path)
+            return
         try:
             subprocess.run(
                 ["git", "worktree", "remove", "--force", worktree_path],
@@ -610,6 +619,80 @@ class GitRepoManager:
             logger.info("清理 worktree: %s", worktree_path)
         except Exception as e:
             logger.warning("清理 worktree 失败: %s (可手动删除 %s)", e, worktree_path)
+
+    def _create_repo_project_worktree(self, rv: str, commit: str, worktree_path: str) -> bool:
+        manifest = self._get_manifest(rv)
+        if not manifest:
+            return False
+        project = self._project_for_revision(rv, commit)
+        if not project:
+            logger.error("repo worktree 创建失败: 无法定位 commit 所属 project: %s", commit)
+            return False
+        context = self._project_git_context(rv, project)
+        if not context:
+            logger.error("repo worktree 创建失败: project 无有效 Git 上下文: %s", project.norm_path)
+            return False
+        project_wt = os.path.join(worktree_path, project.norm_path)
+        os.makedirs(os.path.dirname(project_wt), exist_ok=True)
+        cwd, prefix = context
+        cmd = prefix + ["worktree", "add", "--detach", project_wt, commit] if prefix else [
+            "git", "worktree", "add", "--detach", project_wt, commit]
+        try:
+            subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=60, check=True)
+            repo_dir = os.path.join(worktree_path, ".repo")
+            os.makedirs(repo_dir, exist_ok=True)
+            with open(os.path.join(repo_dir, "manifest.xml"), "w", encoding="utf-8") as f:
+                f.write(
+                    "<manifest>\n"
+                    "  <default revision=\"HEAD\" remote=\"origin\" />\n"
+                    f"  <project name=\"{project.name}\" path=\"{project.norm_path}\" revision=\"HEAD\" />\n"
+                    "</manifest>\n"
+                )
+            with open(os.path.join(repo_dir, "cve_worktree_project"), "w", encoding="utf-8") as f:
+                f.write(project.norm_path)
+            logger.info("创建 repo project worktree: %s @ %s", project.norm_path, commit[:12])
+            return True
+        except subprocess.CalledProcessError as e:
+            logger.error("创建 repo project worktree 失败: %s", e.stderr.strip()[:200])
+            return False
+        except Exception as e:
+            logger.error("创建 repo project worktree 异常: %s", e)
+            return False
+
+    def _remove_repo_project_worktree(self, rv: str, worktree_path: str):
+        manifest_file = os.path.join(worktree_path, ".repo", "cve_worktree_project")
+        project_path = ""
+        try:
+            if os.path.exists(manifest_file):
+                with open(manifest_file, "r", encoding="utf-8") as f:
+                    project_path = f.read().strip()
+            if project_path:
+                project = self._project_by_path(rv, project_path)
+                context = self._project_git_context(rv, project) if project else None
+                if context:
+                    cwd, prefix = context
+                    project_wt = os.path.join(worktree_path, project_path)
+                    cmd = prefix + ["worktree", "remove", "--force", project_wt] if prefix else [
+                        "git", "worktree", "remove", "--force", project_wt]
+                    subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=30)
+            shutil.rmtree(worktree_path, ignore_errors=True)
+            logger.info("清理 repo project worktree: %s", worktree_path)
+        except Exception as e:
+            logger.warning("清理 repo project worktree 失败: %s (可手动删除 %s)", e, worktree_path)
+
+    def _project_for_revision(self, rv: str, revision: str) -> Optional[RepoProject]:
+        base = self._first_commit_arg([revision])
+        if base:
+            project = self._find_commit_project(base, rv)
+            if project:
+                return project
+        for project in self.list_repo_projects(rv):
+            out = self._run_git_project(
+                ["git", "rev-parse", "--verify", f"{revision}^{{commit}}"],
+                rv, project, timeout=10)
+            if out and out.strip():
+                return project
+        return None
 
     # ─── cache build (optimized for 10M+ commits) ─────────────────────
 
