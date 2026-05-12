@@ -520,11 +520,8 @@ class DryRunAgent:
 
         # A) 严格搜索完整 removed 行。这里不能回退到 context-only 命中，
         # 否则 removed 中的历史注释缺失时会从上下文锚点误删一大片真实代码。
-        pos = self._find_exact_sequence(removed, file_lines)
-        if pos is None:
-            pos = self._find_normalized_sequence(removed, file_lines)
-        if pos is None and func_name:
-            pos = self._find_in_function(removed, file_lines, func_name)
+        pos = self._locate_expected_with_context(
+            removed, ctx_before, ctx_after, file_lines, hint_line, func_name)
         if pos is not None:
             return pos, n
 
@@ -596,6 +593,91 @@ class DryRunAgent:
                         return pos, n
 
         return None, n
+
+    def _locate_expected_with_context(self, expected, ctx_before, ctx_after,
+                                      file_lines, hint_line, func_name):
+        if not expected:
+            return None
+
+        candidates = []
+        candidates.extend(self._find_sequence_candidates(
+            expected, file_lines, normalized=False))
+        candidates.extend(self._find_sequence_candidates(
+            expected, file_lines, normalized=True))
+        if func_name:
+            pos = self._find_in_function(expected, file_lines, func_name)
+            if pos is not None:
+                candidates.append(pos)
+
+        unique = []
+        seen = set()
+        for pos in candidates:
+            if pos in seen:
+                continue
+            seen.add(pos)
+            unique.append(pos)
+
+        if not unique:
+            return None
+        if len(unique) == 1:
+            return unique[0]
+
+        scored = []
+        for pos in unique:
+            context_score, checked = self._score_candidate_context(
+                ctx_before, ctx_after, file_lines, pos, len(expected))
+            distance = abs(pos - (hint_line - 1)) if hint_line else 0
+            scored.append((context_score, checked, -distance, pos))
+
+        scored.sort(reverse=True)
+        best_context, best_checked, _best_distance, best_pos = scored[0]
+        if best_checked == 0:
+            return None
+        if best_context >= 0.45:
+            return best_pos
+        return None
+
+    def _find_sequence_candidates(self, needle: List[str],
+                                  haystack: List[str],
+                                  normalized: bool = False) -> List[int]:
+        if not needle:
+            return []
+        n = len(needle)
+        if n > len(haystack):
+            return []
+        if normalized:
+            ns = [self._normalize_ws(l) for l in needle]
+            hs = [self._normalize_ws(l) for l in haystack]
+        else:
+            ns = [l.strip() for l in needle]
+            hs = [l.strip() for l in haystack]
+        return [i for i in range(len(hs) - n + 1) if hs[i:i + n] == ns]
+
+    def _score_candidate_context(self, ctx_before, ctx_after,
+                                 file_lines, pos: int,
+                                 n_remove: int) -> Tuple[float, int]:
+        checked = 0
+        matched = 0.0
+
+        for offset, expected in enumerate(reversed((ctx_before or [])[-4:]), 1):
+            if _is_trivial_anchor(expected):
+                continue
+            idx = pos - offset
+            if idx < 0:
+                continue
+            checked += 1
+            matched += self._context_line_match_score(expected, file_lines[idx])
+
+        for offset, expected in enumerate((ctx_after or [])[:4]):
+            if _is_trivial_anchor(expected):
+                continue
+            idx = pos + n_remove + offset
+            if idx >= len(file_lines):
+                continue
+            checked += 1
+            matched += self._context_line_match_score(expected, file_lines[idx])
+
+        return (matched / checked if checked else 0.0), checked
 
     def _locate_removed_code_subset(self, removed, ctx_before, ctx_after,
                                     file_lines, hint_line):
@@ -1306,6 +1388,7 @@ class DryRunAgent:
         total_hunks = 0
         verified_hunks = 0
         diag = []
+        overlap_detected = False
 
         for file_path, header_lines, hunks in parsed:
             resolved = self._resolve_file_path(file_path, repo_path)
@@ -1412,6 +1495,10 @@ class DryRunAgent:
 
             if not changes:
                 continue
+            if self._changes_overlap(changes):
+                overlap_detected = True
+                diag.append(f"  {file_path}: 定位结果存在重叠 change，拒绝生成部分重叠补丁")
+                continue
 
             modified = list(target_lines)
             for pos, n_rm, added in sorted(
@@ -1440,12 +1527,31 @@ class DryRunAgent:
 
         if verified_hunks == 0:
             return None, False
+        if overlap_detected:
+            logger.info("[L5] 直接验证检测到重叠 change，禁止返回补丁")
+            return None, False
         if verified_hunks != total_hunks:
             logger.info(
                 "[L5] 直接验证未全量覆盖: %d/%d hunk，禁止返回部分补丁",
                 verified_hunks, total_hunks)
             return None, False
         return "\n".join(all_diff_parts) + "\n", True
+
+    @staticmethod
+    def _changes_overlap(changes) -> bool:
+        spans = []
+        for pos, n_rm, _added in changes or []:
+            end = pos + max(n_rm, 1)
+            spans.append((pos, end, n_rm))
+        spans.sort()
+        prev_start = prev_end = None
+        for start, end, _n_rm in spans:
+            if prev_start is not None and start < prev_end:
+                return True
+            if prev_start is not None and start == prev_start:
+                return True
+            prev_start, prev_end = start, end
+        return False
 
     # ─── 上下文重生成 (L3) ────────────────────────────────────────
 
