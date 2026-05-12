@@ -68,6 +68,15 @@ class DryRunAndroidSemanticTests(unittest.TestCase):
             result.adapted_patch,
         )
         self.assertIn("+                .setRealCallingUid(origCallingUid)", result.adapted_patch)
+        self.assertNotIn("+                        .setRealCallingUid(origCallingUid)", result.adapted_patch)
+        self.assertNotIn("Fixes b/230492947 b/337726734", result.adapted_patch)
+
+        checked = DryRunAgent(self.git_mgr)._apply_check(
+            result.adapted_patch,
+            str(self.root),
+            [],
+        )
+        self.assertTrue(checked.applies_cleanly, checked.error_output)
 
     def _target_before(self):
         return """package com.android.server.wm;

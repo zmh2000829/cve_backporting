@@ -1242,7 +1242,13 @@ class DryRunAgent:
                 if ntab > 0 and nsp > 0:
                     tab_width = max(1, round(nsp / ntab))
 
-        if not space_to_tab and not tab_to_space:
+        actual_chain_indent = ""
+        for line in actual_removed:
+            if line.strip().startswith("."):
+                actual_chain_indent = line[:len(line) - len(line.lstrip())]
+                break
+
+        if not space_to_tab and not tab_to_space and not actual_chain_indent:
             return added_lines
 
         result = []
@@ -1255,8 +1261,29 @@ class DryRunAgent:
                 ws = '\t' * (n // tab_width) + ' ' * (n % tab_width)
             elif tab_to_space and '\t' in ws:
                 ws = ws.replace('\t', ' ' * tab_width)
+            if actual_chain_indent and body.startswith("."):
+                ws = actual_chain_indent
             result.append(ws + body)
         return result
+
+    @classmethod
+    def _is_optional_comment_only_change(cls, removed: List[str],
+                                         added: List[str]) -> bool:
+        changed = list(removed or []) + list(added or [])
+        if not changed:
+            return False
+        return all(cls._is_comment_or_blank_line(line) for line in changed)
+
+    @staticmethod
+    def _is_comment_or_blank_line(line: str) -> bool:
+        text = (line or "").strip()
+        return (
+            not text
+            or text.startswith("//")
+            or text.startswith("/*")
+            or text.startswith("*")
+            or text.startswith("*/")
+        )
 
     # ─── 直接验证重建 (L5) ─ 完全绕过 git apply ──────────────────
 
@@ -1312,6 +1339,14 @@ class DryRunAgent:
                     orig_header, orig_lines)
 
                 for hh, hl in sub_hunks:
+                    _, exp_rm_preview, added_preview, _ = \
+                        _split_hunk_segments(hl)
+                    if self._is_optional_comment_only_change(
+                            exp_rm_preview, added_preview):
+                        logger.debug(
+                            "[L5] 跳过注释-only 漂移 hunk: %s %s",
+                            file_path, hh[:60])
+                        continue
                     total_hunks += 1
                     hint = self._parse_hunk_line_hint(hh)
                     fn = self._extract_func_from_hunk(hh)
@@ -1339,8 +1374,8 @@ class DryRunAgent:
                             f"定位失败 '{snippet[0][:50].strip()}'")
                         continue
 
-                    _, exp_rm, added, _ = \
-                        _split_hunk_segments(hl)
+                    exp_rm = exp_rm_preview
+                    added = added_preview
                     actual_rm = target_lines[pos:pos + n_rm]
 
                     if n_rm > 0:
@@ -1464,6 +1499,14 @@ class DryRunAgent:
                 sub_hunks = _split_to_sub_hunks(orig_header, orig_lines)
 
                 for hunk_header, hunk_lines in sub_hunks:
+                    _, expected_preview, added_preview, _ = \
+                        _split_hunk_segments(hunk_lines)
+                    if self._is_optional_comment_only_change(
+                            expected_preview, added_preview):
+                        logger.debug(
+                            "[L3] 跳过注释-only 漂移 hunk: %s %s",
+                            file_path, hunk_header[:60])
+                        continue
                     total_hunks += 1
                     hint_line = self._parse_hunk_line_hint(hunk_header)
                     func_name = self._extract_func_from_hunk(hunk_header)
@@ -1495,8 +1538,8 @@ class DryRunAgent:
                         new_parts.append("\n".join(hunk_lines))
                         continue
 
-                    _, expected_rm, added_lines, _ = \
-                        _split_hunk_segments(hunk_lines)
+                    expected_rm = expected_preview
+                    added_lines = added_preview
                     adapted_hunks += 1
 
                     actual_rm = target_lines[
@@ -1587,6 +1630,14 @@ class DryRunAgent:
                 sub_hunks = _split_to_sub_hunks(
                     orig_header, orig_lines)
                 for hh, hl in sub_hunks:
+                    _, exp_preview, add_preview, _ = _split_hunk_segments(
+                        hl)
+                    if self._is_optional_comment_only_change(
+                            exp_preview, add_preview):
+                        logger.debug(
+                            "[L3.5] 跳过注释-only 漂移 hunk: %s %s",
+                            file_path, hh[:60])
+                        continue
                     total_hunks += 1
                     hint = self._parse_hunk_line_hint(hh)
                     fn = self._extract_func_from_hunk(hh)
@@ -1605,8 +1656,8 @@ class DryRunAgent:
                     if pos is None:
                         continue
 
-                    _, exp_rm, added, _ = _split_hunk_segments(
-                        hl)
+                    exp_rm = exp_preview
+                    added = add_preview
                     actual_rm = target_lines[
                         pos:pos + n_rm]
                     sym_map = self._extract_symbol_mapping(
