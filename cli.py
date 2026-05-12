@@ -63,6 +63,14 @@ from services import reporting
 logger = logging.getLogger("cve_backporting")
 
 
+VALIDATE_STAGES = STAGES + [
+    ("validate_collect", "Validate│ 收集真实补丁"),
+    ("validate_artifacts", "Validate│ 写入补丁产物"),
+    ("validate_compare", "Validate│ 补丁差异比较"),
+    ("validate_report", "Validate│ 生成验证结果"),
+]
+
+
 def _setup_logging(config, quiet: bool = False):
     level = logging.WARNING if quiet else getattr(logging, config.output.log_level.upper(), logging.INFO)
     fmt = "%(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -1776,6 +1784,8 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
         }, "validate")
 
     stage_events, record_stage = _make_stage_trace_tracker(stage_callback=stage_callback)
+    live = None
+    emit_stage = record_stage
 
     try:
         wt_repo_config = {"path": wt_dir, "branch": "HEAD"}
@@ -1793,7 +1803,7 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
                         ai_config=getattr(config, "ai", None))
 
         if show_stages:
-            tracker = StageTracker(STAGES)
+            tracker = StageTracker(VALIDATE_STAGES)
             rollback_label = primary_known_fix[:16] if len(known_fix_commits) == 1 else f"{primary_known_fix[:12]} +{len(known_fix_commits)-1}"
             header = Panel(
                 f"[bold]CVE:[/] {cve_id}  [bold]目标:[/] {tv}\n"
@@ -1808,22 +1818,22 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
             def _layout():
                 return Group(header, tracker.render())
 
-            with Live(_layout(), console=console, refresh_per_second=8) as live:
-                def _update(key, st, detail=""):
-                    on_stage(key, st, detail)
-                    live.update(_layout())
-                    record_stage(key, st, detail)
-                result = pipe.analyze(cve_id, tv, enable_dryrun=True,
-                                      force_dryrun=True,
-                                      on_stage=_update,
-                                      cve_info=cve_info)
-        else:
-            result = pipe.analyze(cve_id, tv, enable_dryrun=True,
-                                  force_dryrun=True,
-                                  cve_info=cve_info,
-                                  on_stage=record_stage)
+            live = Live(_layout(), console=console, refresh_per_second=8)
+            live.start()
+
+            def _update(key, st, detail=""):
+                on_stage(key, st, detail)
+                live.update(_layout())
+                record_stage(key, st, detail)
+            emit_stage = _update
+
+        result = pipe.analyze(cve_id, tv, enable_dryrun=True,
+                              force_dryrun=True,
+                              cve_info=cve_info,
+                              on_stage=emit_stage)
 
         if result.cve_info is None or not result.cve_info.fix_commit_id:
+            emit_stage("validate_report", "fail", "上游缺少 fix commit")
             return enrich_result_payload({
                 "cve_id": cve_id, "known_fix": primary_known_fix, "known_fix_commits": known_fix_commits, "target": tv,
                 "worktree_commit": rollback_hash[:16] if rollback_hash else rollback,
@@ -1926,6 +1936,8 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
                 "apply_attempts": dr.apply_attempts,
             }
 
+        emit_stage("validate_collect", "running", "收集 known_fix / known_prereq / actual solution diff")
+
         # 获取 known_fix 的完整信息(stat + diff)
         primary_fix_bundle = _collect_commit_diff_bundle(config, git_mgr, tv, [primary_known_fix])
         known_fix_bundle = _collect_commit_diff_bundle(config, git_mgr, tv, known_fix_commits)
@@ -1979,10 +1991,16 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
                 known_prereqs_detail.append(serialize_commit_reference(
                     config, git_mgr, tv, kid,
                     extra={"subject": "", "author": ""}))
+        emit_stage(
+            "validate_collect",
+            "success",
+            f"真实解集 {len(actual_solution_commits)} 个 commit, 工具前置 {len(compare_tool_prereqs)} 个",
+        )
 
         recommendations = result.recommendations if result.recommendations else []
 
         # ── 输出补丁文件到 analysis_results/ ────────────────
+        emit_stage("validate_artifacts", "running", "写入 community / real / adapted patch")
         output_dir = output_dir or ensure_case_output_dir(config.output.output_dir, run_id, "validate", cve_id)
         os.makedirs(output_dir, exist_ok=True)
 
@@ -2011,8 +2029,11 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
             with open(patch_file, "w") as f:
                 f.write(adapted_patch)
             logger.info("适配补丁已保存: %s", patch_file)
+        patch_count = sum(bool(p) for p in (community_patch_file, real_fix_patch_file, patch_file))
+        emit_stage("validate_artifacts", "success", f"{patch_count} 个补丁文件")
 
         # ── 核心: 生成补丁 vs 真实修复的本质比较 ─────────────
+        emit_stage("validate_compare", "running", "对比 generated / real / solution set")
         # strict/C1/3way (L0-L2) 成功意味着社区补丁已能直接应用，
         # 此时 L3 重建反而可能因多次匹配而定位到错误位置，
         # 所以 L0-L2 成功时优先用社区原始补丁做比较。
@@ -2096,6 +2117,11 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
         )
         root_cause = _diagnose_root_cause(diff_comparison, dryrun_detail,
                                           known_prereqs, result.dry_run)
+        emit_stage(
+            "validate_compare",
+            "success",
+            generated_vs_real.get("verdict") or "done",
+        )
 
         # ★ 将补丁本质比较结果纳入 overall 判定
         gvr_verdict = generated_vs_real.get("verdict", "")
@@ -2121,6 +2147,8 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
             checks["validate_level_recalibration_reason"] = accuracy_recalibration.get("reason", "")
         else:
             checks["validate_level_recalibrated"] = False
+
+        emit_stage("validate_report", "running", "构建 narrative / schema / traceability")
 
         # ── 构建面向开发人员的详细分析过程描述 ──────────────
         try:
@@ -2228,9 +2256,12 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
         }
         if deep_analysis is not None:
             out["deep_analysis"] = deep_analysis
+        emit_stage("validate_report", "success", "report payload ready")
         return enrich_result_payload(out, "validate")
 
     finally:
+        if live is not None:
+            live.stop()
         git_mgr.remove_worktree(tv, wt_dir)
 
 
