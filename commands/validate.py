@@ -247,6 +247,98 @@ def _build_cve_info_from_json(info: dict, cve_id: str):
     )
 
 
+def _as_commit_list(value):
+    if not value:
+        return []
+    if isinstance(value, str):
+        return [v.strip() for v in value.split(",") if v.strip()]
+    if isinstance(value, (list, tuple, set)):
+        out = []
+        for item in value:
+            if isinstance(item, dict):
+                commit = item.get("commit") or item.get("commit_id") or item.get("id")
+            else:
+                commit = item
+            commit = str(commit or "").strip()
+            if commit:
+                out.append(commit)
+        return out
+    return [str(value).strip()] if str(value).strip() else []
+
+
+def _normalize_batch_validate_input(data):
+    """支持历史 CVE-keyed 格式和平台统一 items[] 格式。"""
+    if isinstance(data, list):
+        items = data
+    elif isinstance(data, dict) and isinstance(data.get("items"), list):
+        items = data.get("items") or []
+    else:
+        return data
+
+    normalized = OrderedDict()
+    for idx, item in enumerate(items, 1):
+        if not isinstance(item, dict):
+            continue
+        cve_id = item.get("cve_id") or item.get("cve") or f"CASE-{idx}"
+        if item.get("hulk_fix_patchs"):
+            normalized[cve_id] = dict(item)
+            normalized[cve_id].setdefault("cve_id", cve_id)
+            continue
+
+        known_fixes = _as_commit_list(
+            item.get("known_fixes")
+            or item.get("known_fix")
+            or item.get("actual_solution_commits")
+            or item.get("hulk_fix_patchs")
+        )
+        known_prereqs = _as_commit_list(item.get("known_prereqs"))
+        mainline_fix = (
+            item.get("mainline_fix")
+            or item.get("upstream_fix")
+            or item.get("fix_commit")
+            or ""
+        )
+        mainline_repo = (
+            item.get("mainline_repo")
+            or item.get("source_repo")
+            or item.get("repo")
+            or item.get("project")
+            or ""
+        )
+        mainline_intro = (
+            item.get("mainline_intro")
+            or item.get("introduced_commit")
+            or item.get("intro_commit")
+            or ""
+        )
+
+        hulk_fix_patchs = []
+        for prereq in known_prereqs:
+            hulk_fix_patchs.append({"commit": prereq, "subject": "", "mainline_commit": ""})
+        for known_fix in known_fixes:
+            hulk_fix_patchs.append({
+                "commit": known_fix,
+                "subject": "",
+                "mainline_commit": mainline_fix,
+            })
+        if not hulk_fix_patchs:
+            continue
+
+        normalized[cve_id] = {
+            "cve_id": cve_id,
+            "hulk_fix_patchs": hulk_fix_patchs,
+            "mainline_fix_patchs": (
+                [{"commit": mainline_fix, "repo": mainline_repo}]
+                if mainline_fix else []
+            ),
+            "mainline_import_patchs": (
+                [{"commit": mainline_intro}]
+                if mainline_intro else []
+            ),
+        }
+    return normalized
+
+
 def _flush_live_report(path: str, target: str, total: int, passed: list, failed: list, errors: list):
     done = len(passed) + len(failed) + len(errors)
     statistics = _aggregate_item_statistics(passed, failed)
@@ -733,8 +825,9 @@ def run_batch_validate(args, config, runtime):
         runtime.console.print(f"[red bold]错误:[/] 无法解析 JSON 文件: {e}")
         return
 
+    data = _normalize_batch_validate_input(data)
     if not isinstance(data, dict):
-        runtime.console.print("[red bold]错误:[/] JSON 顶层结构应为 dict (key=CVE编号, value=CVE数据)")
+        runtime.console.print("[red bold]错误:[/] JSON 顶层结构应为 dict，或包含 items[] 数组")
         return
 
     tv = args.target_version

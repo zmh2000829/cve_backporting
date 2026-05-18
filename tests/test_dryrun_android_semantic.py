@@ -67,9 +67,13 @@ class DryRunAndroidSemanticTests(unittest.TestCase):
             "+            // launchedFromUid of the calling activity represents the app that launches it.",
             result.adapted_patch,
         )
+        self.assertIn("+            // Fixes b/230492947 b/337726734", result.adapted_patch)
+        self.assertIn(
+            "+            // Prevents background activity launch through #startNextMatchingActivity",
+            result.adapted_patch,
+        )
         self.assertIn("+                .setRealCallingUid(origCallingUid)", result.adapted_patch)
         self.assertNotIn("+                        .setRealCallingUid(origCallingUid)", result.adapted_patch)
-        self.assertNotIn("Fixes b/230492947 b/337726734", result.adapted_patch)
 
         checked = DryRunAgent(self.git_mgr)._apply_check(
             result.adapted_patch,
@@ -109,6 +113,55 @@ class DryRunAndroidSemanticTests(unittest.TestCase):
         )
         self.assertIn("+        private String validateFileMode(String mode) {", result.adapted_patch)
 
+        checked = DryRunAgent(self.git_mgr)._apply_check(
+            result.adapted_patch,
+            str(self.root),
+            [],
+        )
+        self.assertTrue(checked.applies_cleanly, checked.error_output)
+
+    def test_comment_only_fix_note_is_preserved_when_old_note_is_absent(self):
+        file_path = Path("core/java/android/content/CommentOnly.java")
+        full_path = self.root / file_path
+        full_path.parent.mkdir(parents=True, exist_ok=True)
+        full_path.write_text(
+            """class CommentOnly {
+    void open() {
+        enforceFilePermission(attributionSource, uri, mode);
+        traceBegin(TRACE_TAG_DATABASE, "openFile: ", uri.getAuthority());
+    }
+}
+""",
+            encoding="utf-8",
+        )
+        _git(self.root, "add", str(file_path))
+        _git(self.root, "commit", "-m", "comment only target")
+
+        patch = PatchInfo(
+            commit_id="c" * 40,
+            subject="Preserve security fix note",
+            diff_code=f"""diff --git a/{file_path} b/{file_path}
+--- a/{file_path}
++++ b/{file_path}
+@@ -1,6 +1,7 @@
+ class CommentOnly {{
+     void open() {{
+-        // Old upstream-only note
++        // Fixes b/123456789: sanitize mode before permission check.
+         enforceFilePermission(attributionSource, uri, mode);
+         traceBegin(TRACE_TAG_DATABASE, "openFile: ", uri.getAuthority());
+     }}
+""",
+            modified_files=[str(file_path)],
+        )
+
+        result = DryRunAgent(self.git_mgr).check_adaptive(patch, "android")
+
+        self.assertTrue(result.applies_cleanly, result.error_output)
+        self.assertIn(
+            "+        // Fixes b/123456789: sanitize mode before permission check.",
+            result.adapted_patch,
+        )
         checked = DryRunAgent(self.git_mgr)._apply_check(
             result.adapted_patch,
             str(self.root),
@@ -178,6 +231,9 @@ class ActivityTaskManagerService {
 -            // - the activity in the background
 -            // - a second activity.
 -            options.getOptions(r).setAvoidMoveToFront();
++
++            // Fixes b/230492947 b/337726734
++            // Prevents background activity launch through #startNextMatchingActivity
 +            // launchedFromUid of the calling activity represents the app that launches it.
 +            // It may have BAL privileges (i.e. the Launcher App). Using its identity to
 +            // launch to launch next matching activity causes BAL.

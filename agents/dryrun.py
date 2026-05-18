@@ -506,14 +506,14 @@ class DryRunAgent:
 
         if removed:
             return self._locate_removal_hunk(
-                removed, ctx_before, ctx_after, file_lines,
+                removed, added, ctx_before, ctx_after, file_lines,
                 hint_line, func_name)
 
         return self._locate_addition_hunk(
             ctx_before, ctx_after, added, file_lines,
             hint_line, func_name)
 
-    def _locate_removal_hunk(self, removed, ctx_before, ctx_after,
+    def _locate_removal_hunk(self, removed, added, ctx_before, ctx_after,
                              file_lines, hint_line, func_name):
         n = len(removed)
         ctx_all = ctx_before + ctx_after
@@ -532,6 +532,15 @@ class DryRunAgent:
             removed, ctx_before, ctx_after, file_lines, hint_line)
         if subset is not None:
             return subset
+
+        # 社区补丁中常见“只更新修复说明注释”的区域。目标分支可能没有
+        # 上游旧注释，但仍希望尽量保留新增的修复说明；此时退化为按上下文
+        # 找插入点，而不是把新增注释直接丢弃。
+        if self._is_comment_only_change(removed, added) and self._has_added_comment_text(added):
+            inserted = self._locate_addition_hunk(
+                ctx_before, ctx_after, added, file_lines, hint_line, func_name)
+            if inserted[0] is not None:
+                return inserted
 
         # B) 用 before-context 最后一行做锚点, 候选位置验证 removed 行
         if ctx_before:
@@ -1349,12 +1358,26 @@ class DryRunAgent:
         return result
 
     @classmethod
-    def _is_optional_comment_only_change(cls, removed: List[str],
-                                         added: List[str]) -> bool:
+    def _is_comment_only_change(cls, removed: List[str],
+                                added: List[str]) -> bool:
         changed = list(removed or []) + list(added or [])
         if not changed:
             return False
         return all(cls._is_comment_or_blank_line(line) for line in changed)
+
+    @classmethod
+    def _has_added_comment_text(cls, added: List[str]) -> bool:
+        return any(
+            cls._is_comment_or_blank_line(line) and bool((line or "").strip())
+            for line in (added or [])
+        )
+
+    @classmethod
+    def _is_optional_comment_only_change(cls, removed: List[str],
+                                         added: List[str]) -> bool:
+        if not cls._is_comment_only_change(removed, added):
+            return False
+        return not cls._has_added_comment_text(added)
 
     @staticmethod
     def _is_comment_or_blank_line(line: str) -> bool:

@@ -179,6 +179,8 @@ repositories:
 
 Android 社区修复 commit 常在具体 googlesource project 下，例如 `platform/frameworks/base`。工具支持通过 `--mainline-repo platform/frameworks/base` 显式指定，也支持完整 URL `https://android.googlesource.com/platform/frameworks/base`。validate 场景如果未传 `--mainline-repo`，工具会尝试从本地真实合入 commit 所在的 manifest project 反推上游 project name。远程 diff 是 project 相对路径，工具会自动补回本地 workspace 前缀，例如把 `foo/bar.java` 转为 `frameworks/base/foo/bar.java` 后再进入 missing-intro、依赖分析和 DryRun。
 
+DryRun 生成补丁时会尽量保留社区修复中的新增说明注释，例如 `Fixes b/...`、安全原因说明、行为约束说明等。对于只删除旧注释、没有新增说明文本的变更，系统仍会把它作为低价值漂移处理，避免注释漂移影响核心代码补丁；对于社区新增或替换的修复说明注释，系统会先按上下文定位并保留，定位不稳时不会牺牲核心代码变更的可生成性。
+
 如需启用 LLM：
 
 ```yaml
@@ -220,6 +222,15 @@ analysis:
 `patch_probe` 的判断逻辑是：目标分支命中修复补丁的 `- removed` 行或 removed hunk，说明仍保留修复前代码形态，继续补丁回溯；目标分支高度命中 `+ added` 行或 added hunk，且 removed 侧未命中，说明更接近修复后形态，不再盲目生产回移补丁。探测会按文件、hunk、上下文和函数提示聚合证据，并过滤空行、单独括号、注释、日志等低信息行，输出 `vulnerable_like / fixed_like / uncertain` 三类结论。该证据会写入 `intro_analysis`；`fixed_like` 默认停止补丁生产，`uncertain` 场景即使配置允许继续 DryRun，也不会进入 `L0` 自动通道。
 
 这就是面向 Android 等“只披露修复 commit、不披露 introduced commit”的通用模式：工具不伪造引入点，而是把社区 fix patch 当作代码形态探针，先判断目标仓像修复前、修复后还是证据不足，再决定是否继续依赖分析和补丁生产。
+
+平台接入时可以统一按“有无 introduced commit 都使用同一输入骨架”的方式传参：
+
+| 场景 | 必填 | 可选 | 系统行为 |
+| --- | --- | --- | --- |
+| 有 introduced commit | `cve_id`、`known_fix`、`mainline_fix` | `mainline_repo`、`mainline_intro`、`known_prereqs` | 先按 introduced commit 做精确搜索，再进入依赖和 DryRun |
+| 无 introduced commit | `cve_id`、`known_fix`、`mainline_fix` | `mainline_repo`、`known_prereqs` | 不伪造 intro，使用 `patch_probe` 输出 `vulnerable_like / fixed_like / uncertain` |
+
+输出字段保持一致：两种场景都会返回 `intro_analysis`、`dependency_details`、`dryrun_detail`、`validation_details`、`l0_l5`、`analysis_narrative`、`artifacts`。无 introduced commit 时，`intro_analysis.strategy` 会是 `missing_intro_patch_probe*`，表示这是代码形态探测证据，不等价于找到了真实 introduced commit。
 
 ### 4.4 首次构建缓存
 
@@ -308,6 +319,61 @@ CVE-2024-26635
 | 深度批量验证 | `python cli.py batch-validate --file cve_data.json --target 5.10-hulk --workers 2 --deep` |
 | 输出 Excel 明细 | `python cli.py batch-validate --file cve_data.json --target 5.10-hulk --xlsx` |
 
+`batch-validate` 兼容两种输入：历史 CVE-keyed 格式，以及更适合平台接入的统一 `items[]` 格式。这里的“无补丁/无引入补丁”通常指社区没有 disclosed introduced commit；`batch-validate` 仍然需要本地真实合入修复 `known_fix` 作为验证真值。如果连本地真实修复 commit 也没有，应使用 `analyze` 做可用性判断，而不是做 validate 准确率回放。
+
+无 introduced commit 的 Android 样例：
+
+```json
+{
+  "target_version": "android-14",
+  "items": [
+    {
+      "cve_id": "CVE-2024-XXXX",
+      "known_fix": "本地真实合入修复commit",
+      "known_prereqs": [
+        "本地真实先合入的前置commit，可为空"
+      ],
+      "mainline_fix": "AOSP社区修复commit",
+      "mainline_repo": "platform/frameworks/base"
+    }
+  ]
+}
+```
+
+如果社区披露了 introduced commit，只需额外加 `mainline_intro`：
+
+```json
+{
+  "target_version": "android-14",
+  "items": [
+    {
+      "cve_id": "CVE-2024-YYYY",
+      "known_fix": "本地真实合入修复commit",
+      "mainline_fix": "AOSP社区修复commit",
+      "mainline_repo": "platform/system/core",
+      "mainline_intro": "AOSP社区引入commit"
+    }
+  ]
+}
+```
+
+旧格式仍可继续使用，适合已有数据集：
+
+```json
+{
+  "CVE-2024-XXXX": {
+    "hulk_fix_patchs": [
+      {"commit": "本地前置commit"},
+      {"commit": "本地真实合入修复commit", "mainline_commit": "AOSP社区修复commit"}
+    ],
+    "mainline_fix_patchs": [
+      {"commit": "AOSP社区修复commit", "repo": "platform/frameworks/base"}
+    ],
+    "mainline_import_patchs": []
+  }
+}
+```
+
 ### 6.6 `server`
 
 ```bash
@@ -344,6 +410,7 @@ python cli.py validate \
   --target <TARGET_ALIAS> \
   --known-fix <TARGET_FIX_COMMIT> \
   [--mainline-fix <UPSTREAM_FIX_COMMIT>] \
+  [--mainline-repo <UPSTREAM_PROJECT_OR_URL>] \
   [--mainline-intro <UPSTREAM_INTRO_COMMIT>] \
   [--policy-profile <balanced|conservative>] \
   [--deep]
@@ -360,6 +427,8 @@ python cli.py batch-validate \
   [--deep] \
   [--xlsx]
 ```
+
+其中 `<CVE_DATA_JSON>` 既可以是历史 CVE-keyed 格式，也可以是平台统一 `items[]` 格式。
 
 ### 6.8 CLI 输出模板
 
@@ -450,7 +519,14 @@ python cli.py server --host 127.0.0.1 --port 8000
   "cve_id": "CVE-2024-26633",
   "known_fix": "da23bd709b46",
   "mainline_fix": "d375b98e0248",
-  "mainline_repo": "platform/frameworks/base",
+  "mainline_repo": "platform/frameworks/base"
+}
+```
+
+有 introduced commit 时再加：
+
+```json
+{
   "mainline_intro": "fbfa743a9d2a"
 }
 ```
@@ -464,7 +540,9 @@ python cli.py server --host 127.0.0.1 --port 8000
   "items": [
     {
       "cve_id": "CVE-2024-26633",
-      "known_fix": "da23bd709b46"
+      "known_fix": "da23bd709b46",
+      "mainline_fix": "d375b98e0248",
+      "mainline_repo": "platform/frameworks/base"
     }
   ]
 }

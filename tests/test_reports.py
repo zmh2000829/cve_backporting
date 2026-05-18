@@ -12,7 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from commands.validate import _prepare_batch_validate_json
+from commands.validate import _normalize_batch_validate_input, _prepare_batch_validate_json
 from core.output_serializers import aggregate_batch_validate_summary
 from services.history_loader import normalize_report
 from services.batch_xlsx import (
@@ -54,6 +54,32 @@ def _assert_subset(testcase: unittest.TestCase, actual, expected, path="root"):
 
 
 class ReportSchemaRegressionTests(unittest.TestCase):
+    def test_batch_validate_accepts_platform_items_without_intro_commit(self):
+        data = {
+            "target_version": "android-14",
+            "items": [
+                {
+                    "cve_id": "CVE-2024-ANDROID",
+                    "known_fix": "111111111111",
+                    "known_prereqs": ["222222222222"],
+                    "mainline_fix": "aaaaaaaaaaaa",
+                    "mainline_repo": "platform/frameworks/base",
+                }
+            ],
+        }
+
+        normalized = _normalize_batch_validate_input(data)
+
+        case = normalized["CVE-2024-ANDROID"]
+        self.assertEqual(case["mainline_fix_patchs"][0]["commit"], "aaaaaaaaaaaa")
+        self.assertEqual(case["mainline_fix_patchs"][0]["repo"], "platform/frameworks/base")
+        self.assertEqual(case["mainline_import_patchs"], [])
+        self.assertEqual(
+            [item["commit"] for item in case["hulk_fix_patchs"]],
+            ["222222222222", "111111111111"],
+        )
+        self.assertEqual(case["hulk_fix_patchs"][-1]["mainline_commit"], "aaaaaaaaaaaa")
+
     def test_prepare_analyze_json_matches_fixed_case_golden(self):
         raw = _load_json("golden", "analyze_fixed_public.input.json")
         expected = _load_json("golden", "analyze_fixed_public.expected.json")
