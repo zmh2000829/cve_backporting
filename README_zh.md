@@ -160,6 +160,46 @@ repositories:
     branch: "linux-5.10.y"
 ```
 
+非 Android 的普通 Git 仓如果也遇到“社区只给 fix commit、没有 introduced commit”的场景，不需要配置 `type: repo`，只要保持普通仓库配置并开启 `patch_probe`：
+
+```yaml
+repositories:
+  "product-1.0":
+    path: "/path/to/product/source"
+    branch: "release/product-1.0"
+
+analysis:
+  # 没有 introduced commit 时，用社区 fix patch 的 -/+ 行探测目标代码形态
+  missing_intro_policy: "patch_probe"
+  # uncertain 时是否继续尝试 DryRun；最终不会自动落入 L0
+  missing_intro_assume_on_uncertain: true
+  # 命中修复前 removed 行 / hunk 的最低阈值
+  missing_intro_min_removed_line_match: 0.30
+  missing_intro_min_removed_hunk_match: 0.30
+  missing_intro_min_file_coverage: 0.50
+  # 命中修复后 added 行 / hunk 的阈值，达到后倾向 fixed_like
+  missing_intro_fixed_line_threshold: 0.70
+  missing_intro_fixed_hunk_threshold: 0.60
+  # fixed_like 默认不继续生产补丁，避免重复回合已修复代码
+  missing_intro_continue_on_fixed_like: false
+```
+
+这类普通 Git 仓的使用方式和有 introduced commit 的输入保持一致，只是不传 `--mainline-intro`：
+
+```bash
+python cli.py analyze \
+  --cve CVE-2024-XXXX \
+  --target product-1.0
+
+python cli.py validate \
+  --cve CVE-2024-XXXX \
+  --target product-1.0 \
+  --known-fix <本地真实合入修复commit> \
+  --mainline-fix <社区修复commit>
+```
+
+如果上游 fix commit 不在目标仓同一个远端或需要特殊抓取，仍可通过 `--mainline-fix` 显式指定；普通 Git 仓通常不需要 `--mainline-repo`，该参数主要用于 Android googlesource 这类多 project 场景。
+
 Android / AOSP 这类 `repo` workspace 也使用同一个 `--target`，不需要用户手动指定子仓：
 
 ```yaml
@@ -339,6 +379,24 @@ CVE-2024-26635
   ]
 }
 ```
+
+无 introduced commit 的普通 Git 仓样例：
+
+```json
+{
+  "target_version": "product-1.0",
+  "items": [
+    {
+      "cve_id": "CVE-2024-ZZZZ",
+      "known_fix": "本地真实合入修复commit",
+      "known_prereqs": [],
+      "mainline_fix": "社区修复commit"
+    }
+  ]
+}
+```
+
+普通 Git 仓一般不需要 `mainline_repo`；Android / repo workspace 或其他多 project 上游才需要用它告诉工具社区 fix 属于哪个 project。
 
 如果社区披露了 introduced commit，只需额外加 `mainline_intro`：
 
