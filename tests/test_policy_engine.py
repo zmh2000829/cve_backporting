@@ -1021,6 +1021,65 @@ int foo(void) {
         self.assertEqual(calls["count"], 1)
         self.assertEqual(case_out["bucket"], "passed")
         self.assertEqual(case_out["verdict"], "partially_same")
+        self.assertTrue(case_out["item"]["acceptable_patch"])
+
+    def test_batch_case_reuses_duplicate_patch_inputs(self):
+        tmpdir = tempfile.mkdtemp(prefix="batch-case-")
+        calls = {"count": 0}
+        try:
+            def _fake_validate(*args, **kwargs):
+                calls["count"] += 1
+                return {
+                    "cve_id": args[1],
+                    "generated_vs_real": {
+                        "verdict": "identical",
+                        "core_similarity": 1.0,
+                        "file_coverage": 1.0,
+                        "deterministic_exact_match": True,
+                    },
+                    "solution_set_vs_real": {},
+                    "dryrun_detail": {"has_adapted_patch": True, "apply_method": "strict"},
+                    "validation_details": {
+                        "strategy_buckets": {"dependency_bucket": "independent"},
+                        "special_risk_report": {"summary": {"triggered_sections": [], "has_critical_structure_change": False}},
+                    },
+                    "analysis_framework": {
+                        "conclusion": {
+                            "direct_backport": {"status": "direct"},
+                            "prerequisite": {"status": "independent"},
+                            "risk": {"status": "low"},
+                        }
+                    },
+                    "result_status": {"state": "complete"},
+                    "summary": "验证通过",
+                    "tool_prereqs": [],
+                }
+
+            runtime = SimpleNamespace(_run_single_validate=_fake_validate)
+            config = SimpleNamespace(output=SimpleNamespace(output_dir=tmpdir))
+            group = {
+                "primary_fix": {"commit": "aaa111", "subject": "fix"},
+                "prereq_fixes": [],
+                "all_fixes": [{"commit": "aaa111"}],
+            }
+            cache = {}
+            first = validate_cmd._execute_batch_validate_case(
+                runtime, config, "android-14", "CVE-A", group,
+                git_mgr=object(), run_id="run1", result_cache=cache,
+            )
+            second = validate_cmd._execute_batch_validate_case(
+                runtime, config, "android-14", "CVE-B", group,
+                git_mgr=object(), run_id="run1", result_cache=cache,
+            )
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir)
+
+        self.assertEqual(calls["count"], 1)
+        self.assertEqual(first["result"]["cve_id"], "CVE-A")
+        self.assertEqual(second["result"]["cve_id"], "CVE-B")
+        self.assertEqual(second["result"]["batch_reused_from_cve_id"], "CVE-A")
+        self.assertTrue(second["item"]["batch_cache_reused"])
 
     def test_find_rollback_commit_uses_earliest_fix_or_prereq(self):
         class _Git:

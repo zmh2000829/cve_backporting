@@ -1729,7 +1729,7 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
                          git_mgr=None, show_stages=True,
                          cve_info=None, deep=False, stage_callback=None,
                          output_dir=None, run_id: str = "",
-                         known_fixes=None):
+                         known_fixes=None, diff_bundle_cache=None):
     """执行单个 CVE 的回退验证，返回结果 dict。
     cve_info: 可选的预构建 CveInfo，提供后跳过 MITRE 爬取。
     deep: 是否同时执行 v2 深度分析。"""
@@ -1955,7 +1955,7 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
         # 获取 known_fix 的完整信息(stat + diff)。同一条 validate 内多个
         # bundle 会重复引用 primary/known/actual commit，Android repo 下
         # git show 成本高，使用本地缓存避免重复查询。
-        diff_bundle_cache = {}
+        diff_bundle_cache = diff_bundle_cache if diff_bundle_cache is not None else {}
         primary_fix_bundle = _collect_commit_diff_bundle(
             config, git_mgr, tv, [primary_known_fix], cache=diff_bundle_cache)
         known_fix_bundle = _collect_commit_diff_bundle(

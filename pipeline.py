@@ -554,7 +554,7 @@ class Pipeline:
         fix_source_repo = self._source_repo_for_commit(cve_info, cve_info.fix_commit_id)
         fix_patch = self.crawler.fetch_patch(
             cve_info.fix_commit_id, target_version,
-            local_first=prefer_local,
+            local_first=prefer_local and not fix_source_repo,
             source_repo=fix_source_repo)
         if not fix_patch:
             _cb("crawler_patch", "fail", "获取补丁失败 (远程+本地均不可用)")
@@ -570,7 +570,7 @@ class Pipeline:
             intro_source_repo = self._source_repo_for_commit(cve_info, cve_info.introduced_commit_id)
             intro_patch = self.crawler.fetch_patch(
                 cve_info.introduced_commit_id, target_version,
-                local_first=prefer_local,
+                local_first=prefer_local and not intro_source_repo,
                 source_repo=intro_source_repo)
             result.introduced_search = self.analysis.search(
                 cve_info.introduced_commit_id,

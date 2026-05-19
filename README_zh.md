@@ -313,9 +313,172 @@ Android repo workspace 首次构建会遍历 manifest 中所有 project，几百
 | 用途 | 命令 |
 | --- | --- |
 | 单条 CVE | `python cli.py analyze --cve CVE-2024-26633 --target 5.10-hulk` |
+| Android / repo workspace | `python cli.py analyze --cve CVE-2025-48619 --target android-14` |
+| 普通 Git 开源仓 | `python cli.py analyze --cve CVE-2024-XXXX --target product-1.0` |
 | 批量 CVE 列表 | `python cli.py analyze --batch cve_list.txt --target 5.10-hulk` |
 | 深度分析 | `python cli.py analyze --cve CVE-2024-26633 --target 5.10-hulk --deep` |
 | 不执行 DryRun | `python cli.py analyze --cve CVE-2024-26633 --target 5.10-hulk --no-dryrun` |
+
+`analyze` 是生产使用时的主入口：开发人员还没有本地真实合入 commit，只想判断“这个社区 CVE 修复能不能回合到当前目标仓”。因此它不要求 `known_fix`，也不会做 generated vs real 的真值比较；这类比较属于 `validate / batch-validate`。
+
+#### Android / AOSP `analyze` 输入输出示例
+
+Android 场景的输入由两部分组成：
+
+| 输入位置 | 示例 | 说明 |
+| --- | --- | --- |
+| `config.yaml` | `repositories.android-14.type: repo` | 告诉工具这是 repo workspace，自动解析 manifest project |
+| CLI / API | `target=android-14` + `cve_id` | 用户不需要指定 frameworks/base 子仓 |
+| 可选配置 | `analysis.missing_intro_policy: patch_probe` | 社区只有 fix commit、没有 introduced commit 时启用代码形态探测 |
+
+CLI：
+
+```bash
+python cli.py analyze \
+  --cve CVE-2025-48619 \
+  --target android-14
+```
+
+API：
+
+```json
+{
+  "target_version": "android-14",
+  "cve_id": "CVE-2025-48619",
+  "deep": false
+}
+```
+
+典型输出文件：
+
+```text
+analysis_results/<run-id>/analyze/CVE-2025-48619/report.json
+analysis_results/<run-id>/analyze/CVE-2025-48619/adapted.patch   # 仅当 DryRun 生成补丁时存在
+```
+
+Android `analyze/report.json` 里优先看这些字段：
+
+```json
+{
+  "result_status": {
+    "state": "complete"
+  },
+  "intro_analysis": {
+    "strategy": "missing_intro_patch_probe",
+    "confidence": 0.82,
+    "candidates": [
+      {
+        "verdict": "vulnerable_like"
+      }
+    ]
+  },
+  "dryrun_detail": {
+    "applies_cleanly": true,
+    "apply_method": "verified-direct",
+    "has_adapted_patch": true
+  },
+  "l0_l5": {
+    "base_level": "L3",
+    "current_level": "L3",
+    "review_mode": "focused-review"
+  },
+  "artifacts": {
+    "patch_files": {
+      "adapted_patch": "analysis_results/.../adapted.patch"
+    }
+  }
+}
+```
+
+Android 输出解读：
+
+| 字段 | 怎么看 |
+| --- | --- |
+| `intro_analysis.strategy = missing_intro_patch_probe*` | 没有真实 introduced commit，系统用社区 fix patch 探测目标仓代码形态 |
+| `intro_analysis.candidates[0].verdict = vulnerable_like` | 目标仓仍像修复前代码，继续 DryRun 和补丁生产 |
+| `fixed_like` | 目标仓更像已修复，不建议重复生产补丁 |
+| `uncertain` | 证据不足，可按配置继续 DryRun，但不会自动进入 L0 |
+| `dryrun_detail.apply_method` | 补丁落地方式，如 `strict / 3way / verified-direct / regenerated / conflict-adapted` |
+| `l0_l5.current_level` | 最终人工处理级别，平台接入时优先展示 |
+
+#### 普通 Git 开源仓 `analyze` 输入输出示例
+
+普通 Git 仓不需要 `type: repo`，只需要目标仓路径和分支：
+
+```yaml
+repositories:
+  "product-1.0":
+    path: "/path/to/product/source"
+    branch: "release/product-1.0"
+
+analysis:
+  missing_intro_policy: "patch_probe"
+  missing_intro_assume_on_uncertain: true
+  missing_intro_continue_on_fixed_like: false
+```
+
+CLI：
+
+```bash
+python cli.py analyze \
+  --cve CVE-2024-XXXX \
+  --target product-1.0
+```
+
+API：
+
+```json
+{
+  "target_version": "product-1.0",
+  "cve_id": "CVE-2024-XXXX",
+  "no_dryrun": false
+}
+```
+
+普通 Git 仓输出字段和 Android 保持一致：
+
+```json
+{
+  "result_status": {
+    "state": "complete"
+  },
+  "fix_analysis": {
+    "found": false,
+    "strategy": "none"
+  },
+  "intro_analysis": {
+    "strategy": "missing_intro_patch_probe",
+    "candidates": [
+      {
+        "verdict": "vulnerable_like"
+      }
+    ]
+  },
+  "dependency_details": {
+    "analysis_narrative": [
+      "Step 0: 影响判断 ...",
+      "Step 1: 前置依赖候选过滤 ..."
+    ]
+  },
+  "dryrun_detail": {
+    "apply_method": "regenerated",
+    "has_adapted_patch": true
+  },
+  "l0_l5": {
+    "base_level": "L3",
+    "current_level": "L4"
+  }
+}
+```
+
+普通 Git 仓和 Android 的主要区别：
+
+| 项目 | Android / repo workspace | 普通 Git 仓 |
+| --- | --- | --- |
+| 仓库配置 | `type: repo` + manifest | `path` + `branch` |
+| 上游 project | 可能来自 `platform/frameworks/base` 等 googlesource project | 通常不需要 `mainline_repo` |
+| 文件路径 | 工具会自动在 manifest project 之间路由 | 直接按单 Git 仓路径处理 |
+| 输出字段 | 与普通 Git 仓一致 | 与 Android 一致 |
 
 `cve_list.txt` 示例：
 
@@ -363,6 +526,8 @@ CVE-2024-26635
 `batch-validate` 兼容两种输入：历史 CVE-keyed 格式，以及更适合平台接入的统一 `items[]` 格式。这里的“无补丁/无引入补丁”通常指社区没有 disclosed introduced commit；`batch-validate` 仍然需要本地真实合入修复 `known_fix` 作为验证真值。如果连本地真实修复 commit 也没有，应使用 `analyze` 做可用性判断，而不是做 validate 准确率回放。
 
 Android repo workspace 场景建议保持 `--retries 1`。早期版本会在 `no_data/error` 时隐式最多重跑 3 次，Android 每次都要重新创建 worktree、路由 project、抓取社区 diff、收集真实修复 diff，容易把批量任务放大数倍。现在默认就是 `1`，只有确认是临时网络/IO 抖动时再手动提高。
+
+批量验证会自动复用相同补丁输入的结果：当多个 CVE 的 `known_fix`、`known_prereqs`、`mainline_fix`、`mainline_repo`、`mainline_intro` 完全一致时，只执行一次真实 validate，后续条目在 `live_report.json` 中标记 `batch_cache_reused=true`。这对 Android 月度公告里多个 CVE 共享同一个 frameworks/base 修复 commit 的场景尤其明显。
 
 批量报告里的 `passed/failed` 口径也按“可接受补丁”统计：`identical`、`essentially_same` 一定算可接受；`partially_same` 如果核心相似度和文件覆盖率都足够高，也会归入 passed，避免 Android 场景因为路径、注释或少量上下文差异导致 summary 大量误报 fail。需要逐字一致时继续看 `deterministic_exact_match`。
 

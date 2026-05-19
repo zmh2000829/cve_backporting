@@ -197,6 +197,8 @@ def _default_batch_validate_handler(payload: Dict[str, Any], config):
     git_mgr = cli._make_git_mgr(cfg, target) if workers == 1 else None
     results = []
     errors = []
+    result_cache = {}
+    diff_bundle_cache = {}
 
     def _run_item(idx, item):
         if not isinstance(item, dict):
@@ -210,6 +212,8 @@ def _default_batch_validate_handler(payload: Dict[str, Any], config):
         known_prereqs = cli._coerce_commit_list(item.get("known_prereqs", []))
         cve_info = None
         mainline_fix = (item.get("mainline_fix") or "").strip()
+        intro = ""
+        mainline_repo = ""
         if mainline_fix:
             intro = (item.get("mainline_intro") or "").strip()
             mainline_repo = (item.get("mainline_repo") or item.get("source_repo") or "").strip()
@@ -220,6 +224,24 @@ def _default_batch_validate_handler(payload: Dict[str, Any], config):
                 mainline_fix_repo=mainline_repo,
                 introduced_commits=[{"commit_id": intro, "subject": ""}] if intro else [],
             )
+        cache_key = (
+            target,
+            tuple(known_fix_commits),
+            tuple(known_prereqs),
+            mainline_fix,
+            mainline_repo,
+            intro,
+            bool(deep),
+        )
+        if cache_key in result_cache:
+            result = copy.deepcopy(result_cache[cache_key])
+            source_cve = result.get("cve_id", "")
+            result["cve_id"] = cve_id
+            result["batch_reused_from_cve_id"] = source_cve
+            result.setdefault("performance", {})
+            result["performance"]["batch_cache_reused"] = True
+            result["l0_l5"] = build_l0_l5_view(result)
+            return {"index": idx, "result": result}
 
         local_git_mgr = git_mgr if git_mgr is not None else GitRepoManager(cfg.repositories, use_cache=False)
         result = cli._run_single_validate(
@@ -227,8 +249,10 @@ def _default_batch_validate_handler(payload: Dict[str, Any], config):
             git_mgr=local_git_mgr, show_stages=False, cve_info=cve_info,
             deep=deep,
             known_fixes=known_fix_commits,
+            diff_bundle_cache=diff_bundle_cache,
         )
         result["l0_l5"] = build_l0_l5_view(result)
+        result_cache[cache_key] = copy.deepcopy(result)
         return {"index": idx, "result": result}
 
     if workers == 1:

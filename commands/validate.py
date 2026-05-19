@@ -1,6 +1,7 @@
 """`validate` / `benchmark` / `batch-validate` 命令入口。"""
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import copy
 import json
 import os
 from collections import OrderedDict
@@ -377,8 +378,33 @@ def _make_parallel_git_mgr(config):
     return GitRepoManager(config.repositories, use_cache=False)
 
 
+def _batch_case_cache_key(tv: str, group: dict, deep: bool):
+    cve_info = group.get("cve_info")
+    return (
+        tv,
+        tuple(item.get("commit", "") for item in group.get("all_fixes", []) if item.get("commit")),
+        tuple(item.get("commit", "") for item in group.get("prereq_fixes", []) if item.get("commit")),
+        getattr(cve_info, "mainline_fix_commit", "") if cve_info else "",
+        getattr(cve_info, "mainline_fix_repo", "") if cve_info else "",
+        getattr(cve_info, "introduced_commit_id", "") if cve_info else "",
+        bool(deep),
+    )
+
+
+def _reuse_validate_result(cached_result: dict, cve_id: str) -> dict:
+    result = copy.deepcopy(cached_result or {})
+    source_cve = result.get("cve_id", "")
+    result["cve_id"] = cve_id
+    result["batch_reused_from_cve_id"] = source_cve
+    result.setdefault("performance", {})
+    result["performance"]["batch_cache_reused"] = True
+    if source_cve and source_cve != cve_id:
+        result["performance"]["batch_cache_source_cve_id"] = source_cve
+    return result
+
+
 def _execute_batch_validate_case(runtime, config, tv, cve_id, group, *, deep=False, git_mgr=None, show_stages=False,
-                                 run_id: str = "", retries: int = 1):
+                                 run_id: str = "", retries: int = 1, result_cache=None, diff_bundle_cache=None):
     primary = group["primary_fix"]
     prereqs = group["prereq_fixes"]
     cve_info = group.get("cve_info")
@@ -388,23 +414,31 @@ def _execute_batch_validate_case(runtime, config, tv, cve_id, group, *, deep=Fal
 
     result = None
     case_output_dir = ensure_case_output_dir(config.output.output_dir, run_id or make_run_id(), "batch-validate-case", cve_id)
+    cache_key = _batch_case_cache_key(tv, group, deep)
+    if result_cache is not None and cache_key in result_cache:
+        result = _reuse_validate_result(result_cache[cache_key], cve_id)
+
     max_attempts = max(1, int(retries or 1))
-    for _attempt in range(1, max_attempts + 1):
-        result = runtime._run_single_validate(
-            config, cve_id, tv, primary["commit"], known_prereq_commits,
-            git_mgr=worker_git_mgr, show_stages=show_stages, cve_info=cve_info,
-            deep=deep,
-            output_dir=case_output_dir,
-            run_id=run_id,
-            known_fixes=known_fix_commits,
-        )
-        has_patch = result.get("dryrun_detail", {}).get("has_adapted_patch", False)
-        verdict = result.get("generated_vs_real", {}).get("verdict", "no_data")
-        state = (result.get("result_status") or {}).get("state", "")
-        if has_patch or verdict not in ("no_data", "error"):
-            break
-        if state in ("incomplete", "not_applicable"):
-            break
+    if result is None:
+        for _attempt in range(1, max_attempts + 1):
+            result = runtime._run_single_validate(
+                config, cve_id, tv, primary["commit"], known_prereq_commits,
+                git_mgr=worker_git_mgr, show_stages=show_stages, cve_info=cve_info,
+                deep=deep,
+                output_dir=case_output_dir,
+                run_id=run_id,
+                known_fixes=known_fix_commits,
+                diff_bundle_cache=diff_bundle_cache,
+            )
+            has_patch = result.get("dryrun_detail", {}).get("has_adapted_patch", False)
+            verdict = result.get("generated_vs_real", {}).get("verdict", "no_data")
+            state = (result.get("result_status") or {}).get("state", "")
+            if has_patch or verdict not in ("no_data", "error"):
+                break
+            if state in ("incomplete", "not_applicable"):
+                break
+        if result_cache is not None:
+            result_cache[cache_key] = copy.deepcopy(result)
 
     generated = result.get("generated_vs_real", {})
     solution_set = result.get("solution_set_vs_real", {})
@@ -465,6 +499,8 @@ def _execute_batch_validate_case(runtime, config, tv, cve_id, group, *, deep=Fal
         "prereq_recall": prereq_validation.get("recall", None),
         "summary": "",
         "technical_summary": result.get("summary", ""),
+        "batch_cache_reused": bool((result.get("performance") or {}).get("batch_cache_reused")),
+        "acceptable_patch": is_patch_acceptable(generated),
     }
     item["summary_cn"] = _build_batch_case_summary(item, result)
     item["summary"] = item["summary_cn"]["一句话结论"]
@@ -941,6 +977,8 @@ def run_batch_validate(args, config, runtime):
     passed_list = []
     failed_list = []
     error_list = []
+    result_cache = {}
+    diff_bundle_cache = {}
 
     verdict_icons = {
         "identical": "[green]✔ 完全一致[/]",
@@ -1003,6 +1041,8 @@ def run_batch_validate(args, config, runtime):
                     show_stages=True,
                     run_id=run_id,
                     retries=getattr(args, "retries", 1),
+                    result_cache=result_cache,
+                    diff_bundle_cache=diff_bundle_cache,
                 )
                 ordered_results[ci] = case_out["result"]
                 icon = verdict_icons.get(case_out["verdict"], f"[dim]{case_out['verdict']}[/]")
@@ -1020,10 +1060,20 @@ def run_batch_validate(args, config, runtime):
             _flush_live_report(live_report_path, tv, len(cve_groups), passed_list, failed_list, error_list)
     else:
         runtime.console.print("[dim]并行模式下将关闭单条 Live 阶段面板，避免多 worktree 输出互相覆盖。[/]")
+        pending_duplicates = {}
+        submitted_keys = {}
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="batch-validate") as executor:
             future_map = {}
             for ci, (cve_id, group) in enumerate(entries, 1):
                 _render_case_header(ci, cve_id, group)
+                cache_key = _batch_case_cache_key(tv, group, getattr(args, "deep", False))
+                if cache_key in submitted_keys:
+                    pending_duplicates.setdefault(cache_key, []).append((ci, cve_id, group))
+                    runtime.console.print(
+                        f"  [dim]复用计划[/] [{ci}/{len(cve_groups)}] {cve_id}  "
+                        f"与第 {submitted_keys[cache_key]} 条补丁输入相同"
+                    )
+                    continue
                 future = executor.submit(
                     _execute_batch_validate_case,
                     runtime, config, tv, cve_id, group,
@@ -1032,11 +1082,15 @@ def run_batch_validate(args, config, runtime):
                     show_stages=False,
                     run_id=run_id,
                     retries=getattr(args, "retries", 1),
+                    result_cache=result_cache,
+                    diff_bundle_cache=diff_bundle_cache,
                 )
+                submitted_keys[cache_key] = ci
                 future_map[future] = (ci, cve_id, group)
 
             for future in as_completed(future_map):
                 ci, cve_id, group = future_map[future]
+                cache_key = _batch_case_cache_key(tv, group, getattr(args, "deep", False))
                 try:
                     case_out = future.result()
                     ordered_results[ci] = case_out["result"]
@@ -1048,10 +1102,33 @@ def run_batch_validate(args, config, runtime):
                         passed_list.append(case_out["item"])
                     else:
                         failed_list.append(case_out["item"])
+                    for dci, dcve_id, dgroup in pending_duplicates.pop(cache_key, []):
+                        dup_out = _execute_batch_validate_case(
+                            runtime, config, tv, dcve_id, dgroup,
+                            deep=getattr(args, "deep", False),
+                            git_mgr=None,
+                            show_stages=False,
+                            run_id=run_id,
+                            retries=1,
+                            result_cache=result_cache,
+                            diff_bundle_cache=diff_bundle_cache,
+                        )
+                        ordered_results[dci] = dup_out["result"]
+                        dup_icon = verdict_icons.get(dup_out["verdict"], f"[dim]{dup_out['verdict']}[/]")
+                        runtime.console.print(
+                            f"  [bold cyan]复用[/] [{dci}/{len(cve_groups)}] {dcve_id}  "
+                            f"{dup_icon}  核心相似度={dup_out['core_similarity']:.0%}  方法={dup_out['method']}"
+                        )
+                        if dup_out["bucket"] == "passed":
+                            passed_list.append(dup_out["item"])
+                        else:
+                            failed_list.append(dup_out["item"])
                 except Exception as e:
                     runtime.logger.exception("batch-validate 并行异常: %s %s", cve_id, e)
                     runtime.console.print(f"  [red]✘ 跳过[/] [{ci}/{len(cve_groups)}] {cve_id}  异常: {e}")
                     _record_error(ci, cve_id, group, e)
+                    for dci, dcve_id, dgroup in pending_duplicates.pop(cache_key, []):
+                        _record_error(dci, dcve_id, dgroup, e)
                 _flush_live_report(live_report_path, tv, len(cve_groups), passed_list, failed_list, error_list)
 
     cve_results = [ordered_results[idx] for idx in sorted(ordered_results)]

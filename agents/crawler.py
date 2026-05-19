@@ -11,6 +11,7 @@ import json
 import time
 import base64
 import logging
+import copy
 import requests
 from typing import Dict, List, Optional
 
@@ -36,6 +37,8 @@ class CrawlerAgent:
 
     _PATCH_RETRIES = 3
     _REMOTE_TIMEOUT = 30
+    _PATCH_CACHE = {}
+    _PATCH_CACHE_MAX = 512
 
     def __init__(self, api_timeout: int = 30, git_mgr=None):
         self.api_timeout = api_timeout
@@ -77,11 +80,22 @@ class CrawlerAgent:
         """
         logger.info("[Crawler] 获取 patch %s (local_first=%s, source_repo=%s) ...",
                     commit_id[:12], local_first, source_repo or "")
+        cache_key = (
+            commit_id,
+            target_version or "",
+            bool(local_first),
+            source_repo or "",
+        )
+        cached = self._PATCH_CACHE.get(cache_key)
+        if cached:
+            logger.debug("[Crawler] patch cache 命中: %s", commit_id[:12])
+            return copy.deepcopy(cached)
 
         if local_first and self.git_mgr and target_version:
             patch_local = self._fetch_patch_local(commit_id, target_version)
             if patch_local and patch_local.subject and patch_local.diff_code:
                 logger.info("[Crawler] 本地仓库命中: %s", commit_id[:12])
+                self._remember_patch(cache_key, patch_local)
                 return patch_local
 
         if source_repo:
@@ -91,10 +105,12 @@ class CrawlerAgent:
                 patch_gs = self._adapt_patch_paths_for_repo_target(
                     patch_gs, source_repo, target_version)
             if patch_gs and patch_gs.subject and patch_gs.diff_code:
+                self._remember_patch(cache_key, patch_gs)
                 return patch_gs
 
         patch = self._fetch_from_kernel_org(commit_id)
         if patch and patch.subject and patch.diff_code:
+            self._remember_patch(cache_key, patch)
             return patch
 
         patch_gs = self._fetch_from_googlesource(
@@ -103,22 +119,36 @@ class CrawlerAgent:
             patch_gs = self._adapt_patch_paths_for_repo_target(
                 patch_gs, source_repo, target_version)
         if patch_gs and patch_gs.subject and patch_gs.diff_code:
+            self._remember_patch(cache_key, patch_gs)
             return patch_gs
         if patch_gs:
             patch = self._merge_patch(patch, patch_gs)
         if patch and patch.subject and patch.diff_code:
+            self._remember_patch(cache_key, patch)
             return patch
 
         if self.git_mgr and target_version and not local_first:
             logger.info("[Crawler] 远程不可用, 回退到本地仓库")
             patch_local = self._fetch_patch_local(commit_id, target_version)
             if patch_local:
-                return self._merge_patch(patch, patch_local) if patch else patch_local
+                merged = self._merge_patch(patch, patch_local) if patch else patch_local
+                if merged and merged.subject and merged.diff_code:
+                    self._remember_patch(cache_key, merged)
+                return merged
 
         if patch and (patch.subject or patch.diff_code):
+            self._remember_patch(cache_key, patch)
             return patch
         logger.warning("[Crawler] patch获取失败: %s", commit_id[:12])
         return None
+
+    @classmethod
+    def _remember_patch(cls, key, patch: PatchInfo):
+        if not key or not patch:
+            return
+        if len(cls._PATCH_CACHE) >= cls._PATCH_CACHE_MAX:
+            cls._PATCH_CACHE.pop(next(iter(cls._PATCH_CACHE)), None)
+        cls._PATCH_CACHE[key] = copy.deepcopy(patch)
 
     @staticmethod
     def _merge_patch(base: Optional[PatchInfo], extra: Optional[PatchInfo]) -> Optional[PatchInfo]:
