@@ -127,6 +127,10 @@ class Pipeline:
             return False
         return not bool(self._analysis_cfg("missing_intro_continue_on_fixed_like", False))
 
+    def _should_continue_after_failed_intro_probe(self, probe: SearchResult) -> bool:
+        """When an explicit intro commit was supplied, only strong fix-patch evidence may continue."""
+        return self._intro_probe_verdict(probe) == "vulnerable_like"
+
     def _handle_missing_intro(self, fix_patch: PatchInfo, target_version: str,
                               result: AnalysisResult, stage_cb) -> None:
         policy = str(self._analysis_cfg(
@@ -589,7 +593,7 @@ class Pipeline:
             else:
                 probe = self._probe_missing_intro_by_fix_patch(fix_patch, target_version)
                 original_intro = result.introduced_search
-                if probe.found:
+                if self._should_continue_after_failed_intro_probe(probe):
                     probe.strategy = f"intro_search_failed_{probe.strategy}"
                     probe.candidates.append({
                         "original_intro_search": {

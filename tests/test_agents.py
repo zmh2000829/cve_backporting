@@ -173,6 +173,42 @@ class MissingIntroProbeTests(unittest.TestCase):
         pipe.analysis_config = {"missing_intro_continue_on_fixed_like": True}
         self.assertFalse(pipe._should_skip_patch_production_after_intro(result))
 
+    def test_exact_intro_match_never_skips_patch_production(self):
+        pipe = Pipeline.__new__(Pipeline)
+        pipe.analysis_config = {}
+        result = AnalysisResult("CVE-X", "target")
+        result.introduced_search = SearchResult(
+            found=True,
+            strategy="exact_id",
+            target_commit="abc123",
+            confidence=1.0,
+        )
+        self.assertFalse(pipe._should_skip_patch_production_after_intro(result))
+
+    def test_failed_intro_probe_continues_only_on_vulnerable_like(self):
+        pipe = Pipeline.__new__(Pipeline)
+        pipe.analysis_config = {}
+
+        vulnerable = SearchResult(
+            found=True,
+            strategy="missing_intro_patch_probe",
+            candidates=[{"verdict": "vulnerable_like"}],
+        )
+        uncertain_assume = SearchResult(
+            found=True,
+            strategy="missing_intro_patch_probe_uncertain_assume",
+            candidates=[{"verdict": "uncertain"}],
+        )
+        fixed_like = SearchResult(
+            found=False,
+            strategy="missing_intro_patch_probe_fixed_like",
+            candidates=[{"verdict": "fixed_like"}],
+        )
+
+        self.assertTrue(pipe._should_continue_after_failed_intro_probe(vulnerable))
+        self.assertFalse(pipe._should_continue_after_failed_intro_probe(uncertain_assume))
+        self.assertFalse(pipe._should_continue_after_failed_intro_probe(fixed_like))
+
 
 # ─── Tests ───────────────────────────────────────────────────────────
 
