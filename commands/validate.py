@@ -18,6 +18,7 @@ from core.output_serializers import (
     aggregate_batch_validate_summary,
     build_l0_l5_view,
     collect_rules_metadata,
+    is_patch_acceptable,
 )
 from core.report_schema import build_report_envelope
 from services.output_support import (
@@ -190,6 +191,7 @@ def register(subparsers, parent):
     batch.add_argument("--offset", type=int, default=0, help="跳过前 N 个 CVE, 从第 N+1 个开始 (默认 0)")
     batch.add_argument("--limit", type=int, default=0, help="处理的 CVE 数量 (0=全部, 与 --offset 配合使用)")
     batch.add_argument("--workers", type=int, default=1, help="并行 worker 数 (默认 1，推荐 2，上限 4；--deep 时建议 <=2)")
+    batch.add_argument("--retries", type=int, default=1, help="单条失败后的重试次数 (默认 1；Android repo 场景建议保持 1 以避免重复建 worktree)")
     batch.add_argument("--deep", action="store_true", help="深度分析模式: 漏洞分析+补丁检视+风险收益+合入建议")
     batch.add_argument("--xlsx", action="store_true", help="额外输出 batch-validate XLSX 明细表格 (默认关闭)")
     add_policy_profile_arg(batch)
@@ -376,8 +378,7 @@ def _make_parallel_git_mgr(config):
 
 
 def _execute_batch_validate_case(runtime, config, tv, cve_id, group, *, deep=False, git_mgr=None, show_stages=False,
-                                 run_id: str = ""):
-    pass_verdicts = {"identical", "essentially_same"}
+                                 run_id: str = "", retries: int = 1):
     primary = group["primary_fix"]
     prereqs = group["prereq_fixes"]
     cve_info = group.get("cve_info")
@@ -387,7 +388,8 @@ def _execute_batch_validate_case(runtime, config, tv, cve_id, group, *, deep=Fal
 
     result = None
     case_output_dir = ensure_case_output_dir(config.output.output_dir, run_id or make_run_id(), "batch-validate-case", cve_id)
-    for _attempt in range(1, 4):
+    max_attempts = max(1, int(retries or 1))
+    for _attempt in range(1, max_attempts + 1):
         result = runtime._run_single_validate(
             config, cve_id, tv, primary["commit"], known_prereq_commits,
             git_mgr=worker_git_mgr, show_stages=show_stages, cve_info=cve_info,
@@ -398,7 +400,10 @@ def _execute_batch_validate_case(runtime, config, tv, cve_id, group, *, deep=Fal
         )
         has_patch = result.get("dryrun_detail", {}).get("has_adapted_patch", False)
         verdict = result.get("generated_vs_real", {}).get("verdict", "no_data")
+        state = (result.get("result_status") or {}).get("state", "")
         if has_patch or verdict not in ("no_data", "error"):
+            break
+        if state in ("incomplete", "not_applicable"):
             break
 
     generated = result.get("generated_vs_real", {})
@@ -475,7 +480,8 @@ def _execute_batch_validate_case(runtime, config, tv, cve_id, group, *, deep=Fal
                 item["deep_overall_score"] = round(rb.overall_score, 2)
                 item["deep_overall_detail"] = rb.overall_detail
 
-    if verdict in pass_verdicts:
+    result_state = (result.get("result_status") or {}).get("state", "complete")
+    if is_patch_acceptable(generated) and result_state != "error":
         bucket = "passed"
     else:
         reason = result.get("summary", "")
@@ -936,7 +942,6 @@ def run_batch_validate(args, config, runtime):
     failed_list = []
     error_list = []
 
-    pass_verdicts = {"identical", "essentially_same"}
     verdict_icons = {
         "identical": "[green]✔ 完全一致[/]",
         "essentially_same": "[green]✔ 本质相同[/]",
@@ -997,6 +1002,7 @@ def run_batch_validate(args, config, runtime):
                     git_mgr=git_mgr,
                     show_stages=True,
                     run_id=run_id,
+                    retries=getattr(args, "retries", 1),
                 )
                 ordered_results[ci] = case_out["result"]
                 icon = verdict_icons.get(case_out["verdict"], f"[dim]{case_out['verdict']}[/]")
@@ -1025,6 +1031,7 @@ def run_batch_validate(args, config, runtime):
                     git_mgr=None,
                     show_stages=False,
                     run_id=run_id,
+                    retries=getattr(args, "retries", 1),
                 )
                 future_map[future] = (ci, cve_id, group)
 

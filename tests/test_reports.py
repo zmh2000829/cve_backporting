@@ -404,6 +404,24 @@ class BatchXlsxRegressionTests(unittest.TestCase):
         self.assertEqual(acceptable["主补丁状态"], "本质相同")
         self.assertEqual(acceptable["是否失败"], "否")
 
+    def test_batch_xlsx_marks_high_similarity_partial_as_not_failed(self):
+        rows = build_batch_validate_xlsx_rows([{
+            "cve_id": "CVE-PARTIAL-OK",
+            "known_fix": "abc123",
+            "dryrun_detail": {"apply_method": "verified-direct"},
+            "level_decision": {"level": "L2", "base_level": "L2", "rule_hits": []},
+            "generated_vs_real": {
+                "verdict": "partially_same",
+                "core_similarity": 0.82,
+                "file_coverage": 1.0,
+                "deterministic_exact_match": False,
+            },
+            "result_status": {"state": "complete"},
+        }])
+
+        self.assertEqual(rows[0]["主补丁状态"], "部分一致")
+        self.assertEqual(rows[0]["是否失败"], "否")
+
     def test_batch_xlsx_ai_rows_extract_task_details(self):
         rows = build_batch_validate_ai_xlsx_rows(self._sample_results())
 

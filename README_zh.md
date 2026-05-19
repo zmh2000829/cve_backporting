@@ -356,10 +356,15 @@ CVE-2024-26635
 | 全量验证 | `python cli.py batch-validate --file cve_data.json --target 5.10-hulk` |
 | 截取样本 | `python cli.py batch-validate --file cve_data.json --target 5.10-hulk --offset 10 --limit 20` |
 | 推荐并行 | `python cli.py batch-validate --file cve_data.json --target 5.10-hulk --workers 2` |
+| Android 提速 | `python cli.py batch-validate --file cve_data.json --target android-14 --workers 2 --retries 1` |
 | 深度批量验证 | `python cli.py batch-validate --file cve_data.json --target 5.10-hulk --workers 2 --deep` |
 | 输出 Excel 明细 | `python cli.py batch-validate --file cve_data.json --target 5.10-hulk --xlsx` |
 
 `batch-validate` 兼容两种输入：历史 CVE-keyed 格式，以及更适合平台接入的统一 `items[]` 格式。这里的“无补丁/无引入补丁”通常指社区没有 disclosed introduced commit；`batch-validate` 仍然需要本地真实合入修复 `known_fix` 作为验证真值。如果连本地真实修复 commit 也没有，应使用 `analyze` 做可用性判断，而不是做 validate 准确率回放。
+
+Android repo workspace 场景建议保持 `--retries 1`。早期版本会在 `no_data/error` 时隐式最多重跑 3 次，Android 每次都要重新创建 worktree、路由 project、抓取社区 diff、收集真实修复 diff，容易把批量任务放大数倍。现在默认就是 `1`，只有确认是临时网络/IO 抖动时再手动提高。
+
+批量报告里的 `passed/failed` 口径也按“可接受补丁”统计：`identical`、`essentially_same` 一定算可接受；`partially_same` 如果核心相似度和文件覆盖率都足够高，也会归入 passed，避免 Android 场景因为路径、注释或少量上下文差异导致 summary 大量误报 fail。需要逐字一致时继续看 `deterministic_exact_match`。
 
 无 introduced commit 的 Android 样例：
 
@@ -479,6 +484,7 @@ python cli.py batch-validate \
   --file <CVE_DATA_JSON> \
   --target <TARGET_ALIAS> \
   [--workers 2] \
+  [--retries 1] \
   [--offset 0] \
   [--limit 50] \
   [--policy-profile <balanced|conservative>] \

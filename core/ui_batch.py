@@ -7,6 +7,8 @@ from rich.table import Table
 from rich.text import Text
 from rich import box
 
+from core.output_serializers import is_patch_acceptable
+
 
 def _ratio_bar(rate: float, width: int = 26) -> str:
     rate = 0.0 if rate is None else max(0.0, min(float(rate), 1.0))
@@ -277,7 +279,10 @@ def render_batch_validate_report(results: list, target: str, policy_config=None)
             if isinstance(hit, dict):
                 warning_counter[hit.get("severity", "info")] += 1
 
-    accurate = verdict_counts.get("identical", 0) + verdict_counts.get("essentially_same", 0)
+    accurate = sum(
+        1 for result in results
+        if is_patch_acceptable((result.get("generated_vs_real", {}) or {}))
+    )
     accuracy_rate = accurate / total if total else 0
     deterministic_exact = sum(
         1 for result in results
@@ -309,7 +314,7 @@ def render_batch_validate_report(results: list, target: str, policy_config=None)
     summary.add_row(
         "[bold]补丁生成准确率[/]",
         f"[{accuracy_color} bold]{accurate}/{total}  ({accuracy_rate:.1%})[/{accuracy_color} bold]"
-        f"  [dim](identical + essentially_same)[/]",
+        f"  [dim](可接受补丁)[/]",
     )
     summary.add_row(
         "100% 正确补丁数",

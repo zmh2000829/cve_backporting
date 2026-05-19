@@ -830,6 +830,34 @@ int foo(void) {
         self.assertEqual(summary["level_accuracy"]["final_levels"]["L0"]["pass_rate"], 1.0)
         self.assertEqual(summary["level_accuracy"]["final_levels"]["L3"]["total"], 1)
 
+    def test_batch_summary_treats_high_similarity_partial_as_acceptable(self):
+        summary = aggregate_batch_validate_summary([
+            {
+                "cve_id": "CVE-PARTIAL-OK",
+                "overall_pass": False,
+                "dryrun_detail": {"apply_method": "verified-direct"},
+                "level_decision": {"level": "L2", "base_level": "L2"},
+                "generated_vs_real": {
+                    "verdict": "partially_same",
+                    "core_similarity": 0.86,
+                    "file_coverage": 1.0,
+                    "deterministic_exact_match": False,
+                },
+                "validation_details": {
+                    "strategy_buckets": {"dependency_bucket": "independent"},
+                    "special_risk_report": {"summary": {"triggered_sections": [], "has_critical_structure_change": False}},
+                },
+            },
+        ])
+
+        self.assertEqual(summary["strategy_effectiveness"]["counts"]["Verified-Direct"], 1)
+        rows = {
+            row["strategy"]: row
+            for row in summary["strategy_effectiveness"]["strategies"]
+        }
+        self.assertEqual(rows["Verified-Direct"]["acceptable_patch"], 1)
+        self.assertEqual(summary["level_accuracy"]["final_levels"]["L2"]["acceptable_patch"], 1)
+
     def test_batch_summary_tracks_promotion_rules(self):
         summary = aggregate_batch_validate_summary([
             {
@@ -942,6 +970,57 @@ int foo(void) {
         self.assertEqual(case_out["bucket"], "passed")
         self.assertEqual(case_out["verdict"], "identical")
         self.assertEqual(case_out["item"]["solution_set_verdict"], "different")
+
+    def test_batch_case_accepts_high_similarity_partial_and_respects_retry_count(self):
+        tmpdir = tempfile.mkdtemp(prefix="batch-case-")
+        calls = {"count": 0}
+        try:
+            def _fake_validate(*args, **kwargs):
+                calls["count"] += 1
+                return {
+                    "cve_id": "CVE-PARTIAL",
+                    "generated_vs_real": {
+                        "verdict": "partially_same",
+                        "core_similarity": 0.82,
+                        "file_coverage": 1.0,
+                        "deterministic_exact_match": False,
+                    },
+                    "solution_set_vs_real": {},
+                    "dryrun_detail": {"has_adapted_patch": True, "apply_method": "verified-direct"},
+                    "validation_details": {
+                        "strategy_buckets": {"dependency_bucket": "independent"},
+                        "special_risk_report": {"summary": {"triggered_sections": [], "has_critical_structure_change": False}},
+                    },
+                    "analysis_framework": {
+                        "conclusion": {
+                            "direct_backport": {"status": "review"},
+                            "prerequisite": {"status": "independent"},
+                            "risk": {"status": "attention"},
+                        }
+                    },
+                    "result_status": {"state": "complete"},
+                    "summary": "核心修改高度一致，仅存在少量差异",
+                    "tool_prereqs": [],
+                }
+
+            runtime = SimpleNamespace(_run_single_validate=_fake_validate)
+            config = SimpleNamespace(output=SimpleNamespace(output_dir=tmpdir))
+            group = {
+                "primary_fix": {"commit": "aaa111", "subject": "fix"},
+                "prereq_fixes": [],
+                "all_fixes": [{"commit": "aaa111"}],
+            }
+            case_out = validate_cmd._execute_batch_validate_case(
+                runtime, config, "android-14", "CVE-PARTIAL", group,
+                git_mgr=object(), run_id="run1", retries=1,
+            )
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir)
+
+        self.assertEqual(calls["count"], 1)
+        self.assertEqual(case_out["bucket"], "passed")
+        self.assertEqual(case_out["verdict"], "partially_same")
 
     def test_find_rollback_commit_uses_earliest_fix_or_prereq(self):
         class _Git:

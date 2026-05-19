@@ -22,6 +22,30 @@ STRATEGY_FAMILY_ORDER = [
 ]
 
 PATCH_ACCEPTABLE_VERDICTS = {"identical", "essentially_same"}
+PATCH_PARTIAL_ACCEPTABLE_CORE_THRESHOLD = 0.70
+PATCH_PARTIAL_ACCEPTABLE_FILE_COVERAGE_THRESHOLD = 0.70
+
+
+def is_patch_acceptable(generated: dict) -> bool:
+    """Return whether generated_vs_real is acceptable for batch reporting.
+
+    `partially_same` can still be acceptable when most core +/- lines and files
+    match. This keeps batch summaries aligned with single validate, where a high
+    similarity partial match is not treated as a hard failure.
+    """
+    if not isinstance(generated, dict):
+        return False
+    verdict = generated.get("verdict", "")
+    if verdict in PATCH_ACCEPTABLE_VERDICTS:
+        return True
+    if verdict != "partially_same":
+        return False
+    core = float(generated.get("core_similarity", 0.0) or 0.0)
+    coverage = float(generated.get("file_coverage", 1.0) or 0.0)
+    return (
+        core >= PATCH_PARTIAL_ACCEPTABLE_CORE_THRESHOLD
+        and coverage >= PATCH_PARTIAL_ACCEPTABLE_FILE_COVERAGE_THRESHOLD
+    )
 
 
 def coerce_commit_url_base(value: str) -> str:
@@ -471,7 +495,7 @@ def aggregate_strategy_effectiveness(results: list) -> dict:
             pass_counts[family] += 1
 
         generated = normalized.get("generated_vs_real") or {}
-        if generated.get("verdict") in PATCH_ACCEPTABLE_VERDICTS:
+        if is_patch_acceptable(generated):
             acceptable_counts[family] += 1
         if generated.get("deterministic_exact_match"):
             exact_counts[family] += 1
@@ -549,7 +573,7 @@ def aggregate_level_accuracy(results: list) -> dict:
         verdict = (normalized.get("generated_vs_real") or {}).get("verdict", "")
         exact = bool((normalized.get("generated_vs_real") or {}).get("deterministic_exact_match"))
         passed = bool(normalized.get("overall_pass"))
-        acceptable = verdict in PATCH_ACCEPTABLE_VERDICTS
+        acceptable = is_patch_acceptable(normalized.get("generated_vs_real") or {})
 
         for bucket, level in ((final_stats, current_level), (base_stats, base_level)):
             if level not in bucket:
@@ -579,7 +603,7 @@ def aggregate_level_accuracy(results: list) -> dict:
         "base_levels": _finalize(base_stats),
         "definitions": {
             "pass_rate": "overall_pass == true",
-            "acceptable_patch_rate": "generated_vs_real.verdict in {identical, essentially_same}",
+            "acceptable_patch_rate": "generated_vs_real.verdict in {identical, essentially_same}, or partially_same with high core similarity and file coverage",
             "exact_match_rate": "generated_vs_real.deterministic_exact_match == true",
         },
     }

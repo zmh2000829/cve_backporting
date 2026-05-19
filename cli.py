@@ -805,10 +805,19 @@ def _combine_patch_texts(parts) -> str:
     return "\n".join(chunks).strip()
 
 
-def _collect_commit_diff_bundle(config, git_mgr, tv, commit_ids):
+def _collect_commit_diff_bundle(config, git_mgr, tv, commit_ids, cache=None):
     details = []
     diffs = []
     for commit_id in _dedupe_commit_list(commit_ids):
+        cache_key = (tv, commit_id)
+        if cache is not None and cache_key in cache:
+            cached = cache[cache_key]
+            details.append(dict(cached.get("detail", {})))
+            diff_text = cached.get("diff", "")
+            if diff_text:
+                diffs.append(diff_text)
+            continue
+
         meta = git_mgr.run_git(
             ["git", "show", "--stat", "--format=%H%n%s%n%an", commit_id],
             tv, timeout=30)
@@ -828,6 +837,11 @@ def _collect_commit_diff_bundle(config, git_mgr, tv, commit_ids):
         raw = git_mgr.run_git(["git", "show", "--format=", commit_id], tv, timeout=30)
         diff_text = raw.strip() if raw else ""
         detail["diff_lines"] = len(diff_text.splitlines()) if diff_text else 0
+        if cache is not None:
+            cache[cache_key] = {
+                "detail": dict(detail),
+                "diff": diff_text,
+            }
         details.append(detail)
         if diff_text:
             diffs.append(diff_text)
@@ -1938,10 +1952,16 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
 
         emit_stage("validate_collect", "running", "收集 known_fix / known_prereq / actual solution diff")
 
-        # 获取 known_fix 的完整信息(stat + diff)
-        primary_fix_bundle = _collect_commit_diff_bundle(config, git_mgr, tv, [primary_known_fix])
-        known_fix_bundle = _collect_commit_diff_bundle(config, git_mgr, tv, known_fix_commits)
-        actual_solution_bundle = _collect_commit_diff_bundle(config, git_mgr, tv, actual_solution_commits)
+        # 获取 known_fix 的完整信息(stat + diff)。同一条 validate 内多个
+        # bundle 会重复引用 primary/known/actual commit，Android repo 下
+        # git show 成本高，使用本地缓存避免重复查询。
+        diff_bundle_cache = {}
+        primary_fix_bundle = _collect_commit_diff_bundle(
+            config, git_mgr, tv, [primary_known_fix], cache=diff_bundle_cache)
+        known_fix_bundle = _collect_commit_diff_bundle(
+            config, git_mgr, tv, known_fix_commits, cache=diff_bundle_cache)
+        actual_solution_bundle = _collect_commit_diff_bundle(
+            config, git_mgr, tv, actual_solution_commits, cache=diff_bundle_cache)
         known_fix_details = known_fix_bundle["details"]
         actual_solution_details = actual_solution_bundle["details"]
         known_fix_detail = known_fix_details[0] if known_fix_details else {}
@@ -1970,7 +1990,8 @@ def _run_single_validate(config, cve_id, tv, known_fix, known_prereqs,
             if getattr(p, "grade", "") in ("strong", "medium")
         ]
         compare_tool_prereq_bundle = _collect_commit_diff_bundle(
-            config, git_mgr, tv, [p.commit_id for p in compare_tool_prereqs]
+            config, git_mgr, tv, [p.commit_id for p in compare_tool_prereqs],
+            cache=diff_bundle_cache,
         )
 
         known_prereqs_detail = []

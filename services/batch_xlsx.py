@@ -14,7 +14,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 from xml.sax.saxutils import escape
 from zipfile import ZIP_DEFLATED, ZipFile
 
-from core.output_serializers import PATCH_ACCEPTABLE_VERDICTS, build_l0_l5_view
+from core.output_serializers import build_l0_l5_view, is_patch_acceptable
 from rules.level_policies import effective_level_floor, level_rank
 
 
@@ -336,7 +336,7 @@ def build_batch_validate_xlsx_rows(results: Iterable[dict]) -> List[Dict]:
         base_level = level_view.get("base_level", "")
         current_level = level_view.get("current_level", "")
         promoted = bool(base_level and current_level and level_rank(current_level) > level_rank(base_level))
-        failed = verdict not in PATCH_ACCEPTABLE_VERDICTS or result_state == "error"
+        failed = not is_patch_acceptable(generated) or result_state == "error"
         critical_structure, special_sections = _extract_special_risk(result)
         direct_status, prereq_status, risk_status = _extract_conclusion_statuses(result)
         upgrade_path = f"{base_level}->{current_level}" if base_level and current_level and promoted else ""
@@ -406,7 +406,7 @@ def _summary_rows(target: str, rows: List[Dict], batch_summary: Optional[dict], 
         ["生成时间", generated_at, ""],
         ["样本总数", total, "本次 batch-validate 产生的 CVE 结果数"],
         ["完全一致", exact, "主补丁状态为完全一致"],
-        ["可接受补丁", acceptable, "补丁判定 in {identical, essentially_same}"],
+        ["可接受补丁", acceptable, "identical / essentially_same，或高相似度 partially_same"],
         ["有升级", promoted, "最终级别高于 DryRun 基线级别"],
         ["失败", failed, "补丁判定不在可接受集合，或结果状态为 error"],
         ["AI启用样本", ai_enabled, "存在 validation/dryrun ai_evidence 的 CVE 数"],
